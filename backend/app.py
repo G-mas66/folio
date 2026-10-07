@@ -30,13 +30,14 @@ from . import ai, free_translation
 from .ai import AIError
 from .free_translation import FreeTranslationError
 from .db import FOLDER_COLORS, connect, data_root, initialize, library_root
-from .pdf_extract import PDFProblem, extract_pdf, safe_pdf_name
+from .pdf_extract import PDFProblem, detect_source_language, extract_pdf, safe_pdf_name
 
 app = FastAPI(title="Personal Paper Workbench", docs_url=None, redoc_url=None, openapi_url=None)
 worker_task: asyncio.Task | None = None
 worker_wakeup = asyncio.Event()
 pdf_processes: dict[str, asyncio.subprocess.Process] = {}
 paper_ai_tasks: dict[str, set[asyncio.Task]] = {}
+session_ai_tasks: dict[str, set[asyncio.Task]] = {}
 chat_streams: dict[str, dict[str, Any]] = {}
 
 LATEX_ANSWER_RULES = r"公式请使用 LaTeX 数学格式：行内公式写作 `$...$`。块公式请让两个 `$$` 定界符各自独占一行，公式内容写在两行之间。使用标准 LaTeX 语法，例如求和 `\sum_{i=1}^n`、分数 `\frac{a}{b}`，并正确标记下标 `x_i` 与上标 `x^2`。只调整书写格式，保留原公式的数字、符号和数学含义。不要用普通文字、粗体伪公式或 Unicode 数学符号（如 `Σ_i`）替代公式。"
@@ -63,6 +64,38 @@ def require_paper(paper_id: str):
     if not row:
         raise HTTPException(status_code=404, detail="找不到这篇文献。")
     return row
+
+
+def ensure_chat_session(paper_id: str, session_id: str | None = None):
+    with connect() as db:
+        if session_id:
+            row = db.execute(
+                "SELECT id, paper_id, title, created_at FROM chat_sessions WHERE id = ? AND paper_id = ?",
+                (session_id, paper_id),
+            ).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="找不到这段文献对话。")
+            return row
+        rows = db.execute(
+            "SELECT id, paper_id, title, created_at, is_default FROM chat_sessions WHERE paper_id = ? ORDER BY is_default DESC, created_at, id",
+            (paper_id,),
+        ).fetchall()
+        if not rows:
+            paper = db.execute("SELECT created_at FROM papers WHERE id = ?", (paper_id,)).fetchone()
+            if not paper:
+                raise HTTPException(status_code=404, detail="找不到这篇文献。")
+            session_id = uuid.uuid4().hex
+            db.execute(
+                "INSERT INTO chat_sessions(id, paper_id, title, is_default, created_at) VALUES (?, ?, '对话 1', 1, ?)",
+                (session_id, paper_id, paper["created_at"] or now()),
+            )
+            return db.execute(
+                "SELECT id, paper_id, title, created_at FROM chat_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+        default = next((row for row in rows if row["is_default"]), rows[0])
+        if not default["is_default"]:
+            db.execute("UPDATE chat_sessions SET is_default = 1 WHERE id = ?", (default["id"],))
+        return default
 
 
 def require_folder(folder_id: str):
@@ -114,9 +147,14 @@ def paper_view(paper) -> dict[str, Any]:
         ).fetchall()
         usage = db.execute("SELECT SUM(total_tokens) FROM api_usage WHERE paper_id = ?", (paper["id"],)).fetchone()[0]
     total, done = int(counts[0] or 0), int(counts[1] or 0)
+    language = paper["source_language"]
+    original_path = stored_file_path(paper, paper["file_name"])
     mono_path = stored_file_path(paper, paper["mono_pdf_file_name"])
     dual_path = stored_file_path(paper, paper["dual_pdf_file_name"])
-    pdf_ready = bool(mono_path and mono_path.is_file() and dual_path and dual_path.is_file())
+    if language == "zh":
+        pdf_ready = bool(original_path and original_path.is_file())
+    else:
+        pdf_ready = bool(mono_path and mono_path.is_file() and dual_path and dual_path.is_file())
     diagnostics = [
         {"page": p["page_no"], "status": p["extraction_status"], "text_chars": p["text_chars"]}
         for p in pages if p["extraction_status"] not in {"text", "blank"}
@@ -128,6 +166,7 @@ def paper_view(paper) -> dict[str, Any]:
         "status": paper["status"], "error": paper["error"], "created_at": paper["created_at"],
         "last_page": paper["last_page"], "segment_total": total, "segment_done": done,
         "can_read": paper["status"] == "completed" and pdf_ready,
+        "source_language": language,
         "mono_pdf_file_name": paper["mono_pdf_file_name"], "dual_pdf_file_name": paper["dual_pdf_file_name"],
         "pdf_progress": paper["pdf_progress"],
         "model_override": paper["model_override"],
@@ -142,9 +181,12 @@ def store_status(paper_id: str, status: str, error: str = "") -> None:
 
 
 async def tracked_to_thread(tracked_paper_id: str, function, *args, **kwargs):
+    tracked_session_id = kwargs.pop("tracked_session_id", None)
     task = asyncio.current_task()
     if task:
         paper_ai_tasks.setdefault(tracked_paper_id, set()).add(task)
+        if tracked_session_id:
+            session_ai_tasks.setdefault(tracked_session_id, set()).add(task)
     try:
         return await asyncio.to_thread(function, *args, **kwargs)
     finally:
@@ -154,10 +196,19 @@ async def tracked_to_thread(tracked_paper_id: str, function, *args, **kwargs):
                 tasks.discard(task)
                 if not tasks:
                     paper_ai_tasks.pop(tracked_paper_id, None)
+            if tracked_session_id:
+                tasks = session_ai_tasks.get(tracked_session_id)
+                if tasks:
+                    tasks.discard(task)
+                    if not tasks:
+                        session_ai_tasks.pop(tracked_session_id, None)
 
 
 def schedule(paper_id: str) -> None:
     paper = require_paper(paper_id)
+    if paper["source_language"] == "zh":
+        complete_chinese_paper(paper_id)
+        return
     with connect() as db:
         blocking = db.execute(
             "SELECT COUNT(*) FROM pages WHERE paper_id = ? AND extraction_status IN ('needs_ocr', 'needs_attention')", (paper_id,)
@@ -172,6 +223,69 @@ def schedule(paper_id: str) -> None:
             return
         db.execute("UPDATE papers SET status = 'queued', error = '', pdf_progress = 0, updated_at = ? WHERE id = ?", (now(), paper_id))
     worker_wakeup.set()
+
+
+def complete_chinese_paper(paper_id: str) -> None:
+    paper = require_paper(paper_id)
+    with connect() as db:
+        blockers = db.execute(
+            "SELECT COUNT(*) FROM pages WHERE paper_id = ? AND extraction_status IN ('needs_ocr', 'needs_attention')",
+            (paper_id,),
+        ).fetchone()[0]
+        total = db.execute("SELECT COUNT(*) FROM segments WHERE paper_id = ?", (paper_id,)).fetchone()[0]
+        original = stored_file_path(paper, paper["file_name"])
+        if blockers:
+            db.execute("UPDATE papers SET status = 'needs_attention', error = ?, updated_at = ? WHERE id = ?", ("部分页面含未提取内容，无法确认全文可读。", now(), paper_id))
+        elif not total or not original or not original.is_file():
+            db.execute("UPDATE papers SET status = 'needs_ocr', error = ?, updated_at = ? WHERE id = ?", ("没有可读取的原文正文。", now(), paper_id))
+        else:
+            db.execute("UPDATE papers SET status = 'completed', error = '', updated_at = ? WHERE id = ?", (now(), paper_id))
+
+
+def classify_stored_paper(paper_id: str) -> str:
+    paper = require_paper(paper_id)
+    path = stored_file_path(paper, paper["file_name"])
+    if not path or not path.is_file():
+        return "unknown"
+    try:
+        extracted = extract_pdf(path)
+    except PDFProblem:
+        return "unknown"
+    language = extracted["source_language"]
+    if language != "zh":
+        with connect() as db:
+            db.execute("UPDATE papers SET source_language = ? WHERE id = ? AND source_language = 'unknown'", (language, paper_id))
+        return language
+
+    title = extracted["chinese_title"].strip() or paper["chinese_title"].strip() or Path(paper["source_name"]).stem
+    english_title = extracted["english_title"].strip() or paper["english_title"].strip() or title
+    blockers = [page for page in extracted["pages"] if page["status"] in {"needs_ocr", "needs_attention"}]
+    if blockers:
+        status = "needs_attention"
+        error = "以下页面含可见内容但未能完整提取，不能标记全文完成：" + "、".join(str(page["page_no"]) for page in blockers)
+    elif not extracted["segments"]:
+        status, error = "needs_ocr", "未提取到可读取的正文文字。"
+    else:
+        status, error = "completed", ""
+    with connect() as db:
+        db.execute(
+            "UPDATE papers SET source_language = 'zh', english_title = ?, chinese_title = ?, title_confident = 1, mono_pdf_file_name = '', dual_pdf_file_name = '', pdf_progress = 0, status = ?, error = ?, updated_at = ? WHERE id = ?",
+            (english_title, title, status, error, now(), paper_id),
+        )
+        for page in extracted["pages"]:
+            db.execute(
+                "INSERT INTO pages(paper_id, page_no, extraction_status, text_chars) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(paper_id, page_no) DO UPDATE SET extraction_status = excluded.extraction_status, text_chars = excluded.text_chars",
+                (paper_id, page["page_no"], page["status"], page["text_chars"]),
+            )
+        if not db.execute("SELECT 1 FROM segments WHERE paper_id = ? LIMIT 1", (paper_id,)).fetchone():
+            db.executemany(
+                "INSERT INTO segments(paper_id, sequence_no, start_page, end_page, original_text) VALUES (?, ?, ?, ?, ?)",
+                [(paper_id, index, segment["start_page"], segment["end_page"], segment["original_text"]) for index, segment in enumerate(extracted["segments"], 1)],
+            )
+    if title != paper["chinese_title"]:
+        rename_paper(paper_id, title)
+    return "zh"
 
 
 def unique_name(paper_id: str, title: str, fallback: str) -> str:
@@ -211,6 +325,9 @@ def import_pdf(source_value: str, folder_id: str | None = None) -> dict:
     with connect() as db:
         duplicate = db.execute("SELECT * FROM papers WHERE source_hash = ?", (file_hash,)).fetchone()
     if duplicate:
+        if duplicate["source_language"] == "unknown":
+            classify_stored_paper(duplicate["id"])
+            duplicate = require_paper(duplicate["id"])
         return {"duplicate": True, "paper": paper_view(duplicate)}
     try:
         extracted = extract_pdf(source)
@@ -220,7 +337,11 @@ def import_pdf(source_value: str, folder_id: str | None = None) -> dict:
     paper_id = uuid.uuid4().hex
     folder = library_root() / paper_id
     folder.mkdir(parents=True, exist_ok=False)
-    file_name = safe_pdf_name("", source.stem, paper_id[:6])
+    source_language = extracted["source_language"]
+    chinese_title = (extracted["chinese_title"] or source.stem) if source_language == "zh" else ""
+    english_title = extracted["english_title"] or chinese_title
+    title_confident = extracted["title_confident"] or source_language == "zh"
+    file_name = safe_pdf_name(chinese_title, source.stem, paper_id[:6])
     try:
         shutil.copy2(source, folder / file_name)
         blockers = [p for p in extracted["pages"] if p["status"] in {"needs_ocr", "needs_attention"}]
@@ -229,14 +350,16 @@ def import_pdf(source_value: str, folder_id: str | None = None) -> dict:
             error = "以下页面含可见内容但未能完整提取，不能标记全文完成：" + "、".join(str(p["page_no"]) for p in blockers)
         elif not extracted["segments"]:
             status, error = "needs_ocr", "未提取到可翻译的正文文字。"
-        elif not extracted["title_confident"]:
+        elif source_language == "zh":
+            status, error = "completed", ""
+        elif not title_confident:
             status, error = "needs_title", "请确认英文标题后开始翻译。"
         else:
             status, error = "queued", ""
         with connect() as db:
             db.execute(
-                "INSERT INTO papers(id, source_hash, source_name, file_name, english_title, title_confident, page_count, status, error, created_at, updated_at, folder_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (paper_id, file_hash, source.name, file_name, extracted["english_title"], int(extracted["title_confident"]), extracted["page_count"], status, error, now(), now(), folder_id),
+                "INSERT INTO papers(id, source_hash, source_name, file_name, english_title, chinese_title, source_language, title_confident, page_count, status, error, created_at, updated_at, folder_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (paper_id, file_hash, source.name, file_name, english_title, chinese_title, source_language, int(title_confident), extracted["page_count"], status, error, now(), now(), folder_id),
             )
             db.executemany(
                 "INSERT INTO pages(paper_id, page_no, extraction_status, text_chars) VALUES (?, ?, ?, ?)",
@@ -426,6 +549,14 @@ async def translate_paper(paper_id: str) -> None:
     paper = get_paper_row(paper_id)
     if not paper or paper["status"] != "translating":
         return
+    if paper["source_language"] == "unknown":
+        language = await asyncio.to_thread(classify_stored_paper, paper_id)
+        paper = get_paper_row(paper_id)
+        if language == "zh":
+            return
+    if paper["source_language"] == "zh":
+        complete_chinese_paper(paper_id)
+        return
     if not paper["title_confident"] or not paper["english_title"].strip():
         store_status(paper_id, "needs_title", "请确认英文标题后继续处理。")
         return
@@ -451,7 +582,7 @@ async def queue_loop() -> None:
         worker_wakeup.clear()
         while True:
             with connect() as db:
-                row = db.execute("SELECT id FROM papers WHERE status = 'queued' ORDER BY created_at LIMIT 1").fetchone()
+                row = db.execute("SELECT id FROM papers WHERE status = 'queued' AND source_language <> 'zh' ORDER BY created_at LIMIT 1").fetchone()
                 if row:
                     updated = db.execute(
                         "UPDATE papers SET status = 'translating', updated_at = ? WHERE id = ? AND status = 'queued'",
@@ -469,11 +600,22 @@ async def startup() -> None:
     global worker_task
     initialize()
     with connect() as db:
-        db.execute("UPDATE segments SET status = 'pending' WHERE status = 'translating'")
-        db.execute("UPDATE papers SET status = 'queued', error = '', updated_at = ? WHERE status IN ('translating', 'checking', 'waiting_api')", (now(),))
+        legacy = db.execute(
+            "SELECT * FROM papers WHERE source_language = 'unknown' AND (status IN ('queued', 'translating', 'checking', 'waiting_api') OR (status = 'completed' AND (mono_pdf_file_name = '' OR dual_pdf_file_name = '')))",
+        ).fetchall()
+        chinese_active = db.execute(
+            "SELECT id FROM papers WHERE source_language = 'zh' AND status IN ('queued', 'translating', 'checking', 'waiting_api')",
+        ).fetchall()
+    for row in legacy:
+        await asyncio.to_thread(classify_stored_paper, row["id"])
+    for row in chinese_active:
+        complete_chinese_paper(row["id"])
+    with connect() as db:
+        db.execute("UPDATE segments SET status = 'pending' WHERE status = 'translating' AND paper_id IN (SELECT id FROM papers WHERE source_language <> 'zh')")
+        db.execute("UPDATE papers SET status = 'queued', error = '', updated_at = ? WHERE status IN ('translating', 'checking', 'waiting_api') AND source_language <> 'zh'", (now(),))
         db.execute("UPDATE analysis_runs SET status = 'interrupted', error = '应用已重启，可继续未完成步骤。', updated_at = ? WHERE status = 'running'", (now(),))
         db.execute("UPDATE analysis_chunks SET status = 'pending' WHERE status = 'running'")
-        completed = db.execute("SELECT * FROM papers WHERE status = 'completed'").fetchall()
+        completed = db.execute("SELECT * FROM papers WHERE status = 'completed' AND source_language <> 'zh'").fetchall()
         for paper in completed:
             mono = stored_file_path(paper, paper["mono_pdf_file_name"])
             dual = stored_file_path(paper, paper["dual_pdf_file_name"])
@@ -482,7 +624,7 @@ async def startup() -> None:
                     "UPDATE papers SET status = 'queued', error = '', pdf_progress = 0, updated_at = ? WHERE id = ?",
                     (now(), paper["id"]),
                 )
-        pending = db.execute("SELECT 1 FROM papers WHERE status = 'queued' LIMIT 1").fetchone()
+        pending = db.execute("SELECT 1 FROM papers WHERE status = 'queued' AND source_language <> 'zh' LIMIT 1").fetchone()
     worker_task = asyncio.create_task(queue_loop())
     if pending:
         worker_wakeup.set()
@@ -503,6 +645,7 @@ class SettingsInput(BaseModel):
     model: str
     api_key: str = ""
     models_url: str | None = None
+    protocol: Literal["openai_chat_completions", "openai_responses", "custom_chat_completions"] | None = None
 
 
 class WebSearchInput(BaseModel):
@@ -556,6 +699,10 @@ def derive_models_url(value: str) -> str:
         path = path[:-len("/chat/completions/")] + "/models"
     elif folded.endswith("/chat/completions"):
         path = path[:-len("/chat/completions")] + "/models"
+    elif folded.endswith("/responses/"):
+        path = path[:-len("/responses/")] + "/models"
+    elif folded.endswith("/responses"):
+        path = path[:-len("/responses")] + "/models"
     elif folded.endswith("/models/") or folded.endswith("/models"):
         pass
     else:
@@ -637,6 +784,7 @@ class TitleInput(BaseModel):
 class ChatInput(BaseModel):
     question: str
     model: str | None = None
+    session_id: str | None = None
 
 
 class StreamChatInput(ChatInput):
@@ -646,6 +794,7 @@ class StreamChatInput(ChatInput):
 
 class StreamRequestInput(BaseModel):
     request_id: str
+    session_id: str | None = None
 
 
 class ModelOptionsInput(BaseModel):
@@ -689,11 +838,12 @@ class AnnotationPatchInput(BaseModel):
 @app.get("/settings", dependencies=[Depends(authorize)])
 def get_settings():
     with connect() as db:
-        row = db.execute("SELECT base_url, model, model_options_json, models_url, web_search_enabled FROM settings WHERE id = 1").fetchone()
+        row = db.execute("SELECT base_url, model, protocol, model_options_json, models_url, web_search_enabled FROM settings WHERE id = 1").fetchone()
         total = db.execute("SELECT SUM(total_tokens) FROM api_usage").fetchone()[0]
     return {
         "base_url": row["base_url"] if row else "",
         "model": row["model"] if row else "",
+        "protocol": row["protocol"] if row else "openai_chat_completions",
         "model_options": json.loads(row["model_options_json"] or "[]") if row else [],
         "models_url": row["models_url"] if row else "",
         "web_search_enabled": bool(row["web_search_enabled"]) if row else True,
@@ -721,8 +871,10 @@ def put_settings(value: SettingsInput):
     base_url = value.base_url.strip()
     model = value.model.strip()
     models_url = value.models_url.strip() if isinstance(value.models_url, str) else None
-    if not model:
-        raise HTTPException(status_code=422, detail="请填写模型名称。")
+    if len(model) > 160:
+        raise HTTPException(status_code=422, detail="模型名称过长。")
+    if value.protocol and value.protocol not in ai.PROTOCOLS:
+        raise HTTPException(status_code=422, detail="AI 协议配置无效。")
     try:
         ai.normalize_base_url(base_url)
         if models_url:
@@ -737,12 +889,13 @@ def put_settings(value: SettingsInput):
     elif not ai.key_is_configured():
         raise HTTPException(status_code=422, detail="请填写 API Key。")
     with connect() as db:
+        existing = db.execute("SELECT protocol, models_url FROM settings WHERE id = 1").fetchone()
+        protocol = value.protocol or (existing["protocol"] if existing else "openai_chat_completions")
         if models_url is None:
-            existing = db.execute("SELECT models_url FROM settings WHERE id = 1").fetchone()
             models_url = existing["models_url"] if existing else ""
         db.execute(
-            "INSERT INTO settings(id, base_url, model, models_url, updated_at) VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET base_url = excluded.base_url, model = excluded.model, models_url = excluded.models_url, updated_at = excluded.updated_at",
-            (base_url, model, models_url, now()),
+            "INSERT INTO settings(id, base_url, model, protocol, models_url, updated_at) VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET base_url = excluded.base_url, model = excluded.model, protocol = excluded.protocol, models_url = excluded.models_url, updated_at = excluded.updated_at",
+            (base_url, model, protocol, models_url, now()),
         )
         waiting = db.execute("SELECT id FROM papers WHERE status = 'waiting_api'").fetchall()
     for row in waiting:
@@ -1069,9 +1222,27 @@ async def delete_paper(paper_id: str):
 
 @app.patch("/papers/{paper_id}/title", dependencies=[Depends(authorize)])
 def update_title(paper_id: str, value: TitleInput):
-    require_paper(paper_id)
+    paper = require_paper(paper_id)
     english = value.english_title.strip()
     chinese = value.chinese_title.strip()
+    if paper["source_language"] == "zh":
+        title = chinese or english
+        if not title:
+            raise HTTPException(status_code=422, detail="请填写文献标题。")
+        with connect() as db:
+            blockers = db.execute(
+                "SELECT COUNT(*) FROM pages WHERE paper_id = ? AND extraction_status IN ('needs_ocr', 'needs_attention')",
+                (paper_id,),
+            ).fetchone()[0]
+            total = db.execute("SELECT COUNT(*) FROM segments WHERE paper_id = ?", (paper_id,)).fetchone()[0]
+            status = paper["status"] if blockers else ("completed" if total else "needs_ocr")
+            error = paper["error"] if blockers else ("" if total else "未提取到可读取的正文文字。")
+            db.execute(
+                "UPDATE papers SET english_title = ?, title_confident = 1, status = ?, error = ?, updated_at = ? WHERE id = ?",
+                (title, status, error, now(), paper_id),
+            )
+        rename_paper(paper_id, title)
+        return paper_view(require_paper(paper_id))
     if not english:
         raise HTTPException(status_code=422, detail="请填写英文标题。")
     with connect() as db:
@@ -1100,6 +1271,14 @@ async def translation_action(paper_id: str, action: str):
             raise HTTPException(status_code=409, detail="只有已停止的任务可以继续。")
         if action == "retry" and paper["status"] not in {"error", "waiting_api", "needs_title"}:
             raise HTTPException(status_code=409, detail="当前状态无需重试。")
+        if paper["source_language"] == "unknown":
+            language = await asyncio.to_thread(classify_stored_paper, paper_id)
+            paper = require_paper(paper_id)
+            if language == "zh":
+                return paper_view(paper)
+        if paper["source_language"] == "zh":
+            complete_chinese_paper(paper_id)
+            return paper_view(require_paper(paper_id))
         with connect() as db:
             db.execute("UPDATE segments SET status = 'pending' WHERE paper_id = ? AND status <> 'completed'", (paper_id,))
         schedule(paper_id)
@@ -1139,12 +1318,13 @@ def summary_groups(segments: list[dict], limit: int = 12000) -> list[list[dict]]
 
 def add_chat_message(
     paper_id: str, role: str, content: str, sources: list[dict] | None = None,
-    *, reasoning: str = "", status: str = "completed", error: str = "",
+    *, reasoning: str = "", status: str = "completed", error: str = "", session_id: str | None = None,
 ) -> int:
+    session = ensure_chat_session(paper_id, session_id)
     with connect() as db:
         cursor = db.execute(
-            "INSERT INTO chat_messages(paper_id, role, content, sources_json, reasoning, status, error, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (paper_id, role, content, json.dumps(sources or [], ensure_ascii=False), reasoning, status, error, now()),
+            "INSERT INTO chat_messages(paper_id, session_id, role, content, sources_json, reasoning, status, error, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (paper_id, session["id"], role, content, json.dumps(sources or [], ensure_ascii=False), reasoning, status, error, now()),
         )
         return int(cursor.lastrowid)
 
@@ -1188,6 +1368,7 @@ def run_view(row) -> dict[str, Any]:
         chunks = db.execute("SELECT status FROM analysis_chunks WHERE run_id = ?", (row["id"],)).fetchall()
     return {
         "id": row["id"], "paper_id": row["paper_id"], "kind": row["kind"], "question": row["question"],
+        "session_id": row["session_id"],
         "status": row["status"], "error": row["error"],
         "completed_chunks": sum(chunk["status"] == "completed" for chunk in chunks),
         "total_chunks": len(chunks), "answer": row["final_answer"],
@@ -1200,7 +1381,8 @@ def full_prompt_error(message: str) -> str:
 
 
 async def execute_full_prompt(
-    run_id: str, question: str, paper, rows: list[Any], model_snapshot: str, *, publish_chat: bool,
+    run_id: str, question: str, paper, rows: list[Any], model_snapshot: str,
+    protocol_snapshot: str, config: tuple[str, str, str], session_id: str, *, publish_chat: bool,
 ) -> dict[str, Any]:
     all_sources = source_map_for_segments(rows)
     body = "\n\n".join(
@@ -1222,6 +1404,9 @@ async def execute_full_prompt(
             operation="full_summary_single",
             paper_id=paper["id"],
             model=model_snapshot,
+            config=config,
+            protocol=protocol_snapshot,
+            tracked_session_id=session_id,
         )
         answer, sources = ai.validate_sources(result["content"], all_sources)
         if "〔未验证来源〕" in answer:
@@ -1246,7 +1431,7 @@ async def execute_full_prompt(
         )
         final_row = db.execute("SELECT * FROM analysis_runs WHERE id = ?", (run_id,)).fetchone()
     if publish_chat:
-        add_chat_message(paper["id"], "assistant", answer, sources)
+        add_chat_message(paper["id"], "assistant", answer, sources, session_id=session_id)
     return run_view(final_row)
 
 
@@ -1261,16 +1446,28 @@ async def execute_summary(run_id: str, *, publish_chat: bool = True) -> dict[str
         chunks = db.execute("SELECT * FROM analysis_chunks WHERE run_id = ? ORDER BY chunk_no", (run_id,)).fetchall() if run else []
     if not run or not paper:
         raise HTTPException(status_code=404, detail="找不到这次总结任务。")
-    model_snapshot = run["model_snapshot"]
-    if not model_snapshot:
-        try:
-            model_snapshot = ai.current_config()[1]
-        except AIError as exc:
-            raise HTTPException(status_code=502, detail={"category": exc.category, "message": exc.message}) from exc
+    session_id = run["session_id"] or ensure_chat_session(paper["id"])["id"]
+    if not run["session_id"]:
         with connect() as db:
-            db.execute("UPDATE analysis_runs SET model_snapshot = ? WHERE id = ?", (model_snapshot, run_id))
+            db.execute("UPDATE analysis_runs SET session_id = ? WHERE id = ?", (session_id, run_id))
+    model_snapshot = run["model_snapshot"]
+    protocol_snapshot = run["protocol_snapshot"] or ai.current_protocol()
+    if not run["protocol_snapshot"]:
+        with connect() as db:
+            db.execute("UPDATE analysis_runs SET protocol_snapshot = ? WHERE id = ?", (protocol_snapshot, run_id))
+    try:
+        config = ai.current_config()
+    except AIError as exc:
+        raise HTTPException(status_code=502, detail={"category": exc.category, "message": exc.message}) from exc
+    if not model_snapshot:
+        model_snapshot = config[1]
+        with connect() as db:
+            db.execute("UPDATE analysis_runs SET model_snapshot = ?, protocol_snapshot = ? WHERE id = ?", (model_snapshot, protocol_snapshot, run_id))
     if run["kind"] == "full_prompt":
-        return await execute_full_prompt(run_id, run["question"], paper, rows, model_snapshot, publish_chat=publish_chat)
+        return await execute_full_prompt(
+            run_id, run["question"], paper, rows, model_snapshot, protocol_snapshot, config,
+            session_id, publish_chat=publish_chat,
+        )
     all_sources = source_map_for_segments(rows)
     by_id = {f"S{row['id']}": row for row in rows}
     try:
@@ -1304,6 +1501,9 @@ async def execute_summary(run_id: str, *, publish_chat: bool = True) -> dict[str
                 operation="full_summary_chunk",
                 paper_id=paper["id"],
                 model=model_snapshot,
+                protocol=protocol_snapshot,
+                config=config,
+                tracked_session_id=session_id,
             )
             cleaned, _ = ai.validate_sources(result["content"], allowed)
             with connect() as db:
@@ -1335,9 +1535,12 @@ async def execute_summary(run_id: str, *, publish_chat: bool = True) -> dict[str
                     "content": f"用户的原始要求与重点：{run['question']}\n\n根据以下覆盖全文各部分的分块摘要，写一份完整中文总结。优先回应用户指定的重点；若论文没有提供某类信息，明确说明。\n\n{synthesis}",
                 },
             ],
-            operation="full_summary_synthesis",
-            paper_id=paper["id"],
-            model=model_snapshot,
+                operation="full_summary_synthesis",
+                paper_id=paper["id"],
+                model=model_snapshot,
+                protocol=protocol_snapshot,
+                config=config,
+                tracked_session_id=session_id,
         )
         answer, sources = ai.validate_sources(final["content"], all_sources)
         if "〔未验证来源〕" in answer:
@@ -1348,7 +1551,7 @@ async def execute_summary(run_id: str, *, publish_chat: bool = True) -> dict[str
                 (answer, json.dumps(sources, ensure_ascii=False), now(), run_id),
             )
         if publish_chat:
-            add_chat_message(paper["id"], "assistant", answer, sources)
+            add_chat_message(paper["id"], "assistant", answer, sources, session_id=session_id)
         with connect() as db:
             final_row = db.execute("SELECT * FROM analysis_runs WHERE id = ?", (run_id,)).fetchone()
         return run_view(final_row)
@@ -1368,9 +1571,11 @@ async def execute_summary(run_id: str, *, publish_chat: bool = True) -> dict[str
 
 async def start_summary(
     paper_id: str, question: str, *, model: str | None = None,
-    record_user: bool = True, publish_chat: bool = True,
+    record_user: bool = True, publish_chat: bool = True, session_id: str | None = None,
+    config: tuple[str, str, str] | None = None, protocol: str | None = None,
 ) -> dict[str, Any]:
     paper = require_paper(paper_id)
+    session = ensure_chat_session(paper_id, session_id)
     if not paper_view(paper)["can_read"]:
         raise HTTPException(status_code=409, detail="全文译文完成前不能开始全文总结。")
     with connect() as db:
@@ -1379,29 +1584,31 @@ async def start_summary(
         ).fetchall()
     if not rows:
         raise HTTPException(status_code=409, detail="没有可用于总结的正文段落。")
+    try:
+        config = config or ai.current_config()
+    except AIError as exc:
+        raise HTTPException(status_code=502, detail={"category": exc.category, "message": exc.message}) from exc
+    protocol = protocol or ai.current_protocol()
     if model:
         model_snapshot = model.strip()
     else:
-        try:
-            model_snapshot = ai.current_config()[1]
-        except AIError as exc:
-            raise HTTPException(status_code=502, detail={"category": exc.category, "message": exc.message}) from exc
+        model_snapshot = config[1]
     if not model_snapshot:
         raise HTTPException(status_code=422, detail="请先配置模型名称。")
     run_id = uuid.uuid4().hex
     with connect() as db:
         db.execute(
-            "INSERT INTO analysis_runs(id, paper_id, kind, question, status, model_snapshot, created_at, updated_at) VALUES (?, ?, 'full_prompt', ?, 'queued', ?, ?, ?)",
-            (run_id, paper_id, question, model_snapshot, now(), now()),
+            "INSERT INTO analysis_runs(id, paper_id, kind, question, status, model_snapshot, protocol_snapshot, session_id, created_at, updated_at) VALUES (?, ?, 'full_prompt', ?, 'queued', ?, ?, ?, ?, ?)",
+            (run_id, paper_id, question, model_snapshot, protocol, session["id"], now(), now()),
         )
     if record_user:
-        add_chat_message(paper_id, "user", question)
+        add_chat_message(paper_id, "user", question, session_id=session["id"])
     return await execute_summary(run_id, publish_chat=publish_chat)
 
 
 async def stream_full_prompt(
     run_id: str, paper, rows: list[Any], model_snapshot: str,
-    config: tuple[str, str, str],
+    config: tuple[str, str, str], protocol: str, session_id: str,
 ):
     body = "\n\n".join(
         f"[S{row['id']}] 原文页码 {row['start_page']}-{row['end_page']}\n{row['original_text']}"
@@ -1422,7 +1629,7 @@ async def stream_full_prompt(
     reasoning: list[str] = []
     async for item in ai.stream_chat_completion(
         messages, operation="full_summary_single", paper_id=paper["id"],
-        model=model_snapshot, config=config,
+        model=model_snapshot, config=config, protocol=protocol,
     ):
         if item["type"] == "content_delta":
             yield item
@@ -1436,8 +1643,8 @@ async def stream_full_prompt(
                 answer += "\n\n部分 AI 引用编号未在本地来源列表中验证，已标记为无效。"
             with connect() as db:
                 db.execute(
-                    "UPDATE analysis_runs SET status = 'completed', error = '', final_answer = ?, sources_json = ?, updated_at = ? WHERE id = ?",
-                    (answer, json.dumps(sources, ensure_ascii=False), now(), run_id),
+                    "UPDATE analysis_runs SET status = 'completed', error = '', final_answer = ?, sources_json = ?, session_id = ?, updated_at = ? WHERE id = ?",
+                    (answer, json.dumps(sources, ensure_ascii=False), session_id, now(), run_id),
                 )
             yield {"type": "summary_result", "answer": answer, "reasoning": "".join(reasoning), "sources": sources}
 
@@ -1509,11 +1716,11 @@ PAPER_TOOLS = [
         "type": "function",
         "function": {
             "name": "read_paper",
-            "description": "读取当前这篇文献的英文原文证据。仅在用户问题需要本文事实时调用；query请用英文。页码范围最多10页。",
+            "description": "读取当前这篇文献的原文证据。仅在用户问题需要本文事实时调用；query请使用原文中的词语。页码范围最多10页。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "英文检索短语；没有页码范围时必填。"},
+                    "query": {"type": "string", "description": "原文检索短语；没有页码范围时必填。"},
                     "start_page": {"type": "integer", "minimum": 1},
                     "end_page": {"type": "integer", "minimum": 1},
                 },
@@ -1565,9 +1772,13 @@ def read_paper_evidence(paper_id: str, arguments: dict[str, Any], page_count: in
         if type(start_page) is not int or type(end_page) is not int or start_page < 1 or end_page < start_page or end_page > page_count or end_page - start_page >= 10:
             raise AIError("invalid_tool_call", "文献页码范围无效或超过10页。")
     elif not query:
-        raise AIError("invalid_tool_call", "请提供英文检索词或不超过10页的页码范围。")
+        raise AIError("invalid_tool_call", "请提供原文检索词或不超过10页的页码范围。")
 
-    terms = list(dict.fromkeys(re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", query.casefold())))[:12]
+    raw_terms = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", query.casefold())
+    for run in re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,}", query):
+        raw_terms.append(run)
+        raw_terms.extend(run[index:index + 2] for index in range(len(run) - 1))
+    terms = list(dict.fromkeys(raw_terms))[:12]
     if has_pages:
         with connect() as db:
             page_rows = db.execute(
@@ -1628,11 +1839,96 @@ def parse_tool_arguments(call: dict[str, Any]) -> tuple[str, dict[str, Any], str
     return call_id, arguments, name
 
 
-@app.get("/papers/{paper_id}/chat", dependencies=[Depends(authorize)])
-def get_chat(paper_id: str):
+@app.get("/papers/{paper_id}/chat-sessions", dependencies=[Depends(authorize)])
+def list_chat_sessions(paper_id: str):
+    require_paper(paper_id)
+    ensure_chat_session(paper_id)
+    with connect() as db:
+        rows = db.execute(
+            "SELECT id, title, created_at FROM chat_sessions WHERE paper_id = ? ORDER BY is_default DESC, created_at, id",
+            (paper_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.post("/papers/{paper_id}/chat-sessions", dependencies=[Depends(authorize)])
+def create_chat_session(paper_id: str):
+    require_paper(paper_id)
+    ensure_chat_session(paper_id)
+    with connect() as db:
+        rows = db.execute("SELECT title FROM chat_sessions WHERE paper_id = ?", (paper_id,)).fetchall()
+        titles = {row["title"] for row in rows}
+        number = 1
+        while f"对话 {number}" in titles:
+            number += 1
+        session_id = uuid.uuid4().hex
+        created_at = now()
+        db.execute(
+            "INSERT INTO chat_sessions(id, paper_id, title, is_default, created_at) VALUES (?, ?, ?, 0, ?)",
+            (session_id, paper_id, f"对话 {number}", created_at),
+        )
+        row = db.execute("SELECT id, title, created_at FROM chat_sessions WHERE id = ?", (session_id,)).fetchone()
+    return dict(row)
+
+
+@app.delete("/papers/{paper_id}/chat-sessions/{session_id}", dependencies=[Depends(authorize)])
+def delete_chat_session(paper_id: str, session_id: str):
     require_paper(paper_id)
     with connect() as db:
-        rows = db.execute("SELECT id, role, content, sources_json, reasoning, status, error, created_at FROM chat_messages WHERE paper_id = ? ORDER BY id", (paper_id,)).fetchall()
+        row = db.execute(
+            "SELECT id, is_default FROM chat_sessions WHERE id = ? AND paper_id = ?",
+            (session_id, paper_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="找不到这段文献对话。")
+        active_runs = db.execute(
+            "SELECT 1 FROM analysis_runs WHERE session_id = ? AND status IN ('queued', 'running') LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        streaming_message = db.execute(
+            "SELECT 1 FROM chat_messages WHERE session_id = ? AND status = 'streaming' LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        active_stream = any(
+            state.get("session_id") == session_id and state.get("task") and not state["task"].done()
+            for state in chat_streams.values()
+        )
+        active_tasks = any(not task.done() for task in session_ai_tasks.get(session_id, set()))
+        if active_runs or streaming_message or active_stream or active_tasks:
+            raise HTTPException(status_code=409, detail="这段对话仍在生成；请先停止回答后再删除。")
+        default_before_delete = db.execute(
+            "SELECT id FROM chat_sessions WHERE paper_id = ? AND is_default = 1 LIMIT 1", (paper_id,)
+        ).fetchone()
+        db.execute("DELETE FROM chat_sessions WHERE id = ? AND paper_id = ?", (session_id, paper_id))
+        remaining = db.execute(
+            "SELECT id FROM chat_sessions WHERE paper_id = ? ORDER BY created_at, id", (paper_id,)
+        ).fetchall()
+        if remaining:
+            db.execute("UPDATE chat_sessions SET is_default = 0 WHERE paper_id = ?", (paper_id,))
+            next_default = remaining[0]["id"] if not default_before_delete or default_before_delete["id"] == session_id else default_before_delete["id"]
+            db.execute("UPDATE chat_sessions SET is_default = 1 WHERE id = ?", (next_default,))
+            replacement = None
+        else:
+            replacement_id = uuid.uuid4().hex
+            created_at = now()
+            db.execute(
+                "INSERT INTO chat_sessions(id, paper_id, title, is_default, created_at) VALUES (?, ?, '对话 1', 1, ?)",
+                (replacement_id, paper_id, created_at),
+            )
+            replacement = {"id": replacement_id, "title": "对话 1", "created_at": created_at}
+    return {"deleted": True, "replacement": replacement}
+
+
+@app.get("/papers/{paper_id}/chat", dependencies=[Depends(authorize)])
+def get_chat(paper_id: str, session_id: str | None = None):
+    require_paper(paper_id)
+    session = ensure_chat_session(paper_id, session_id)
+    with connect() as db:
+        rows = db.execute(
+            "SELECT id, role, content, sources_json, reasoning, status, error, created_at FROM chat_messages "
+            "WHERE paper_id = ? AND session_id = ? ORDER BY id",
+            (paper_id, session["id"]),
+        ).fetchall()
     return [
         {"id": row["id"], "role": row["role"], "content": row["content"], "sources": json.loads(row["sources_json"]),
          "reasoning": row["reasoning"], "status": row["status"], "error": row["error"], "created_at": row["created_at"]}
@@ -1641,7 +1937,7 @@ def get_chat(paper_id: str):
 
 
 async def create_stream_response(
-    *, paper_id: str, paper, request_id: str, question: str, model: str,
+    *, paper_id: str, paper, session_id: str, request_id: str, question: str, model: str, protocol: str,
     config: tuple[str, str, str], web_search_enabled: bool, messages: list[dict[str, Any]],
     allowed_paper_sources: dict[str, dict[str, int]], allowed_web_sources: dict[str, dict[str, Any]],
     paper_rows: list[Any], summary_run_id: str | None = None,
@@ -1650,8 +1946,8 @@ async def create_stream_response(
         raise HTTPException(status_code=422, detail="流式请求编号无效。")
     if request_id in chat_streams:
         raise HTTPException(status_code=409, detail="此流式请求编号已在使用。")
-    message_id = add_chat_message(paper_id, "assistant", "", status="streaming")
-    chat_streams[request_id] = {"paper_id": paper_id, "task": None, "reason": None, "message_id": message_id, "run_id": summary_run_id}
+    message_id = add_chat_message(paper_id, "assistant", "", status="streaming", session_id=session_id)
+    chat_streams[request_id] = {"paper_id": paper_id, "session_id": session_id, "task": None, "reason": None, "message_id": message_id, "run_id": summary_run_id}
 
     async def generate():
         current = asyncio.current_task()
@@ -1659,6 +1955,7 @@ async def create_stream_response(
         if current and state:
             state["task"] = current
             paper_ai_tasks.setdefault(paper_id, set()).add(current)
+            session_ai_tasks.setdefault(session_id, set()).add(current)
         content = ""
         reasoning = ""
         stream_model = model
@@ -1669,13 +1966,14 @@ async def create_stream_response(
             yield event_stream("status", {"phase": "thinking", "message_id": message_id, "run_id": run_id})
             if run_id:
                 with connect() as db:
-                    run_row = db.execute("SELECT * FROM analysis_runs WHERE id = ? AND paper_id = ?", (run_id, paper_id)).fetchone()
+                    run_row = db.execute("SELECT * FROM analysis_runs WHERE id = ? AND paper_id = ? AND session_id = ?", (run_id, paper_id, session_id)).fetchone()
                 if not run_row:
                     raise AIError("missing_run", "找不到可继续的全文总结任务。")
                 stream_model = run_row["model_snapshot"] or stream_model
                 with connect() as db:
                     db.execute("UPDATE analysis_runs SET status = 'running', error = '', updated_at = ? WHERE id = ?", (now(), run_id))
-                async for item in stream_full_prompt(run_id, paper, paper_rows, stream_model, config):
+                stream_protocol = run_row["protocol_snapshot"] or protocol
+                async for item in stream_full_prompt(run_id, paper, paper_rows, stream_model, config, stream_protocol, session_id):
                     if item["type"] == "content_delta":
                         content += item["text"]
                         update_stream_message(message_id, content, reasoning, "streaming")
@@ -1699,7 +1997,7 @@ async def create_stream_response(
                 enabled_tools = PAPER_TOOLS if web_search_enabled else LEGACY_PAPER_TOOLS
                 async for item in ai.stream_chat_completion(
                     messages, operation="tool_chat", paper_id=paper_id,
-                    tools=enabled_tools, tool_choice="auto", model=stream_model, config=config,
+                    tools=enabled_tools, tool_choice="auto", model=stream_model, config=config, protocol=protocol,
                 ):
                     if item["type"] == "content_delta":
                         content += item["text"]
@@ -1760,13 +2058,13 @@ async def create_stream_response(
                         run_id = uuid.uuid4().hex
                         with connect() as db:
                             db.execute(
-                                "INSERT INTO analysis_runs(id, paper_id, kind, question, status, model_snapshot, created_at, updated_at) VALUES (?, ?, 'full_prompt', ?, 'queued', ?, ?, ?)",
-                                (run_id, paper_id, summary_question, stream_model, now(), now()),
+                                "INSERT INTO analysis_runs(id, paper_id, kind, question, status, model_snapshot, protocol_snapshot, session_id, created_at, updated_at) VALUES (?, ?, 'full_prompt', ?, 'queued', ?, ?, ?, ?, ?)",
+                                (run_id, paper_id, summary_question, stream_model, protocol, session_id, now(), now()),
                             )
                         if state:
                             state["run_id"] = run_id
                         yield event_stream("status", {"phase": "tool", "tool": name, "run_id": run_id})
-                        async for summary_item in stream_full_prompt(run_id, paper, paper_rows, stream_model, config):
+                        async for summary_item in stream_full_prompt(run_id, paper, paper_rows, stream_model, config, protocol, session_id):
                             if summary_item["type"] == "content_delta":
                                 content += summary_item["text"]
                                 update_stream_message(message_id, content, reasoning, "streaming")
@@ -1831,11 +2129,16 @@ async def create_stream_response(
                     tasks.discard(current)
                     if not tasks:
                         paper_ai_tasks.pop(paper_id, None)
+                tasks = session_ai_tasks.get(session_id)
+                if tasks:
+                    tasks.discard(current)
+                    if not tasks:
+                        session_ai_tasks.pop(session_id, None)
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-def stream_config_for(model_override: str | None, paper) -> tuple[str, tuple[str, str, str]]:
+def stream_config_for(model_override: str | None, paper, protocol_override: str | None = None) -> tuple[str, tuple[str, str, str], str]:
     try:
         config = ai.current_config()
     except AIError as exc:
@@ -1843,7 +2146,10 @@ def stream_config_for(model_override: str | None, paper) -> tuple[str, tuple[str
     model = model_override.strip() if model_override else (paper["model_override"] or config[1])
     if not model or len(model) > 160:
         raise HTTPException(status_code=422, detail="当前模型名称无效。")
-    return model, config
+    protocol = protocol_override or ai.current_protocol()
+    if protocol not in ai.PROTOCOLS:
+        raise HTTPException(status_code=422, detail="AI 协议配置无效，请重新选择协议。")
+    return model, config, protocol
 
 
 @app.post("/papers/{paper_id}/chat/stream", dependencies=[Depends(authorize)])
@@ -1856,12 +2162,13 @@ async def chat_stream(paper_id: str, value: StreamChatInput):
         raise HTTPException(status_code=422, detail="流式请求编号无效。")
     if not paper_view(paper)["can_read"]:
         raise HTTPException(status_code=409, detail="全文中文 PDF 完成前不能向 AI 提问。")
-    model, config = stream_config_for(value.model, paper)
+    session = ensure_chat_session(paper_id, value.session_id)
+    model, config, protocol = stream_config_for(value.model, paper)
     with connect() as db:
         setting = db.execute("SELECT web_search_enabled FROM settings WHERE id = 1").fetchone()
         recent = db.execute(
-            "SELECT role, content, sources_json FROM chat_messages WHERE paper_id = ? AND status = 'completed' ORDER BY id DESC LIMIT 6",
-            (paper_id,),
+            "SELECT role, content, sources_json FROM chat_messages WHERE paper_id = ? AND session_id = ? AND status = 'completed' ORDER BY id DESC LIMIT 6",
+            (paper_id, session["id"]),
         ).fetchall()
         paper_rows = db.execute(
             "SELECT id, start_page, end_page, original_text FROM segments WHERE paper_id = ? ORDER BY sequence_no", (paper_id,)
@@ -1884,7 +2191,7 @@ async def chat_stream(paper_id: str, value: StreamChatInput):
                         allowed_web_sources[source_id] = source
         except (TypeError, json.JSONDecodeError):
             continue
-    add_chat_message(paper_id, "user", question)
+    add_chat_message(paper_id, "user", question, session_id=session["id"])
     messages = [
         {"role": "system", "content": with_latex_rules(
             f"你是严谨的论文阅读助手。本轮只绑定当前文献，共 {paper['page_count']} 页。初始上下文不含正文；只有在用户问题需要本文事实时调用 read_paper，"
@@ -1897,8 +2204,9 @@ async def chat_stream(paper_id: str, value: StreamChatInput):
         {"role": "user", "content": question},
     ]
     return await create_stream_response(
-        paper_id=paper_id, paper=paper, request_id=value.request_id, question=question, model=model,
-        config=config, web_search_enabled=search_enabled, messages=messages,
+        paper_id=paper_id, paper=paper, session_id=session["id"], request_id=value.request_id,
+        question=question, model=model, protocol=protocol, config=config,
+        web_search_enabled=search_enabled, messages=messages,
         allowed_paper_sources=allowed_paper_sources, allowed_web_sources=allowed_web_sources,
         paper_rows=paper_rows,
     )
@@ -1914,15 +2222,20 @@ async def resume_analysis_stream(paper_id: str, run_id: str, value: StreamReques
         rows = db.execute("SELECT id, start_page, end_page, original_text FROM segments WHERE paper_id = ? ORDER BY sequence_no", (paper_id,)).fetchall()
     if not run or run["status"] == "completed":
         raise HTTPException(status_code=404, detail="找不到可继续的全文总结任务。")
+    session = ensure_chat_session(paper_id, value.session_id or run["session_id"])
+    if run["session_id"] and run["session_id"] != session["id"]:
+        raise HTTPException(status_code=404, detail="找不到这段文献对话中的总结任务。")
+    protocol_snapshot = run["protocol_snapshot"] or ai.current_protocol()
     if run["kind"] != "full_prompt":
         with connect() as db:
             db.execute("UPDATE analysis_runs SET kind = 'full_prompt' WHERE id = ?", (run_id,))
-    model, config = stream_config_for(run["model_snapshot"] or None, paper)
+    model, config, protocol = stream_config_for(run["model_snapshot"] or None, paper, protocol_snapshot)
     with connect() as db:
-        db.execute("UPDATE analysis_runs SET model_snapshot = ? WHERE id = ?", (model, run_id))
+        db.execute("UPDATE analysis_runs SET model_snapshot = ?, protocol_snapshot = ?, session_id = ? WHERE id = ?", (model, protocol, session["id"], run_id))
     return await create_stream_response(
-        paper_id=paper_id, paper=paper, request_id=value.request_id, question=run["question"],
-        model=model, config=config, web_search_enabled=False, messages=[], allowed_paper_sources={},
+        paper_id=paper_id, paper=paper, session_id=session["id"], request_id=value.request_id,
+        question=run["question"], model=model, protocol=protocol, config=config,
+        web_search_enabled=False, messages=[], allowed_paper_sources={},
         allowed_web_sources={}, paper_rows=rows, summary_run_id=run_id,
     )
 
@@ -1942,6 +2255,7 @@ async def cancel_chat_stream(paper_id: str, request_id: str):
 @app.post("/papers/{paper_id}/chat", dependencies=[Depends(authorize)])
 async def chat(paper_id: str, value: ChatInput):
     paper = require_paper(paper_id)
+    session = ensure_chat_session(paper_id, value.session_id)
     question = value.question.strip()
     if not question:
         raise HTTPException(status_code=422, detail="请输入问题。")
@@ -1950,13 +2264,18 @@ async def chat(paper_id: str, value: ChatInput):
     if value.model is not None and (not value.model.strip() or len(value.model.strip()) > 160):
         raise HTTPException(status_code=422, detail="当前模型名称无效。")
     try:
-        turn_model = value.model.strip() if value.model else (paper["model_override"] or ai.current_config()[1])
+        config = ai.current_config()
+        protocol = ai.current_protocol()
+        turn_model = value.model.strip() if value.model else (paper["model_override"] or config[1])
     except AIError as exc:
         raise HTTPException(status_code=502, detail={"category": exc.category, "message": exc.message}) from exc
     if not turn_model:
         raise HTTPException(status_code=422, detail="请配置 AI 模型名称。")
     with connect() as db:
-        recent = db.execute("SELECT role, content, sources_json FROM chat_messages WHERE paper_id = ? ORDER BY id DESC LIMIT 6", (paper_id,)).fetchall()
+        recent = db.execute(
+            "SELECT role, content, sources_json FROM chat_messages WHERE paper_id = ? AND session_id = ? ORDER BY id DESC LIMIT 6",
+            (paper_id, session["id"]),
+        ).fetchall()
     history = list(reversed(recent))
     allowed: dict[str, dict[str, int]] = {}
     for row in history:
@@ -1969,7 +2288,7 @@ async def chat(paper_id: str, value: ChatInput):
                     allowed[source_id] = {"start_page": start, "end_page": end}
         except (TypeError, json.JSONDecodeError):
             continue
-    add_chat_message(paper_id, "user", question)
+    add_chat_message(paper_id, "user", question, session_id=session["id"])
     messages = [
         {
             "role": "system",
@@ -1989,6 +2308,7 @@ async def chat(paper_id: str, value: ChatInput):
                 paper_id, ai.chat_completion, messages,
                 operation="tool_chat", paper_id=paper_id,
                 tools=LEGACY_PAPER_TOOLS, tool_choice="auto", model=turn_model,
+                config=config, protocol=protocol, tracked_session_id=session["id"],
             )
         except AIError as exc:
             raise HTTPException(status_code=502, detail={"category": exc.category, "message": exc.message}) from exc
@@ -2001,7 +2321,7 @@ async def chat(paper_id: str, value: ChatInput):
             if "〔未验证来源〕" in answer:
                 answer += "\n\n部分 AI 引用编号未在本地来源列表中验证，已标记为无效。"
             require_paper(paper_id)
-            add_chat_message(paper_id, "assistant", answer, sources)
+            add_chat_message(paper_id, "assistant", answer, sources, session_id=session["id"])
             return {"status": "completed", "answer": answer, "sources": sources}
         if not isinstance(calls, list) or not calls or tool_actions + len(calls) > 5:
             raise HTTPException(status_code=502, detail={"category": "tool_limit", "message": "AI 工具调用次数过多，本轮没有生成答案。请缩小问题后重试。"})
@@ -2027,12 +2347,13 @@ async def chat(paper_id: str, value: ChatInput):
                     summary_question = question + (f"\n用户特别关注：{focus.strip()}" if focus.strip() else "")
                     run = await start_summary(
                         paper_id, summary_question, model=turn_model,
-                        record_user=False, publish_chat=False,
+                        record_user=False, publish_chat=False, session_id=session["id"],
+                        config=config, protocol=protocol,
                     )
                     if run["status"] != "completed":
                         return run
                     require_paper(paper_id)
-                    add_chat_message(paper_id, "assistant", run["answer"], run["sources"])
+                    add_chat_message(paper_id, "assistant", run["answer"], run["sources"], session_id=session["id"])
                     return {"status": "completed", "run_id": run["id"], "answer": run["answer"], "sources": run["sources"]}
                 else:
                     raise AIError("invalid_tool_call", "AI 服务请求了不允许的文献工具。")
@@ -2043,18 +2364,28 @@ async def chat(paper_id: str, value: ChatInput):
 
 
 @app.get("/papers/{paper_id}/analysis", dependencies=[Depends(authorize)])
-def get_analysis_runs(paper_id: str):
+def get_analysis_runs(paper_id: str, session_id: str | None = None):
     require_paper(paper_id)
+    session = ensure_chat_session(paper_id, session_id)
     with connect() as db:
-        rows = db.execute("SELECT * FROM analysis_runs WHERE paper_id = ? AND status <> 'completed' ORDER BY created_at DESC", (paper_id,)).fetchall()
+        rows = db.execute(
+            "SELECT * FROM analysis_runs WHERE paper_id = ? AND session_id = ? AND status <> 'completed' ORDER BY created_at DESC",
+            (paper_id, session["id"]),
+        ).fetchall()
     return [run_view(row) for row in rows]
 
 
 @app.post("/papers/{paper_id}/analysis/{run_id}/resume", dependencies=[Depends(authorize)])
-async def resume_analysis(paper_id: str, run_id: str):
+async def resume_analysis(paper_id: str, run_id: str, value: StreamRequestInput | None = None):
     require_paper(paper_id)
     with connect() as db:
         row = db.execute("SELECT * FROM analysis_runs WHERE id = ? AND paper_id = ?", (run_id, paper_id)).fetchone()
     if not row or row["status"] == "completed":
         raise HTTPException(status_code=404, detail="找不到可继续的总结任务。")
+    session = ensure_chat_session(paper_id, (value.session_id if value else None) or row["session_id"])
+    if row["session_id"] and row["session_id"] != session["id"]:
+        raise HTTPException(status_code=404, detail="找不到这段文献对话中的总结任务。")
+    if not row["session_id"]:
+        with connect() as db:
+            db.execute("UPDATE analysis_runs SET session_id = ? WHERE id = ?", (session["id"], run_id))
     return await execute_summary(run_id)

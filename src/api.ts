@@ -13,6 +13,7 @@ export type Paper = {
   segment_total: number;
   segment_done: number;
   can_read: boolean;
+  source_language: 'zh' | 'en' | 'unknown';
   mono_pdf_file_name: string;
   dual_pdf_file_name: string;
   pdf_progress: number;
@@ -68,7 +69,7 @@ export type PdfSelection = {
 };
 
 export type ChatStreamInput = {
-  paperId: string; question?: string; model?: string; webSearch?: boolean; runId?: string;
+  paperId: string; sessionId?: string; question?: string; model?: string; webSearch?: boolean; runId?: string;
 };
 export type ChatStreamEvent = { requestId: string; type: string; data: Record<string, unknown> };
 export type ChatStreamHandle = { requestId: string; cancel: () => Promise<boolean>; dispose: () => void };
@@ -80,6 +81,8 @@ declare global {
     workbench: {
       request<T = unknown>(input: ApiRequest): Promise<T>;
       choosePdfs(): Promise<string[]>;
+      revealPaperFile(paperId: string, kind: 'original' | 'mono' | 'dual'): Promise<boolean>;
+      openLibraryFolder(): Promise<boolean>;
       getDroppedPaths(files: FileList | File[]): string[];
       cancelPaperStreams(paperId: string): Promise<number>;
       startChatStream(input: ChatStreamInput, onEvent: (event: ChatStreamEvent) => void): Promise<ChatStreamHandle>;

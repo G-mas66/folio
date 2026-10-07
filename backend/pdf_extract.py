@@ -116,6 +116,29 @@ def _candidate_title(raw: str, filename: str, metadata_title: str) -> tuple[str,
     return "", False
 
 
+def _candidate_chinese_title(raw: str) -> str:
+    excluded = ("作者", "单位", "大学", "学院", "研究所", "医院", "中心", "摘要", "关键词", "基金", "通信作者")
+    for line in [line.strip() for line in _clean_lines(raw) if line.strip()][:24]:
+        if any(token in line for token in excluded) or len(line) > 120:
+            continue
+        han = len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", line))
+        if han >= 6:
+            return line
+    return ""
+
+
+def detect_source_language(raw_pages: list[str]) -> str:
+    text = "\n".join(raw_pages)
+    han = len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", text))
+    latin = len(re.findall(r"[A-Za-z]", text))
+    total = han + latin
+    if (han >= 200 and total and han / total >= 0.35) or (han >= 40 and total and han / total >= 0.70):
+        return "zh"
+    if latin >= 200 and total and latin / total >= 0.75:
+        return "en"
+    return "unknown"
+
+
 def extract_pdf(path: Path) -> dict:
     try:
         reader = PdfReader(str(path), strict=False)
@@ -157,6 +180,8 @@ def extract_pdf(path: Path) -> dict:
         pass
     first_page = raw_pages[0] if raw_pages else ""
     english_title, title_confident = _candidate_title(first_page, path.name, metadata_title)
+    source_language = detect_source_language(raw_pages)
+    chinese_title = _candidate_chinese_title(first_page) if source_language == "zh" else ""
     has_blocker = any(page["status"] in {"needs_ocr", "needs_attention"} for page in extracted)
     if not segments:
         has_blocker = True
@@ -165,6 +190,8 @@ def extract_pdf(path: Path) -> dict:
         "pages": extracted,
         "segments": segments,
         "english_title": english_title,
+        "chinese_title": chinese_title,
+        "source_language": source_language,
         "title_confident": title_confident,
         "has_blocker": has_blocker,
     }

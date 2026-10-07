@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
 parser.add_argument('data', type=Path)
 parser.add_argument('--mixed', action='store_true')
+parser.add_argument('--chinese', action='store_true')
 args = parser.parse_args()
 target = args.data.resolve()
 assert target.is_relative_to(ROOT / '.review'), 'Only isolated review data can be seeded'
@@ -46,4 +47,23 @@ for kind in ('mono', 'dual'):
     shutil.copy2(paths[kind], folder / f'review-{kind}.pdf')
 with connect() as db:
     db.execute("UPDATE papers SET chinese_title='连续阅读验收文献', status='completed', mono_pdf_file_name='review-mono.pdf', dual_pdf_file_name='review-dual.pdf', pdf_progress=100 WHERE id=?", (paper['id'],))
-print(json.dumps({'paper_id': paper['id'], 'source': str(paths['source']), 'pages': 12}))
+result = {'paper_id': paper['id'], 'source': str(paths['source']), 'pages': 12}
+if args.chinese:
+    from reportlab.pdfgen import canvas
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    pdfmetrics.registerFont(TTFont('FolioChineseFixture', str(ROOT / 'backend/pdf_engine_assets/babeldoc/fonts/LXGWWenKaiGB-Regular.1.520.ttf')))
+    chinese = fixture / 'chinese-paper.pdf'
+    document = canvas.Canvas(str(chinese))
+    document.setTitle('中文文献导入验收')
+    for page in range(2):
+        document.setFont('FolioChineseFixture', 16)
+        document.drawString(50, 780, '中文文献导入验收')
+        document.setFont('FolioChineseFixture', 12)
+        for line in range(16):
+            document.drawString(50, 730 - line * 32, '这是一篇中文研究文献，用于验证导入后跳过翻译，原始页面内容保持完整。')
+        document.rect(50, 90, 120, 50)
+        document.showPage()
+    document.save()
+    result['chinese'] = str(chinese)
+print(json.dumps(result))

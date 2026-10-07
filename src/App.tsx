@@ -43,6 +43,33 @@ function Workbench() {
   const [folderDialog, setFolderDialog] = useState<'create' | 'rename' | null>(null);
   const [folderName, setFolderName] = useState('');
   const [dragging, setDragging] = useState(false);
+  const dragDepthRef = useRef(0);
+
+  function clearFileDrag() {
+    dragDepthRef.current = 0;
+    setDragging(false);
+  }
+
+  useEffect(() => {
+    const cancel = () => clearFileDrag();
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') clearFileDrag(); };
+    window.addEventListener('dragend', cancel);
+    window.addEventListener('drop', cancel);
+    window.addEventListener('blur', cancel);
+    window.addEventListener('focus', cancel);
+    window.addEventListener('pointerdown', cancel);
+    window.addEventListener('keydown', escape);
+    return () => {
+      window.removeEventListener('dragend', cancel);
+      window.removeEventListener('drop', cancel);
+      window.removeEventListener('blur', cancel);
+      window.removeEventListener('focus', cancel);
+      window.removeEventListener('pointerdown', cancel);
+      window.removeEventListener('keydown', escape);
+    };
+  }, []);
+
+  useEffect(() => { clearFileDrag(); }, [activePanel]);
 
   useEffect(() => {
     let mounted = true;
@@ -117,6 +144,16 @@ function Workbench() {
   async function chooseFiles() {
     const paths = await window.workbench.choosePdfs();
     await importFiles(paths);
+  }
+
+  async function revealFile(paper: Paper) {
+    try { await window.workbench.revealPaperFile(paper.id, 'original'); }
+    catch (error) { setError(errorMessage(error)); }
+  }
+
+  async function openLibraryFolder() {
+    try { await window.workbench.openLibraryFolder(); }
+    catch (error) { setError(errorMessage(error)); }
   }
 
   async function paperAction(paper: Paper, action: 'stop' | 'continue' | 'retry') {
@@ -243,7 +280,25 @@ function Workbench() {
   }
 
   return (
-    <div className="app-shell" onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}>
+    <div className="app-shell" onDragEnter={(event) => {
+      if (activePanel !== 'library' || !event.dataTransfer.types.includes('Files')) return;
+      event.preventDefault();
+      dragDepthRef.current += 1;
+      setDragging(true);
+    }} onDragOver={(event) => {
+      if (event.dataTransfer.types.includes('Files')) event.preventDefault();
+    }} onDragLeave={(event) => {
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (!dragDepthRef.current || event.clientX <= 0 || event.clientY <= 0 || event.clientX >= window.innerWidth || event.clientY >= window.innerHeight) clearFileDrag();
+    }} onDrop={(event) => {
+      event.preventDefault();
+      clearFileDrag();
+      if (activePanel !== 'library') return;
+      try {
+        const paths = window.workbench.getDroppedPaths(Array.from(event.dataTransfer.files));
+        void importFiles(paths);
+      } catch (error) { setError(errorMessage(error)); }
+    }}>
       <header className="topbar">
         <div className="brand-mark" aria-hidden="true"><img src="./folio-mark.svg" alt="" /></div>
         <div className="brand-lockup"><div className="brand-name">阅川</div><span>Folio</span></div>
@@ -259,7 +314,7 @@ function Workbench() {
             </div>;
           })}
         </nav>
-        <button className={`nav-button settings-tab ${activePanel === 'settings' ? 'selected' : ''}`} onClick={() => setActivePanel('settings')}>AI 设置</button>
+        <button className={`nav-button settings-tab ${activePanel === 'settings' ? 'selected' : ''}`} onClick={() => setActivePanel('settings')}>设置</button>
       </header>
       <div className="app-content">
         <section className="app-panel settings-app-panel" hidden={activePanel !== 'settings'}>
@@ -276,22 +331,19 @@ function Workbench() {
             </div>
             <div className="folder-actions">
               <button className="text-button" aria-label="新建文件夹" onClick={() => beginFolderDialog('create')}>＋ 新建文件夹</button>
+              <button className="text-button" type="button" onClick={() => void openLibraryFolder()}>打开文献目录</button>
               {folderFilter !== 'all' && folderFilter !== 'unfiled' && <>
                 <button className="text-button" aria-label="重命名文件夹" onClick={() => beginFolderDialog('rename')}>重命名</button>
                 <button className="text-button delete-paper-button" aria-label="删除文件夹" onClick={() => void deleteFolder()}>删除文件夹</button>
               </>}
             </div>
           </aside>
-          <main className="library-page" onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (event.currentTarget === event.target) setDragging(false); }} onDrop={(event) => {
-          event.preventDefault(); setDragging(false);
-          const paths = window.workbench.getDroppedPaths(Array.from(event.dataTransfer.files));
-          void importFiles(paths);
-        }}>
+          <main className="library-page">
           <div className="page-heading">
             <div>
               <div className="eyebrow">本机文献与处理进度</div>
               <h1>文献库</h1>
-              <p>导入 PDF 后会在后台生成保留版式的中文 PDF 和双语 PDF，检查完成后即可打开阅读。</p>
+              <p>英文文献会生成保留版式的中文 PDF 和双语 PDF；中文文献无需翻译，可直接阅读原始 PDF。</p>
             </div>
             <button className="primary-button import-button" onClick={chooseFiles} disabled={busy}>＋ 导入文献</button>
           </div>
@@ -310,7 +362,7 @@ function Workbench() {
             </div>
           ) : (
             <section className={dragging ? 'paper-list dragging' : 'paper-list'} aria-label="文献列表">
-              {papers.map((paper) => <PaperCard key={paper.id} paper={paper} folders={folders} onOpen={() => openReader(paper)} onAction={(action) => void paperAction(paper, action)} onEdit={() => setEditing(paper)} onDelete={() => void deletePaper(paper)} onMove={(folderId) => void movePaper(paper, folderId)} />)}
+              {papers.map((paper) => <PaperCard key={paper.id} paper={paper} folders={folders} onOpen={() => openReader(paper)} onAction={(action) => void paperAction(paper, action)} onEdit={() => setEditing(paper)} onDelete={() => void deletePaper(paper)} onReveal={() => void revealFile(paper)} onMove={(folderId) => void movePaper(paper, folderId)} />)}
             </section>
           )}
           {dragging && <div className="drop-overlay" aria-hidden="true"><div>松开即可导入 PDF</div></div>}
@@ -328,8 +380,8 @@ function Workbench() {
   );
 }
 
-function PaperCard({ paper, folders, onOpen, onAction, onEdit, onDelete, onMove }: {
-  paper: Paper; folders: Folder[]; onOpen: () => void; onAction: (action: 'stop' | 'continue' | 'retry') => void; onEdit: () => void; onDelete: () => void; onMove: (folderId: string | null) => void;
+function PaperCard({ paper, folders, onOpen, onAction, onEdit, onDelete, onReveal, onMove }: {
+  paper: Paper; folders: Folder[]; onOpen: () => void; onAction: (action: 'stop' | 'continue' | 'retry') => void; onEdit: () => void; onDelete: () => void; onReveal: () => void; onMove: (folderId: string | null) => void;
 }) {
   const progress = paper.pdf_progress || 0;
   const canStop = ['queued', 'translating', 'waiting_api'].includes(paper.status);
@@ -341,7 +393,7 @@ function PaperCard({ paper, folders, onOpen, onAction, onEdit, onDelete, onMove 
       <div className="paper-glyph" aria-hidden="true">PDF</div>
       <div className="paper-main">
         <div className="paper-title-row"><h2 title={title}>{title}</h2><span className={`status-pill status-${paper.status}`}>{statusText[paper.status] || paper.status}</span></div>
-        {paper.english_title && paper.chinese_title && <div className="paper-subtitle">{paper.english_title}</div>}
+        {paper.english_title && paper.chinese_title && paper.english_title !== paper.chinese_title && <div className="paper-subtitle">{paper.english_title}</div>}
         <div className="paper-meta"><span>{paper.page_count} 页</span><span>{paper.source_name}</span><span>{new Date(paper.created_at).toLocaleDateString('zh-CN')}</span></div>
         {paper.status === 'translating' || paper.status === 'queued' || paper.status === 'checking' ? (
           <div className="progress-row"><div className="progress-track"><div className="progress-value" style={{ width: `${progress}%` }} /></div><span>{progress}%</span></div>
@@ -355,6 +407,7 @@ function PaperCard({ paper, folders, onOpen, onAction, onEdit, onDelete, onMove 
           {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
         </select>
         <button className="text-button" onClick={onEdit}>编辑标题</button>
+        <button className="text-button" type="button" onClick={onReveal}>打开文件位置</button>
         {paper.can_read && <button className="primary-button compact-button" onClick={onOpen}>阅读</button>}
         {canStop && <button className="text-button" onClick={() => onAction('stop')}>暂停</button>}
         {canContinue && <button className="secondary-button compact-button" onClick={() => onAction('continue')}>继续翻译</button>}
@@ -387,10 +440,10 @@ function TitleDialog({ paper, onClose, onSave }: { paper: Paper; onClose: () => 
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section className="title-dialog" role="dialog" aria-modal="true" aria-labelledby="edit-title-heading">
         <div className="dialog-heading"><div><div className="eyebrow">文献标题</div><h2 id="edit-title-heading">确认或修改标题</h2></div><button className="icon-button" aria-label="关闭" onClick={onClose}>×</button></div>
-        <label htmlFor="english-title">英文标题</label><textarea id="english-title" rows={3} value={english} onChange={(event) => setEnglish(event.target.value)} />
-        <label htmlFor="chinese-title">中文标题</label><input id="chinese-title" value={chinese} onChange={(event) => setChinese(event.target.value)} placeholder="留空时会由免费服务翻译" />
+        {paper.source_language !== 'zh' && <><label htmlFor="english-title">英文标题</label><textarea id="english-title" rows={3} value={english} onChange={(event) => setEnglish(event.target.value)} /></>}
+        <label htmlFor="chinese-title">{paper.source_language === 'zh' ? '文献标题' : '中文标题'}</label><input id="chinese-title" value={chinese} onChange={(event) => setChinese(event.target.value)} placeholder={paper.source_language === 'zh' ? '填写文献标题' : '留空时会由免费服务翻译'} />
         <p className="field-help">文献库中的副本会使用中文标题命名，导入时选择的源文件不变。</p>
-        <div className="dialog-actions"><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" onClick={() => onSave(english, chinese)}>保存并继续</button></div>
+        <div className="dialog-actions"><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" onClick={() => onSave(paper.source_language === 'zh' ? chinese : english, chinese)}>保存并继续</button></div>
       </section>
     </div>
   );

@@ -33,11 +33,11 @@ const pdfHashes = Object.fromEntries(fs.readdirSync(paperFolder).filter(name => 
     else Object.assign(options, { executablePath: path.join(root, 'node_modules/electron/dist/electron.exe'), args: ['.'] });
     application = await _electron.launch(options);
     const version = await application.evaluate(({ app }) => app.getVersion());
-    if (process.env.REVIEW_EXECUTABLE) assert.equal(version, '0.11.0');
+    if (process.env.REVIEW_EXECUTABLE) assert.equal(version, '0.12.0');
     let main = await application.firstWindow();
     main.on('pageerror', error => errors.push(error.message));
-    await main.getByRole('button', { name: 'AI 设置', exact: true }).waitFor();
-    await main.evaluate(address => window.workbench.request({ path: '/settings', method: 'PUT', body: { base_url: address, model: 'fixture-A', api_key: 'review-only-tools-key' } }), fixture.apiUrl);
+    await main.getByRole('button', { name: '设置', exact: true }).waitFor();
+    await main.evaluate(address => window.workbench.request({ path: '/settings', method: 'PUT', body: { base_url: address, protocol: 'custom_chat_completions', model: 'fixture-A', api_key: 'review-only-tools-key' } }), fixture.apiUrl);
     await main.getByRole('button', { name: '新建文件夹', exact: true }).click();
     await main.getByLabel('文件夹名称', { exact: true }).fill('实验设计');
     await main.getByRole('button', { name: '保存', exact: true }).click();
@@ -62,13 +62,14 @@ const pdfHashes = Object.fromEntries(fs.readdirSync(paperFolder).filter(name => 
     await main.getByLabel('搜索文献').fill('');
     await main.locator('.paper-card').waitFor();
 
-    await main.getByRole('button', { name: 'AI 设置', exact: true }).click();
+    await main.getByRole('button', { name: '设置', exact: true }).click();
     await main.locator('.advanced-model-url > summary').click();
     await main.getByLabel('模型列表地址', { exact: true }).fill(fixture.modelsUrl);
     await main.getByRole('button', { name: '获取模型列表', exact: true }).click();
     await main.getByRole('checkbox', { name: 'mimo-v6pro', exact: true }).check();
     await main.getByRole('checkbox', { name: 'fixture-B', exact: true }).check();
     await main.getByRole('button', { name: '添加所选模型', exact: true }).click();
+    await main.locator('.advanced-manual-model > summary').click();
     await main.getByLabel('添加模型', { exact: true }).fill('manual-model');
     await main.getByRole('button', { name: '手动添加', exact: true }).click();
     await main.getByRole('button', { name: '保存设置', exact: true }).click();

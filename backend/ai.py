@@ -6,11 +6,14 @@ import os
 import re
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit, urlunsplit
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
 from .db import connect, data_root
+
+PROTOCOLS = {"openai_chat_completions", "openai_responses", "custom_chat_completions"}
 
 
 @dataclass
@@ -71,11 +74,210 @@ def current_config() -> tuple[str, str, str]:
     return normalize_base_url(row["base_url"]), row["model"], password
 
 
+def current_protocol() -> str:
+    with connect() as db:
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(settings)").fetchall()}
+        row = db.execute("SELECT protocol FROM settings WHERE id = 1").fetchone() if "protocol" in columns else None
+    protocol = row["protocol"] if row else "custom_chat_completions"
+    return protocol if protocol in PROTOCOLS else "custom_chat_completions"
+
+
 def normalize_base_url(base_url: str) -> str:
     value = base_url.strip()
     if not value.lower().startswith(("http://", "https://")):
         raise AIError("invalid_address", "服务地址必须以 http:// 或 https:// 开头。")
     return value
+
+
+def endpoint_for_protocol(base_url: str, protocol: str) -> str:
+    value = normalize_base_url(base_url)
+    if protocol not in PROTOCOLS:
+        raise AIError("invalid_protocol", "AI 协议配置无效，请重新选择协议。")
+    if protocol == "custom_chat_completions":
+        return value
+    endpoint = "/responses" if protocol == "openai_responses" else "/chat/completions"
+    parts = urlsplit(value)
+    path = parts.path
+    folded = path.casefold()
+    for known in ("/chat/completions", "/responses"):
+        if folded.endswith(known + "/"):
+            path = path[:-len(known + "/")] + endpoint + "/"
+            break
+        if folded.endswith(known):
+            path = path[:-len(known)] + endpoint
+            break
+    else:
+        path = path.rstrip("/") + endpoint
+    return urlunsplit((parts.scheme, parts.netloc, path or endpoint, parts.query, parts.fragment))
+
+
+def _responses_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    if not tools:
+        return None
+    converted: list[dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("type") != "function" or not isinstance(tool.get("function"), dict):
+            raise AIError("invalid_tool_call", "当前工具定义不能用于 Responses API。")
+        function = tool["function"]
+        converted.append({"type": "function", "strict": False, **function})
+    return converted
+
+
+def _responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for message in messages:
+        role = message.get("role")
+        raw_output = message.get("_responses_output")
+        if role == "assistant" and isinstance(raw_output, list):
+            result.extend(raw_output)
+        elif role == "tool":
+            result.append({
+                "type": "function_call_output",
+                "call_id": message.get("tool_call_id", ""),
+                "output": message.get("content", ""),
+            })
+        elif role == "assistant" and isinstance(message.get("tool_calls"), list):
+            for call in message["tool_calls"]:
+                function = call.get("function", {}) if isinstance(call, dict) else {}
+                result.append({
+                    "type": "function_call",
+                    "call_id": call.get("id", ""),
+                    "name": function.get("name", ""),
+                    "arguments": function.get("arguments", ""),
+                })
+        else:
+            item = {key: value for key, value in message.items() if key not in {"tool_calls", "_responses_output", "reasoning_content"}}
+            result.append(item)
+    return result
+
+
+def _responses_tool_choice(tool_choice: str | dict[str, Any] | None) -> Any:
+    if not isinstance(tool_choice, dict):
+        return tool_choice or "auto"
+    function = tool_choice.get("function")
+    if tool_choice.get("type") == "function" and isinstance(function, dict):
+        return {"type": "function", "name": function.get("name", "")}
+    return tool_choice
+
+
+def _responses_usage(usage: object) -> dict[str, int] | None:
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    total_tokens = usage.get("total_tokens")
+    mapped = {
+        "prompt_tokens": input_tokens,
+        "completion_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+    return {
+        key: value for key, value in mapped.items()
+        if isinstance(value, int) and value >= 0
+    } or None
+
+
+def _parse_responses_payload(payload: object, *, tools: list[dict[str, Any]] | None, paper_id: str | None, operation: str) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise AIError("invalid_response", "AI 服务返回了无效的 Responses 内容。")
+    status = payload.get("status")
+    if status != "completed":
+        details = payload.get("incomplete_details")
+        reason = details.get("reason") if isinstance(details, dict) else None
+        reason_text = {
+            "max_output_tokens": "回答达到长度上限，内容未完成。",
+            "content_filter": "回答被服务的内容过滤器截断。",
+        }.get(reason, "Responses API 未返回已完成的回答。")
+        raise AIError("incomplete_response", reason_text)
+    output = payload.get("output")
+    if not isinstance(output, list):
+        raise AIError("invalid_response", "AI 服务没有返回有效的 Responses 输出。")
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    raw_calls: list[dict[str, Any]] = []
+    for item in output:
+        if not isinstance(item, dict):
+            raise AIError("invalid_response", "AI 服务返回了格式无效的输出项。")
+        if item.get("type") == "message":
+            content = item.get("content")
+            for part in content if isinstance(content, list) else []:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "output_text" and isinstance(part.get("text"), str):
+                    content_parts.append(part["text"])
+                elif part.get("type") == "refusal" and isinstance(part.get("refusal"), str):
+                    content_parts.append(part["refusal"])
+        elif item.get("type") == "reasoning":
+            summary = item.get("summary")
+            for part in summary if isinstance(summary, list) else []:
+                if isinstance(part, dict) and part.get("type") == "summary_text" and isinstance(part.get("text"), str):
+                    reasoning_parts.append(part["text"])
+        elif item.get("type") == "function_call":
+            call_id = item.get("call_id")
+            name = item.get("name")
+            arguments = item.get("arguments")
+            if not all(isinstance(value, str) and value for value in (call_id, name, arguments)):
+                raise AIError("invalid_response", "AI 服务返回了格式无效的工具调用。")
+            raw_calls.append({
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            })
+    usage = _responses_usage(payload.get("usage"))
+    if raw_calls:
+        if not tools:
+            raise AIError("incomplete_response", "服务返回了工具调用，但本轮没有启用文献工具。")
+        _record_usage(paper_id, operation, usage)
+        message = {
+            "role": "assistant",
+            "content": "".join(content_parts) or None,
+            "tool_calls": raw_calls,
+            "_responses_output": output,
+        }
+        if reasoning_parts:
+            message["reasoning_content"] = "".join(reasoning_parts)
+        return {
+            "content": "".join(content_parts),
+            "reasoning": "".join(reasoning_parts),
+            "tool_calls": raw_calls,
+            "message": message,
+            "usage": usage,
+        }
+    content = "".join(content_parts).strip()
+    if not content:
+        raise AIError("empty_response", "AI 服务返回了空内容。")
+    _record_usage(paper_id, operation, usage)
+    return {"content": content, "reasoning": "".join(reasoning_parts), "usage": usage}
+
+
+def _responses_http_error(status: int, body: bytes, *, tools: list[dict[str, Any]] | None) -> AIError:
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        payload = {}
+    details = payload.get("error", payload) if isinstance(payload, dict) else {}
+    if not isinstance(details, dict):
+        details = {}
+    code = details.get("code") or details.get("type")
+    if status == 413 or (status in {400, 422} and code in {"context_length_exceeded", "input_too_long", "max_tokens"}):
+        return AIError("context_length", "AI 服务拒绝了完整原文请求，输入超出或超过模型容量；本次没有截断或分块，请检查所选模型和服务的输入上限。")
+    if tools and status in {400, 422}:
+        return AIError("tools_unsupported", f"AI 服务返回 HTTP {status}；可能不支持工具调用，也可能模型或请求参数有误。请检查服务商对 tools 的支持及模型配置。")
+    category = {401: "authentication", 403: "authentication", 404: "model_or_address", 429: "rate_limit"}.get(status, "service_error")
+    message = {
+        "authentication": "API Key 无效或没有权限，请检查凭据。",
+        "model_or_address": "模型或服务地址不可用，请检查配置。",
+        "rate_limit": "服务暂时限流或额度不足，请稍后重试。",
+        "service_error": f"AI 服务返回 HTTP {status}。",
+    }[category]
+    return AIError(category, message)
+    message = {
+        "authentication": "API Key 无效或没有权限，请检查凭据。",
+        "model_or_address": "模型或服务地址不可用，请检查配置。",
+        "rate_limit": "服务暂时限流或额度不足，请稍后重试。",
+        "service_error": f"AI 服务返回 HTTP {status}。",
+    }[category]
+    return AIError(category, message)
 
 
 def _record_usage(paper_id: str | None, operation: str, usage: object) -> None:
@@ -100,18 +302,52 @@ def chat_completion(
     messages: list[dict[str, Any]], *, operation: str = "chat", paper_id: str | None = None,
     timeout: int = 90, tools: list[dict[str, Any]] | None = None,
     tool_choice: str | dict[str, Any] | None = None, model: str | None = None,
+    config: tuple[str, str, str] | None = None, protocol: str | None = None,
 ) -> dict[str, Any]:
-    base_url, configured_model, api_key = current_config()
+    base_url, configured_model, api_key = config or current_config()
     selected_model = (model or configured_model).strip()
     if not selected_model:
         raise AIError("not_configured", "请配置要使用的模型名称。")
+    selected_protocol = protocol or current_protocol()
+    if selected_protocol not in PROTOCOLS:
+        raise AIError("invalid_protocol", "AI 协议配置无效，请重新选择协议。")
+    endpoint = endpoint_for_protocol(base_url, selected_protocol)
+    if selected_protocol == "openai_responses":
+        request_body: dict[str, Any] = {
+            "model": selected_model,
+            "input": _responses_input(messages),
+            "stream": False,
+        }
+        response_tools = _responses_tools(tools)
+        if response_tools:
+            request_body["tools"] = response_tools
+            request_body["tool_choice"] = _responses_tool_choice(tool_choice)
+        request = urllib.request.Request(
+            endpoint,
+            data=json.dumps(request_body, ensure_ascii=False).encode("utf-8"),
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read()
+            status = exc.code
+            exc.close()
+            raise _responses_http_error(status, body, tools=tools) from None
+        except (urllib.error.URLError, TimeoutError, OSError):
+            raise AIError("network", "无法连接 AI 服务，请检查地址和网络。") from None
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise AIError("invalid_response", "AI 服务返回的内容不是有效 JSON。") from None
+        return _parse_responses_payload(payload, tools=tools, paper_id=paper_id, operation=operation)
     request_body: dict[str, Any] = {"model": selected_model, "messages": messages, "stream": False}
     if tools:
         request_body["tools"] = tools
         request_body["tool_choice"] = tool_choice or "auto"
     body = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
-        base_url,
+        endpoint,
         data=body,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
@@ -214,6 +450,7 @@ async def stream_chat_completion(
     timeout: int = 90, tools: list[dict[str, Any]] | None = None,
     tool_choice: str | dict[str, Any] | None = None, model: str | None = None,
     config: tuple[str, str, str] | None = None,
+    protocol: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     import httpx
 
@@ -221,6 +458,16 @@ async def stream_chat_completion(
     selected_model = (model or configured_model).strip()
     if not selected_model:
         raise AIError("not_configured", "请配置要使用的模型名称。")
+    selected_protocol = protocol or current_protocol()
+    if selected_protocol not in PROTOCOLS:
+        raise AIError("invalid_protocol", "AI 协议配置无效，请重新选择协议。")
+    if selected_protocol == "openai_responses":
+        async for item in _stream_responses_completion(
+            messages, endpoint_for_protocol(base_url, selected_protocol), selected_model, api_key,
+            operation=operation, paper_id=paper_id, timeout=timeout, tools=tools, tool_choice=tool_choice,
+        ):
+            yield item
+        return
     request_body: dict[str, Any] = {"model": selected_model, "messages": messages, "stream": True}
     if tools:
         request_body["tools"] = tools
@@ -351,7 +598,7 @@ async def stream_chat_completion(
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout), follow_redirects=False) as client:
-            async with client.stream("POST", base_url, content=request_body_bytes, headers=headers) as response:
+            async with client.stream("POST", endpoint_for_protocol(base_url, selected_protocol), content=request_body_bytes, headers=headers) as response:
                 if response.status_code >= 400:
                     body = await response.aread()
                     raise status_error(response.status_code, body)
@@ -423,6 +670,175 @@ async def stream_chat_completion(
         raise AIError("empty_response", "AI 服务返回了空内容。")
     _record_usage(paper_id, operation, usage)
     yield {"type": "result", "result": {"content": content.strip(), "reasoning": "".join(reasoning_parts), "usage": usage}}
+
+
+async def _stream_responses_completion(
+    messages: list[dict[str, Any]], endpoint: str, model: str, api_key: str, *,
+    operation: str, paper_id: str | None, timeout: int,
+    tools: list[dict[str, Any]] | None, tool_choice: str | dict[str, Any] | None,
+) -> AsyncIterator[dict[str, Any]]:
+    import httpx
+
+    request_body: dict[str, Any] = {
+        "model": model,
+        "input": _responses_input(messages),
+        "stream": True,
+    }
+    response_tools = _responses_tools(tools)
+    if response_tools:
+        request_body["tools"] = response_tools
+        request_body["tool_choice"] = _responses_tool_choice(tool_choice)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    }
+    output_items: dict[int, dict[str, Any]] = {}
+    calls: dict[int, dict[str, Any]] = {}
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    final_response: dict[str, Any] | None = None
+    data_lines: list[str] = []
+
+    def parse_event(raw: str) -> dict[str, Any]:
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            raise AIError("invalid_response", "AI 服务返回了无效的 Responses 流式数据。") from None
+        if not isinstance(event, dict):
+            raise AIError("invalid_response", "AI 服务返回了无效的 Responses 流式数据。")
+        return event
+
+    def response_error(event: dict[str, Any]) -> AIError:
+        response = event.get("response")
+        details = response.get("error") if isinstance(response, dict) else event.get("error")
+        if not isinstance(details, dict) and event.get("type") == "error":
+            details = event
+        if isinstance(details, dict) and not (details.get("message") or details.get("code") or details.get("type")):
+            details = event
+        if isinstance(details, dict):
+            message = details.get("message")
+            code = details.get("code") or details.get("type")
+            if code in {"context_length_exceeded", "input_too_long", "max_output_tokens"}:
+                return AIError("context_length", "AI 服务拒绝了完整原文请求，输入超出或超过模型容量；本次没有截断或分块，请检查所选模型和服务的输入上限。")
+            if isinstance(message, str) and message:
+                return AIError("service_error", message[:500])
+        return AIError("service_error", "AI Responses 请求未能完成。")
+
+    def consume_event(event: dict[str, Any]) -> tuple[list[dict[str, str]], bool]:
+        nonlocal final_response
+        event_type = event.get("type")
+        emitted: list[dict[str, str]] = []
+        if event_type == "response.output_item.added":
+            index = event.get("output_index")
+            item = event.get("item")
+            if type(index) is int and isinstance(item, dict):
+                output_items[index] = item
+                if item.get("type") == "function_call":
+                    calls[index] = dict(item)
+        elif event_type == "response.function_call_arguments.delta":
+            index = event.get("output_index")
+            delta = event.get("delta")
+            if type(index) is int and isinstance(delta, str):
+                call = calls.setdefault(index, {"type": "function_call", "id": "", "call_id": "", "name": "", "arguments": ""})
+                call["arguments"] = (call.get("arguments") or "") + delta
+        elif event_type == "response.function_call_arguments.done":
+            index = event.get("output_index")
+            arguments = event.get("arguments")
+            if type(index) is int and isinstance(arguments, str):
+                call = calls.setdefault(index, {"type": "function_call", "id": "", "call_id": "", "name": "", "arguments": ""})
+                call["arguments"] = arguments
+        elif event_type == "response.output_item.done":
+            index = event.get("output_index")
+            item = event.get("item")
+            if type(index) is int and isinstance(item, dict):
+                output_items[index] = item
+                if item.get("type") == "function_call":
+                    calls[index] = dict(item)
+        elif event_type == "response.output_text.delta":
+            delta = event.get("delta")
+            if isinstance(delta, str) and delta:
+                content_parts.append(delta)
+                emitted.append({"type": "content_delta", "text": delta})
+        elif event_type == "response.refusal.delta":
+            delta = event.get("delta")
+            if isinstance(delta, str) and delta:
+                content_parts.append(delta)
+                emitted.append({"type": "content_delta", "text": delta})
+        elif event_type in {"response.reasoning_summary_text.delta", "response.reasoning_text.delta"}:
+            delta = event.get("delta")
+            if isinstance(delta, str) and delta:
+                reasoning_parts.append(delta)
+                emitted.append({"type": "reasoning_delta", "text": delta})
+        elif event_type in {"response.failed", "error"}:
+            raise response_error(event)
+        elif event_type == "response.incomplete":
+            response = event.get("response")
+            details = response.get("incomplete_details") if isinstance(response, dict) else None
+            reason = details.get("reason") if isinstance(details, dict) else None
+            if reason in {"max_output_tokens", "context_length_exceeded"}:
+                raise AIError("context_length", "AI Responses 输出达到长度或模型容量上限，内容未完成。")
+            raise AIError("incomplete_response", "AI Responses 流式回答未完整结束。")
+        elif event_type == "response.completed":
+            response = event.get("response")
+            if not isinstance(response, dict) or response.get("status") != "completed":
+                raise AIError("incomplete_response", "AI Responses 流式回答未正常完成。")
+            if not isinstance(response.get("output"), list):
+                response = {**response, "output": [output_items[index] for index in sorted(output_items)]}
+            final_response = response
+            return emitted, True
+        return emitted, False
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout), follow_redirects=False) as client:
+            async with client.stream(
+                "POST", endpoint,
+                content=json.dumps(request_body, ensure_ascii=False).encode("utf-8"),
+                headers=headers,
+            ) as response:
+                if response.status_code >= 400:
+                    body = await response.aread()
+                    raise _responses_http_error(response.status_code, body, tools=tools)
+                completed = False
+                async for line in response.aiter_lines():
+                    if line == "":
+                        if not data_lines:
+                            continue
+                        event = parse_event("\n".join(data_lines))
+                        data_lines.clear()
+                        emitted, completed = consume_event(event)
+                        for item in emitted:
+                            yield item
+                        if completed:
+                            break
+                    elif line.startswith("data:"):
+                        data_lines.append(line[5:].lstrip())
+                if data_lines and final_response is None:
+                    event = parse_event("\n".join(data_lines))
+                    emitted, completed = consume_event(event)
+                    for item in emitted:
+                        yield item
+                if final_response is None:
+                    raise AIError("incomplete_response", "AI Responses 流式连接结束，但没有收到 response.completed。")
+    except AIError:
+        raise
+    except httpx.TimeoutException:
+        raise AIError("network", "AI 服务连接超时，请检查网络后重试。") from None
+    except httpx.HTTPError:
+        raise AIError("network", "无法连接 AI 服务，请检查地址和网络。") from None
+
+    # The completed response carries the final reasoning and function-call items;
+    # use it for the tool roundtrip rather than replaying partial stream objects.
+    if not final_response.get("output") and output_items:
+        final_response["output"] = [output_items[index] for index in sorted(output_items)]
+    result = _parse_responses_payload(final_response, tools=tools, paper_id=paper_id, operation=operation)
+    if result.get("tool_calls"):
+        yield {"type": "result", "result": result}
+        return
+    # Text has already been sent as deltas; only the final unified result is needed here.
+    result["content"] = "".join(content_parts).strip() or result["content"]
+    result["reasoning"] = "".join(reasoning_parts) or result.get("reasoning", "")
+    yield {"type": "result", "result": result}
 
 
 def _translation_and_terms(content: str, source: str) -> tuple[str, list[tuple[str, str]]]:

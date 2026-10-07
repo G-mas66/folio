@@ -31,11 +31,11 @@ async function until(check, message) {
     const options = { cwd: root, env, timeout: 90000, executablePath: process.env.REVIEW_EXECUTABLE || path.join(root, 'node_modules/electron/dist/electron.exe'), args: process.env.REVIEW_EXECUTABLE ? [] : ['.'] };
     application = await _electron.launch(options);
     const version = await application.evaluate(({ app }) => app.getVersion());
-    assert.equal(version, '0.11.0');
+    assert.equal(version, '0.12.0');
     let main = await application.firstWindow();
     main.on('pageerror', error => errors.push(error.message));
-    await main.getByRole('button', { name: 'AI 设置', exact: true }).waitFor();
-    await main.evaluate(address => window.workbench.request({ path: '/settings', method: 'PUT', body: { base_url: address, model: 'stream-fixture', api_key: 'review-only-stream-key' } }), fixture.apiUrl);
+    await main.getByRole('button', { name: '设置', exact: true }).waitFor();
+    await main.evaluate(address => window.workbench.request({ path: '/settings', method: 'PUT', body: { base_url: address, protocol: 'custom_chat_completions', model: 'stream-fixture', api_key: 'review-only-stream-key' } }), fixture.apiUrl);
     await main.locator('.paper-card').getByRole('button', { name: '阅读', exact: true }).click();
     let reader = main;
     assert.equal(application.windows().length, 1);
@@ -187,7 +187,7 @@ async function until(check, message) {
     await application.close();
     application = await _electron.launch(options);
     main = await application.firstWindow();
-    await main.getByRole('button', { name: 'AI 设置', exact: true }).waitFor();
+    await main.getByRole('button', { name: '设置', exact: true }).waitFor();
     reader = main;
     await reader.locator('.chat-message.assistant').first().waitFor();
     const restored = await reader.evaluate(id => window.workbench.request({ path: `/papers/${id}/chat` }), seeded.paper_id);

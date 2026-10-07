@@ -59,11 +59,11 @@ const until = async (check, message) => {
     delete env.WORKBENCH_DEV;
     const options = { cwd: root, env, timeout: 90000, executablePath: process.env.REVIEW_EXECUTABLE || path.join(root, 'node_modules/electron/dist/electron.exe'), args: process.env.REVIEW_EXECUTABLE ? [] : ['.'] };
     application = await _electron.launch(options);
-    assert.equal(await application.evaluate(({ app }) => app.getVersion()), '0.11.0');
+    assert.equal(await application.evaluate(({ app }) => app.getVersion()), '0.12.0');
     main = await application.firstWindow();
     main.on('pageerror', error => errors.push(error.message));
     await main.getByTestId('library-tab').waitFor();
-    await request('/settings', 'PUT', { base_url: fixture.apiUrl, model: 'stream-fixture', api_key: 'review-only-tabs-key' });
+    await request('/settings', 'PUT', { base_url: fixture.apiUrl, protocol: 'custom_chat_completions', model: 'stream-fixture', api_key: 'review-only-tabs-key' });
     await request('/settings/models', 'PUT', { models: ['stream-fixture', 'fixture-B'] });
     const folders = [];
     for (const name of ['深度学习', '医学影像', '研究方法', '待精读', '综述', '参考资料']) {
@@ -165,7 +165,7 @@ const until = async (check, message) => {
     const narrow = await main.evaluate(() => ({ viewport: window.innerWidth, outerWidth: document.documentElement.scrollWidth }));
     assert.ok(narrow.outerWidth <= narrow.viewport + 2, 'Tab strip and readers must not expand the window');
     assert.ok(await main.getByTestId('library-tab').isVisible());
-    assert.ok(await main.getByRole('button', { name: 'AI 设置', exact: true }).isVisible());
+    assert.ok(await main.getByRole('button', { name: '设置', exact: true }).isVisible());
     assert.equal(await panel(second.paper_id).getByLabel('当前页码').inputValue(), '3');
     await main.screenshot({ path: path.join(output, 'narrow-tabs.png') });
     await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1440, 920));
@@ -249,7 +249,7 @@ const until = async (check, message) => {
     assert.equal(application.windows().length, 1);
     for (const source of sources) assert.equal(hash(source.path), source.hash);
     assert.equal(errors.length, 0, errors.join('\n'));
-    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version: '0.11.0', seconds: (Date.now() - started) / 1000, first, second, colors: folders.map(folder => folder.color), sidebar, list, firstState, secondState, pdfLoads: loadsBeforeSwitch, requests: fixture.requests.length, sessions: fixture.sessions, windows: 1, errors }, null, 2));
+    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version: '0.12.0', seconds: (Date.now() - started) / 1000, first, second, colors: folders.map(folder => folder.color), sidebar, list, firstState, secondState, pdfLoads: loadsBeforeSwitch, requests: fixture.requests.length, sessions: fixture.sessions, windows: 1, errors }, null, 2));
     console.log(JSON.stringify({ result: 'passed', output }));
   } catch (error) {
     fs.writeFileSync(path.join(output, 'failure.txt'), String(error.stack || error));

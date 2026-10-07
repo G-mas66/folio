@@ -3,6 +3,7 @@ import { api, errorMessage, StorageLocationInfo, StorageMigrationProgress } from
 
 type Settings = {
   base_url: string;
+  protocol: 'openai_chat_completions' | 'openai_responses' | 'custom_chat_completions';
   models_url: string;
   model: string;
   model_options: string[];
@@ -10,7 +11,7 @@ type Settings = {
   api_tokens: number | null;
 };
 
-const emptySettings: Settings = { base_url: '', models_url: '', model: '', model_options: [], key_configured: false, api_tokens: null };
+const emptySettings: Settings = { base_url: '', protocol: 'openai_chat_completions', models_url: '', model: '', model_options: [], key_configured: false, api_tokens: null };
 
 export function SettingsPanel() {
   const [settings, setSettings] = useState<Settings>(emptySettings);
@@ -55,7 +56,7 @@ export function SettingsPanel() {
     setNotice('');
     setFailure('');
     try {
-      await api('/settings', 'PUT', { base_url: settings.base_url, models_url: settings.models_url, model: settings.model, api_key: apiKey });
+      await api('/settings', 'PUT', { base_url: settings.base_url, protocol: settings.protocol, models_url: settings.models_url, model: settings.model, api_key: apiKey });
       setApiKey('');
       const next = await api<Settings>('/settings');
       setSettings(next);
@@ -72,7 +73,7 @@ export function SettingsPanel() {
     setNotice('正在测试连接…');
     setFailure('');
     try {
-      await api('/settings', 'PUT', { base_url: settings.base_url, models_url: settings.models_url, model: settings.model, api_key: apiKey });
+      await api('/settings', 'PUT', { base_url: settings.base_url, protocol: settings.protocol, models_url: settings.models_url, model: settings.model, api_key: apiKey });
       setApiKey('');
       setSettings(await api<Settings>('/settings'));
       await api('/settings/test', 'POST');
@@ -99,7 +100,7 @@ export function SettingsPanel() {
       });
       setDiscovered(result.models);
       setSelectedDiscovered([]);
-      setNotice(`读取到 ${result.models.length} 个模型；请选择要添加的项目。`);
+      setNotice(`读取到 ${result.models.length} 个模型；可直接选择默认模型，或勾选添加到常用列表。`);
     } catch (error) {
       setNotice('');
       setFailure(errorMessage(error));
@@ -120,6 +121,7 @@ export function SettingsPanel() {
     setFailure('');
     try {
       await saveModelOptions([...settings.model_options, model]);
+      if (!settings.model) setSettings((current) => ({ ...current, model }));
       setManualModel('');
       setNotice('模型已添加到常用列表。');
     } catch (error) {
@@ -185,20 +187,33 @@ export function SettingsPanel() {
     }
   }
 
+  const availableModels = [...new Set([settings.model, ...settings.model_options, ...discovered].filter(Boolean))];
+
   return (
     <section className="settings-panel">
       <div className="page-heading">
         <div>
           <div className="eyebrow">偏好设置</div>
-          <h1>AI 问答与总结</h1>
+          <h1>设置</h1>
           <p>此处 AI 配置仅用于原文问答和全文总结；文献翻译由免费翻译服务处理，不需要此处的 API Key。</p>
         </div>
       </div>
       <div className="settings-card">
-        <label className="field-label" htmlFor="base-url">AI API URL</label>
-        <input id="base-url" disabled={loading || busy} value={settings.base_url} onChange={(e) => { setSettings({ ...settings, base_url: e.target.value }); setCustomModelsUrlEnabled(false); }} placeholder="粘贴服务商提供的完整 URL" />
+        <label className="field-label" htmlFor="base-url">{settings.protocol === 'custom_chat_completions' ? '完整请求地址' : 'API 基础地址'}</label>
+        <input id="base-url" disabled={loading || busy || discovering} value={settings.base_url} onChange={(e) => { setSettings({ ...settings, base_url: e.target.value }); setCustomModelsUrlEnabled(false); setDiscovered([]); setSelectedDiscovered([]); }} placeholder={settings.protocol === 'custom_chat_completions' ? '粘贴完整对话接口 URL' : '例如 https://api.example.com/v1'} />
+        <label className="field-label" htmlFor="api-protocol">API 协议</label>
+        <select id="api-protocol" disabled={loading || busy || discovering} value={settings.protocol} onChange={(e) => setSettings({ ...settings, protocol: e.target.value as Settings['protocol'] })}>
+          <option value="openai_chat_completions">OpenAI Chat Completions（默认）</option>
+          <option value="openai_responses">OpenAI Responses</option>
+          <option value="custom_chat_completions">自定义完整地址（Chat Completions）</option>
+        </select>
+        <span className="field-help">{settings.protocol === 'custom_chat_completions' ? '请求会原样使用上方 URL，不追加路径。' : `填写服务商的基础地址，应用自动处理 ${settings.protocol === 'openai_responses' ? '/responses' : '/chat/completions'} 路径；已有完整接口地址也可使用，不会重复追加。`}</span>
+
+        <label className="field-label" htmlFor="api-key">AI API Key</label>
+        <input id="api-key" disabled={loading || busy || discovering} type="password" autoComplete="new-password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={settings.key_configured ? '已安全保存；留空可保留当前 Key' : '粘贴服务方提供的 API Key'} />
+        <span className="field-help">保存在 Windows 凭据管理器中，不会回读显示。获取模型时使用本次输入的 Key，留空时复用已保存 Key，无 Key 时尝试匿名查询；获取列表不会保存临时 Key。</span>
         <div className="model-discovery-actions">
-          <span className="field-help">从当前 API URL 查找模型；使用本次输入的 Key，留空时复用已保存 Key，无 Key 时会尝试匿名查询。临时 Key 不保存，也不会改动聊天请求地址。</span>
+          <span className="field-help">从服务读取可用模型，无需手动填写模型名称。</span>
           <button className="secondary-button compact-button" type="button" onClick={() => void discoverModels()} disabled={loading || busy || discovering || !settings.base_url.trim() && !(customModelsUrlEnabled && settings.models_url.trim())}>
             {discovering ? '读取中…' : '获取模型列表'}
           </button>
@@ -211,25 +226,28 @@ export function SettingsPanel() {
           <span className="field-help">适用于服务商使用不同的模型列表地址。此地址只用于获取模型，不会覆盖 AI API URL。</span>
         </details>
 
-        <label className="field-label" htmlFor="model">默认模型名称</label>
-        <input id="model" disabled={loading || busy} value={settings.model} onChange={(e) => setSettings({ ...settings, model: e.target.value })} placeholder="服务方提供的模型 ID" />
-
-        <label className="field-label" htmlFor="api-key">AI API Key</label>
-        <input id="api-key" disabled={loading || busy} type="password" autoComplete="new-password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={settings.key_configured ? '已安全保存；留空可保留当前 Key' : '粘贴服务方提供的 API Key'} />
-        <span className="field-help">仅用于 AI 问答和总结；保存在 Windows 凭据管理器中，不用于文献翻译，也不会回读显示。读取模型列表时使用本次输入的 Key，留空时复用已保存 Key；临时 Key 不会保存。</span>
+        <label className="field-label" htmlFor="model">默认模型</label>
+        <select id="model" disabled={loading || busy || discovering} value={settings.model} onChange={(e) => setSettings({ ...settings, model: e.target.value })}>
+          <option value="">{availableModels.length ? '请选择模型' : '请先获取模型列表'}</option>
+          {availableModels.map((model) => <option key={model} value={model}>{model}</option>)}
+        </select>
 
         <div className="settings-actions">
-          <button className="primary-button" onClick={save} disabled={busy || loading}>{loading ? '读取中…' : busy ? '处理中…' : '保存设置'}</button>
-          <button className="secondary-button" onClick={test} disabled={busy || loading || !settings.key_configured && !apiKey}>{loading ? '读取中…' : '保存并测试连接'}</button>
+          <button className="primary-button" onClick={save} disabled={busy || loading || discovering}>{loading ? '读取中…' : busy ? '处理中…' : '保存设置'}</button>
+          <button className="secondary-button" onClick={test} disabled={busy || loading || discovering || !settings.model || !settings.key_configured && !apiKey}>{loading ? '读取中…' : '保存并测试连接'}</button>
           <span className={settings.key_configured ? 'connected-state' : 'muted-state'}>{loading ? '正在读取已保存设置…' : settings.key_configured ? 'AI 凭据已保存' : '尚未配置 AI API Key'}</span>
         </div>
 
         <div className="model-list-settings">
-          <label className="field-label" htmlFor="manual-model">添加模型</label>
-          <div className="model-manual-add">
-            <input id="manual-model" aria-label="添加模型" disabled={loading || busy} value={manualModel} onChange={(e) => setManualModel(e.target.value)} placeholder="手动输入模型 ID" />
-            <button className="secondary-button compact-button" type="button" onClick={() => void addManualModel()} disabled={loading || busy || !manualModel.trim()}>手动添加</button>
-          </div>
+          <details className="advanced-manual-model">
+            <summary>高级：手动添加模型</summary>
+            <span className="field-help">服务商未提供模型列表时，可手动添加已知的模型 ID。</span>
+            <label className="field-label" htmlFor="manual-model">添加模型</label>
+            <div className="model-manual-add">
+              <input id="manual-model" aria-label="添加模型" disabled={loading || busy} value={manualModel} onChange={(e) => setManualModel(e.target.value)} placeholder="手动输入模型 ID" />
+              <button className="secondary-button compact-button" type="button" onClick={() => void addManualModel()} disabled={loading || busy || !manualModel.trim()}>手动添加</button>
+            </div>
+          </details>
           {settings.model_options.length > 0 && <div className="saved-model-list" aria-label="常用模型列表">
             {settings.model_options.map((model) => <div className="saved-model-row" key={model}><span>{model}</span><button type="button" className="text-button" aria-label={`移除模型 ${model}`} disabled={busy} onClick={() => void removeModel(model)}>移除</button></div>)}
           </div>}
@@ -273,7 +291,7 @@ export function SettingsPanel() {
       </section>
       <div className="privacy-card">
         <h2>数据与隐私</h2>
-        <p>免费翻译服务会接收论文标题和可提取的正文段落；AI 问答与总结会把相关英文原文发送到你配置的服务。论文文件、译文、阅读进度和聊天记录保存在本机。</p>
+        <p>英文文献的免费翻译会发送标题和可提取的正文文字；中文文献跳过翻译。AI 问答与总结会把所需的原文发送到你配置的服务。PDF、阅读进度、聊天、笔记和批注保存在本机。</p>
         <p>AI 服务累计用量：{settings.api_tokens == null ? '服务未返回用量信息' : `${settings.api_tokens.toLocaleString()} tokens`}</p>
       </div>
     </section>

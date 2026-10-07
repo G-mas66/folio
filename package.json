@@ -1,6 +1,6 @@
 {
   "name": "paper-workbench",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "description": "阅川 Folio 个人文献阅读工作台",
   "main": "electron/main.cjs",
@@ -12,7 +12,7 @@
     "build:pdf-engine": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-pdf-engine.ps1",
     "dist": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dist.ps1 -Target nsis",
     "dist:portable": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dist.ps1 -Target portable",
-    "test:backend": ".venv\\Scripts\\python.exe -m unittest review.test_pdf_contract review.test_api_contract review.test_translation_flow review.test_chat_context review.test_free_provider_contract review.test_delete_contract review.test_pdf_upgrade_contract review.test_tool_chat_contract review.test_folder_contract review.test_model_discovery_contract review.test_model_auto_discovery review.test_stream_parser review.test_stream_contract review.test_stream_upgrade review.test_web_search_contract review.test_notes_contract review.test_storage_identity backend_tests.test_glossary_contract -v",
+    "test:backend": ".venv\\Scripts\\python.exe -m unittest review.test_pdf_contract review.test_api_contract review.test_translation_flow review.test_chat_context review.test_free_provider_contract review.test_delete_contract review.test_pdf_upgrade_contract review.test_tool_chat_contract review.test_folder_contract review.test_model_discovery_contract review.test_model_auto_discovery review.test_stream_parser review.test_stream_contract review.test_stream_upgrade review.test_web_search_contract review.test_notes_contract review.test_storage_identity review.test_protocol_contract review.test_chat_sessions review.test_chinese_import backend_tests.test_glossary_contract -v",
     "test:storage": "node review/test_storage_location.cjs"
   },
   "dependencies": {

@@ -86,7 +86,7 @@ const until = async (check, message) => {
   };
   try {
     app = await _electron.launch(options);
-    assert.equal(await app.evaluate(({ app }) => app.getVersion()), '0.11.0');
+    assert.equal(await app.evaluate(({ app }) => app.getVersion()), '0.12.0');
     main = await app.firstWindow();
     main.on('pageerror', error => errors.push(error.message));
     await main.getByTestId('library-tab').waitFor();
@@ -232,7 +232,7 @@ const until = async (check, message) => {
     await current().getByTestId(`reader-annotation-${highlight.id}`).getByRole('button', { name: '删除高亮', exact: true }).click();
     await until(async () => (await marks(first.paper_id)).length === 0, 'Highlight must be deletable');
     assert.equal(fixture.requests.length, 0, 'Notes, marks and edits must never invoke AI');
-    await api('/settings', 'PUT', { base_url: fixture.apiUrl, model: 'stream-fixture', api_key: 'review-only-notes-key' });
+    await api('/settings', 'PUT', { base_url: fixture.apiUrl, protocol: 'custom_chat_completions', model: 'stream-fixture', api_key: 'review-only-notes-key' });
     await current().getByTestId('reader-side-tab-chat').click();
     await until(async () => (await current().getByTestId('reader-model-select').inputValue()) === 'stream-fixture', 'Chat must receive settings');
     fixture.state.pause = true;
@@ -263,7 +263,7 @@ const until = async (check, message) => {
     for (const source of sources) assert.equal(digest(source.path), source.hash);
     assert.equal(errors.length, 0, errors.join('\n'));
     assert.equal(app.windows().length, 1);
-    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version: '0.11.0', seconds: (Date.now() - started) / 1000, first, second, highlight, comment, sourceHashes: sources, aiRequests: fixture.requests.length, errors }, null, 2));
+    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version: '0.12.0', seconds: (Date.now() - started) / 1000, first, second, highlight, comment, sourceHashes: sources, aiRequests: fixture.requests.length, errors }, null, 2));
     console.log(JSON.stringify({ result: 'passed', output }));
   } catch (error) {
     fs.writeFileSync(path.join(output, 'failure.txt'), String(error.stack || error));

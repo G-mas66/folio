@@ -296,11 +296,12 @@ function startChatStream(event, input) {
   const requestId = input.requestId;
   if (!/^[a-f0-9]{32}$/.test(requestId || '') || chatStreams.has(requestId)) throw new Error('流式请求编号无效。');
   if (input.runId && !/^[a-f0-9]{32}$/.test(input.runId)) throw new Error('总结任务编号无效。');
+  if (input.sessionId && !/^[a-f0-9]{32}$/.test(input.sessionId)) throw new Error('会话编号无效。');
   let pathName;
   let body;
   if (input.runId) {
     pathName = `/papers/${input.paperId}/analysis/${input.runId}/stream`;
-    body = { request_id: requestId };
+    body = { request_id: requestId, session_id: input.sessionId };
   } else {
     pathName = `/papers/${input.paperId}/chat/stream`;
     body = {
@@ -308,6 +309,7 @@ function startChatStream(event, input) {
       question: input.question,
       model: input.model,
       web_search: input.webSearch,
+      session_id: input.sessionId,
     };
   }
   const stream = {
@@ -348,6 +350,25 @@ async function cancelPaperStreams(event, paperId) {
 }
 
 ipcMain.handle('workbench:request', (_event, input) => requestApi(input));
+ipcMain.handle('workbench:reveal-paper-file', async (event, input) => {
+  if (BrowserWindow.fromWebContents(event.sender) !== mainWindow || !/^[a-f0-9]{32}$/.test(input?.paperId || '') || !['original', 'mono', 'dual'].includes(input?.kind)) throw new Error('文献文件位置无效。');
+  const paper = await requestApi({ path: `/papers/${input.paperId}` });
+  const name = input.kind === 'original' || paper.source_language === 'zh' ? paper.file_name : input.kind === 'mono' ? paper.mono_pdf_file_name : paper.dual_pdf_file_name;
+  if (!name || path.basename(name) !== name) throw new Error('对应的 PDF 尚未生成。');
+  const folder = path.join(dataRoot, 'papers', input.paperId);
+  const target = path.join(folder, name);
+  if (!fs.existsSync(target) || fs.realpathSync(folder) !== path.join(fs.realpathSync(path.join(dataRoot, 'papers')), input.paperId) || path.dirname(fs.realpathSync(target)) !== fs.realpathSync(folder)) throw new Error('文献库中的 PDF 不存在。');
+  shell.showItemInFolder(target);
+  return true;
+});
+ipcMain.handle('workbench:open-library-folder', async (event) => {
+  if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('无法打开文献目录。');
+  const folder = path.join(dataRoot, 'papers');
+  fs.mkdirSync(folder, { recursive: true });
+  const error = await shell.openPath(folder);
+  if (error) throw new Error('无法打开文献目录。');
+  return true;
+});
 ipcMain.handle('workbench:chat-stream-start', (event, input) => startChatStream(event, input));
 ipcMain.handle('workbench:chat-stream-cancel', (event, requestId) => cancelChatStream(event, requestId));
 ipcMain.handle('workbench:cancel-paper-streams', (event, paperId) => cancelPaperStreams(event, paperId));

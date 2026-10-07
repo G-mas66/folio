@@ -1,11 +1,11 @@
-"""Compare build inputs with the final 0.11.0 packaged resources."""
+"""Compare build inputs with the final 0.12.0 packaged resources."""
 import hashlib
 import json
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DIST = ROOT / 'dist/installer-0.11.0'
+DIST = ROOT / 'dist/installer-0.12.0'
 RESOURCES = DIST / 'win-unpacked/resources'
 
 
@@ -37,6 +37,6 @@ if __name__ == '__main__':
         'assets': compare_tree(ROOT / 'backend/pdf_engine_assets/babeldoc', RESOURCES / 'pdf-engine-assets/babeldoc'),
         'source': compare_tree(ROOT / 'backend/pdf-engine-source', RESOURCES / 'pdf-engine-source'),
     }
-    destination = ROOT / '.review/distribution-0.11.json'
+    destination = ROOT / '.review/distribution-0.12.json'
     destination.write_text(json.dumps(result, indent=2), encoding='utf-8')
     print(json.dumps(result, indent=2))

@@ -62,8 +62,6 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
   const [paper, setPaper] = useState<Paper | null>(null);
   const [pages, setPages] = useState<Page[]>([]);
   const [segments, setSegments] = useState<Segment[]>([]);
-  const [chat, setChat] = useState<ChatMessage[]>([]);
-  const [runs, setRuns] = useState<AnalysisRun[]>([]);
   const [rightPanel, setRightPanel] = useState<'chat' | 'notes'>('chat');
   const [noteText, setNoteText] = useState('');
   const [noteSaveStatus, setNoteSaveStatusState] = useState<NoteSaveStatus>('未保存');
@@ -120,6 +118,7 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
   const noteSaveTimerRef = useRef<number | null>(null);
   const pendingAnnotationJumpRef = useRef<{ pdfKind: PdfKind; page: number } | null>(null);
   const previousPdfKindRef = useRef<PdfKind>(pdfKind);
+  const loadedPdfKindRef = useRef<PdfKind | null>(null);
   readerLayoutRef.current = readerLayout;
   if (lastActivePropRef.current !== active) {
     activeEpochRef.current += 1;
@@ -262,22 +261,19 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
 
   const refresh = useCallback(async () => {
     try {
-      const [nextPaper, nextPages, nextSegments, nextChat, nextRuns, nextSettings] = await Promise.all([
+      const [nextPaper, nextPages, nextSegments, nextSettings] = await Promise.all([
         api<Paper>(`/papers/${paperId}`),
         api<Page[]>(`/papers/${paperId}/pages`),
         api<Segment[]>(`/papers/${paperId}/segments`),
-        api<ChatMessage[]>(`/papers/${paperId}/chat`),
-        api<AnalysisRun[]>(`/papers/${paperId}/analysis`),
         api<ReaderSettings>('/settings'),
       ]);
       setPaper(nextPaper);
       setPages(nextPages);
       setSegments(nextSegments);
-      setChat(nextChat);
-      setRuns(nextRuns);
       setSettings(nextSettings);
       if (restoredPaperRef.current !== paperId) {
         restoredPaperRef.current = paperId;
+        if (nextPaper.source_language === 'zh') setMode('original');
         const restoredPage = nextPaper.last_page || 1;
         visiblePageRef.current = restoredPage;
         initialPageScrollPendingRef.current = true;
@@ -355,6 +351,8 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
   useEffect(() => {
     if (previousPdfKindRef.current === pdfKind) return;
     previousPdfKindRef.current = pdfKind;
+    if (!pendingAnnotationJumpRef.current) pendingAnnotationJumpRef.current = { pdfKind, page: visiblePageRef.current };
+    initialPageScrollPendingRef.current = true;
     setSelection(null);
     setHighlightPaletteOpen(false);
     setAnnotationDraft(null);
@@ -462,6 +460,7 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
           await loaded.destroy();
           return;
         }
+        loadedPdfKindRef.current = pdfKind;
         setPageAspects(aspects);
         setPdfDocument(loaded);
       } catch (error) {
@@ -478,12 +477,15 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
     };
   }, [paper?.can_read, paper?.page_count, paperId, pdfKind]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const target = pendingAnnotationJumpRef.current;
-    if (!active || !pdfDocument || !target || target.pdfKind !== pdfKind) return;
+    if (!active || !pdfDocument || loadedPdfKindRef.current !== pdfKind || !target || target.pdfKind !== pdfKind) return;
     pendingAnnotationJumpRef.current = null;
-    goToPage(target.page);
-  }, [active, pdfDocument, pdfKind]);
+    visiblePageRef.current = target.page;
+    setPageNumber(target.page);
+    scrollPageIntoView(target.page, 'auto');
+    initialPageScrollPendingRef.current = false;
+  }, [active, pdfDocument, pdfKind, pdfScrollElement]);
 
   function scrollPageIntoView(target: number, behavior: ScrollBehavior = 'smooth') {
     if (!activeRef.current || !pdfScrollElement) return;
@@ -537,13 +539,13 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
   }, [active, paperId, pdfDocument, pdfScrollElement, paper?.page_count]);
 
   useEffect(() => {
-    if (!active || !pdfDocument || !initialPageScrollPendingRef.current) return;
+    if (!active || !pdfDocument || loadedPdfKindRef.current !== pdfKind || pendingAnnotationJumpRef.current || !initialPageScrollPendingRef.current) return;
     const restoredPage = pageNumber;
     window.requestAnimationFrame(() => {
       scrollPageIntoView(restoredPage, 'auto');
       initialPageScrollPendingRef.current = false;
     });
-  }, [active, pdfDocument, pageNumber]);
+  }, [active, pdfDocument, pdfKind, pageNumber]);
 
   useEffect(() => () => {
     if (progressTimerRef.current !== null) window.clearTimeout(progressTimerRef.current);
@@ -576,7 +578,7 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
       void window.workbench.openExternal(source.url);
       return;
     }
-    setMode('bilingual');
+    setMode(paper?.source_language === 'zh' ? 'original' : 'bilingual');
     goToPage(source.start_page);
   }
 
@@ -586,7 +588,7 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
     if (!query) return;
     const match = segments.find((segment) => segment.original_text.toLocaleLowerCase().includes(query));
     if (!match) {
-      setSearchNotice('没有在可提取的英文正文中找到这段文字。');
+      setSearchNotice('没有在可提取的原文中找到这段文字。');
       return;
     }
     setSearchNotice(`已跳到第 ${match.start_page} 页。`);
@@ -714,9 +716,12 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
           <div className="reader-binding">正在解读：{paper?.chinese_title || paper?.english_title || '当前文献'}</div>
         </div>
         <div className="reader-top-actions">
+          {paper?.source_language === 'zh' ? <span className="reader-binding">中文原文 · 无需翻译</span> : <>
           <button className={mode === 'bilingual' ? 'mode-button active' : 'mode-button'} onClick={() => setMode('bilingual')}>双语对照</button>
           <button className={mode === 'mono' ? 'mode-button active' : 'mode-button'} onClick={() => setMode('mono')}>中文 PDF</button>
           <button className={mode === 'original' ? 'mode-button active' : 'mode-button'} onClick={() => setMode('original')}>原文 PDF</button>
+          </>}
+          <button className="layout-toggle" type="button" aria-label="打开当前 PDF 文件位置" onClick={() => void window.workbench.revealPaperFile(paperId, pdfKind).catch((error) => setFailure(errorMessage(error)))}>文件位置</button>
           <button className="layout-toggle" type="button" data-testid="toggle-outline" aria-label={readerLayout.outlineVisible ? '隐藏导航' : '显示导航'} aria-pressed={!readerLayout.outlineVisible} onClick={() => toggleReaderPanel('outline')}>{readerLayout.outlineVisible ? '隐藏导航' : '显示导航'}</button>
           <button className="layout-toggle" type="button" data-testid="toggle-chat" aria-label={readerLayout.chatVisible ? '隐藏 AI 助手' : '显示 AI 助手'} aria-pressed={!readerLayout.chatVisible} onClick={() => toggleReaderPanel('chat')}>{readerLayout.chatVisible ? '隐藏 AI 助手' : '显示 AI 助手'}</button>
         </div>
@@ -754,12 +759,12 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
                 <span>/ {paper.page_count}</span>
                 <button className="icon-button" aria-label="下一页" onClick={() => goToPage(pageNumber + 1)} disabled={pageNumber >= paper.page_count}>›</button>
               </div>
-              {mode !== 'mono' && <form className="pdf-search" onSubmit={findText}><input aria-label="搜索英文原文" value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="搜索英文原文" /><button className="secondary-button compact-button">查找</button></form>}
+              {mode !== 'mono' && <form className="pdf-search" onSubmit={findText}><input aria-label={paper.source_language === 'zh' ? '搜索原文' : '搜索英文原文'} value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder={paper.source_language === 'zh' ? '搜索原文' : '搜索英文原文'} /><button className="secondary-button compact-button">查找</button></form>}
               <div className="zoom-controls"><button className="secondary-button compact-button" aria-label="缩小 PDF" onClick={() => setPdfScale((scale) => Math.max(0.5, Math.round((scale - 0.1) * 100) / 100))}>−</button><span>{Math.round(pdfScale * 100)}%</span><button className="secondary-button compact-button" aria-label="放大 PDF" onClick={() => setPdfScale((scale) => Math.min(2.5, Math.round((scale + 0.1) * 100) / 100))}>＋</button></div>
               {searchNotice && <span className="search-result">{searchNotice}</span>}
               {selectionNotice && <span className="selection-notice" role="status">{selectionNotice}</span>}
             </div>
-            <div className="pdf-scroll" ref={setPdfScrollElement} data-testid="pdf-scroll" aria-label="PDF 页面滚动区" onScroll={(event) => {
+            <div className="pdf-scroll" ref={setPdfScrollElement} data-testid="pdf-scroll" data-pdf-kind={pdfDocument ? loadedPdfKindRef.current : undefined} aria-label="PDF 页面滚动区" onScroll={(event) => {
               if (!activeRef.current) return;
               if (selection) setSelection(null);
               scrollPositionRef.current = event.currentTarget.scrollTop;
@@ -800,9 +805,9 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
               <button id={`reader-side-tab-notes-${paperId}`} type="button" role="tab" data-testid="reader-side-tab-notes" aria-controls={`reader-side-panel-notes-${paperId}`} aria-selected={rightPanel === 'notes'} className={rightPanel === 'notes' ? 'active' : ''} onClick={() => setRightPanel('notes')}>笔记</button>
             </div>
             <div id={`reader-side-panel-chat-${paperId}`} className="reader-side-content" role="tabpanel" aria-labelledby={`reader-side-tab-chat-${paperId}`} hidden={rightPanel !== 'chat'}>
-              <ChatPanel
+              <PaperChats
                 paperId={paperId} title={paper.chinese_title || paper.english_title} active={active} visible={rightPanel === 'chat'}
-                messages={chat} runs={runs} refresh={refresh} onJump={jumpToSource}
+                onJump={jumpToSource}
                 settings={settings} currentModel={currentModel} modelFailure={modelFailure}
                 onModelChange={chooseModel} onWebSearchChange={updateWebSearch}
               />
@@ -943,27 +948,134 @@ type ActiveStream = {
   runId?: string; messageId?: number; requestId?: string; sources: Source[];
 };
 
-function ChatPanel({ paperId, title, active, visible, messages, runs, refresh, onJump, settings, currentModel, modelFailure, onModelChange, onWebSearchChange }: {
-  paperId: string; title: string; active: boolean; visible: boolean; messages: ChatMessage[]; runs: AnalysisRun[]; refresh: () => Promise<void>;
+type PaperChatsProps = {
+  paperId: string; title: string; active: boolean; visible: boolean;
   onJump: (source: Source) => void;
   settings: ReaderSettings | null; currentModel: string; modelFailure: string;
   onModelChange: (model: string) => Promise<void>;
   onWebSearchChange: (enabled: boolean) => Promise<void>;
+};
+type ChatSession = { id: string; title: string; created_at: string };
+
+function PaperChats(props: PaperChatsProps) {
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [currentSession, setCurrentSession] = useState('');
+  const [busySessions, setBusySessions] = useState<Record<string, boolean>>({});
+  const [changing, setChanging] = useState(false);
+  const [failure, setFailure] = useState('');
+  const selectionKey = `paper-workbench.chat-session.${props.paperId}`;
+
+  useEffect(() => {
+    let cancelled = false;
+    void api<ChatSession[]>(`/papers/${props.paperId}/chat-sessions`).then((list) => {
+      if (cancelled) return;
+      let saved = '';
+      try { saved = localStorage.getItem(selectionKey) || ''; } catch { /* session history is stored in the database */ }
+      setSessions(list);
+      setCurrentSession(list.some((session) => session.id === saved) ? saved : list[0]?.id || '');
+    }).catch((error) => { if (!cancelled) setFailure(errorMessage(error)); });
+    return () => { cancelled = true; };
+  }, [props.paperId, selectionKey]);
+
+  useEffect(() => {
+    if (currentSession) {
+      try { localStorage.setItem(selectionKey, currentSession); } catch { /* selecting a session still works */ }
+    }
+  }, [currentSession, selectionKey]);
+
+  const markBusy = useCallback((id: string, busy: boolean) => {
+    setBusySessions((previous) => previous[id] === busy ? previous : { ...previous, [id]: busy });
+  }, []);
+
+  async function newSession() {
+    if (changing) return;
+    setChanging(true);
+    setFailure('');
+    try {
+      const created = await api<ChatSession>(`/papers/${props.paperId}/chat-sessions`, 'POST', {});
+      setSessions((previous) => [...previous, created]);
+      setCurrentSession(created.id);
+    } catch (error) { setFailure(errorMessage(error)); }
+    finally { setChanging(false); }
+  }
+
+  async function deleteSession(session: ChatSession) {
+    if (changing || busySessions[session.id] || !window.confirm(`删除“${session.title}”的聊天记录？PDF、笔记和其他会话会保留。`)) return;
+    setChanging(true);
+    setFailure('');
+    try {
+      await api(`/papers/${props.paperId}/chat-sessions/${session.id}`, 'DELETE');
+      const list = await api<ChatSession[]>(`/papers/${props.paperId}/chat-sessions`);
+      setSessions(list);
+      if (currentSession === session.id) setCurrentSession(list[0]?.id || '');
+    } catch (error) { setFailure(errorMessage(error)); }
+    finally { setChanging(false); }
+  }
+
+  return <div className="paper-chats">
+    <div className="chat-session-bar">
+      <div className="chat-session-tabs" role="tablist" aria-label="文献 AI 会话">
+        {sessions.map((session) => <div className={`chat-session-tab ${session.id === currentSession ? 'active' : ''}`} key={session.id}>
+          <button type="button" role="tab" aria-selected={session.id === currentSession} data-testid={`chat-session-${session.id}`} title={session.title} onClick={() => setCurrentSession(session.id)}>{session.title}</button>
+          <button type="button" className="chat-session-close" aria-label={`删除会话 ${session.title}`} title={busySessions[session.id] ? '请先停止此会话的生成' : '删除此会话'} disabled={changing || busySessions[session.id]} onClick={() => void deleteSession(session)}>×</button>
+        </div>)}
+      </div>
+      <button type="button" className="chat-session-new" aria-label="新建 AI 会话" title="新建会话" disabled={changing || !sessions.length} onClick={() => void newSession()}>＋</button>
+    </div>
+    {failure && <div className="chat-error" role="alert">{failure}</div>}
+    {!sessions.length && !failure && <div className="chat-empty">正在读取会话…</div>}
+    {sessions.map((session) => <div className="chat-session-content" data-session-id={session.id} key={session.id} hidden={session.id !== currentSession}>
+      <ChatPanel {...props} sessionId={session.id} visible={props.visible && session.id === currentSession} onBusyChange={markBusy} />
+    </div>)}
+  </div>;
+}
+
+function ChatPanel({ paperId, title, active, visible, onJump, settings, currentModel, modelFailure, onModelChange, onWebSearchChange, sessionId, onBusyChange }: PaperChatsProps & {
+  sessionId: string; onBusyChange: (id: string, busy: boolean) => void;
 }) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [runs, setRuns] = useState<AnalysisRun[]>([]);
   const [question, setQuestion] = useState('');
   const [busy, setBusy] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [failure, setFailure] = useState('');
   const [webSearchEnabled, setWebSearchEnabled] = useState(true);
   const [activeStream, setActiveStream] = useState<ActiveStream | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
+  const messagesTopRef = useRef(0);
+  const followLatestRef = useRef(true);
+  const [followingLatest, setFollowingLatest] = useState(true);
   const activeRef = useRef<ActiveStream | null>(null);
   const handleRef = useRef<ChatStreamHandle | null>(null);
+
+  const refresh = useCallback(async () => {
+    const [nextMessages, nextRuns] = await Promise.all([
+      api<ChatMessage[]>(`/papers/${paperId}/chat?session_id=${sessionId}`),
+      api<AnalysisRun[]>(`/papers/${paperId}/analysis?session_id=${sessionId}`),
+    ]);
+    setMessages(nextMessages);
+    setRuns(nextRuns);
+  }, [paperId, sessionId]);
+
+  useEffect(() => {
+    if (active && visible) void refresh().catch((error) => setFailure(errorMessage(error)));
+  }, [active, visible, refresh]);
+  useEffect(() => { onBusyChange(sessionId, busy); }, [sessionId, busy, onBusyChange]);
 
   useEffect(() => {
     if (settings) setWebSearchEnabled(settings.web_search_enabled);
   }, [settings?.web_search_enabled]);
-  useEffect(() => { if (active && visible) bottomRef.current?.scrollIntoView({ behavior: activeStream ? 'auto' : 'smooth' }); }, [active, visible, messages, runs, activeStream?.answer, activeStream?.reasoning]);
+  useLayoutEffect(() => {
+    const container = messagesRef.current;
+    if (active && visible && container) container.scrollTop = followLatestRef.current ? container.scrollHeight : messagesTopRef.current;
+  }, [active, visible, messages, runs, activeStream?.answer, activeStream?.reasoning]);
+
+  function followLatest() {
+    followLatestRef.current = true;
+    setFollowingLatest(true);
+    const container = messagesRef.current;
+    if (container) container.scrollTop = container.scrollHeight;
+  }
 
   function finishStream(event: ChatStreamEvent, current: ActiveStream) {
     const data = event.data;
@@ -981,7 +1093,7 @@ function ChatPanel({ paperId, title, active, visible, messages, runs, refresh, o
     const handle = handleRef.current;
     handleRef.current = null;
     handle?.dispose();
-    void refresh().finally(() => {
+    void refresh().catch((error) => setFailure(errorMessage(error))).finally(() => {
       if (activeRef.current === finalState) {
         activeRef.current = null;
         setActiveStream(null);
@@ -990,6 +1102,7 @@ function ChatPanel({ paperId, title, active, visible, messages, runs, refresh, o
   }
 
   async function startStream(input: { question?: string; runId?: string }) {
+    followLatest();
     const initial: ActiveStream = {
       answer: '', reasoning: '', phase: 'thinking', runId: input.runId, sources: [],
     };
@@ -1000,7 +1113,7 @@ function ChatPanel({ paperId, title, active, visible, messages, runs, refresh, o
     let ended = false;
     try {
       const handle = await window.workbench.startChatStream({
-        paperId, question: input.question, runId: input.runId,
+        paperId, sessionId, question: input.question, runId: input.runId,
         model: currentModel, webSearch: webSearchEnabled,
       }, (event) => {
         const previous = activeRef.current;
@@ -1048,7 +1161,7 @@ function ChatPanel({ paperId, title, active, visible, messages, runs, refresh, o
       setActiveStream(null);
       setBusy(false);
       setFailure(errorMessage(error));
-      await refresh();
+      await refresh().catch((error) => setFailure(errorMessage(error)));
     }
   }
 
@@ -1102,7 +1215,16 @@ function ChatPanel({ paperId, title, active, visible, messages, runs, refresh, o
       <div className="chat-heading">
         <div className="chat-bound-paper" title={title}>当前文献 · {title}</div>
       </div>
-      <div className="chat-messages" aria-live="polite">
+      <div className="chat-messages" ref={messagesRef} data-testid="chat-messages" aria-live="polite" onWheel={(event) => {
+        if (event.deltaY < 0) { followLatestRef.current = false; setFollowingLatest(false); }
+      }} onScroll={(event) => {
+        if (!active || !visible) return;
+        const container = event.currentTarget;
+        messagesTopRef.current = container.scrollTop;
+        const following = container.scrollHeight - container.scrollTop - container.clientHeight <= 4;
+        followLatestRef.current = following;
+        setFollowingLatest(following);
+      }}>
         {visibleMessages.length === 0 && runs.length === 0 && !activeStream && <div className="chat-empty"><div className="chat-empty-mark" aria-hidden="true">问</div><p>可以直接问“详细总结一下这篇文献”，也可以询问实验设计、数据或结论。</p></div>}
         {visibleMessages.map((message, index) => <Message key={message.id ?? `${message.created_at || index}-${index}`} message={message} onJump={onJump} />)}
         {runs.filter((run) => !(run.status === 'running' && activeStream?.runId === run.id)).map((run) => <div className="run-card" key={run.id}>
@@ -1117,8 +1239,8 @@ function ChatPanel({ paperId, title, active, visible, messages, runs, refresh, o
           <div className="message-content" data-testid="streaming-answer"><MarkdownContent markdown={activeStream.answer || '…'} sources={activeStream.sources} onJump={onJump} /></div>
           <div className="assistant-thinking"><span className="typing-dots">•••</span>{activeLabel}{activeStream.query ? ` ${activeStream.query}` : ''}</div>
         </div>}
-        <div ref={bottomRef} />
       </div>
+      {!followingLatest && <button className="chat-follow-latest" type="button" onClick={followLatest}>回到最新 ↓</button>}
       {failure && <div className="chat-error" role="alert">{failure}</div>}
       <form className="chat-composer" onSubmit={(event) => void send(event)}>
         <textarea aria-label="向当前文献提问" value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => {

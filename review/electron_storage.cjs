@@ -48,19 +48,19 @@ const until = async (check, message) => {
   const confirm = () => main.getByRole('button', { name: '确认迁移并重启', exact: true });
   try {
     app = await _electron.launch(options);
-    assert.equal(await app.evaluate(({ app }) => app.getVersion()), '0.11.0');
+    assert.equal(await app.evaluate(({ app }) => app.getVersion()), '0.12.0');
     main = await app.firstWindow();
     main.on('pageerror', error => errors.push(error.message));
     await main.getByTestId('library-tab').waitFor();
     const initialInfo = await main.evaluate(() => window.workbench.getAppInfo());
     assert.equal(initialInfo.dataRoot, original);
     assert.equal(initialInfo.uiDataRoot, path.join(original, 'electron-userData'));
-    await api('/settings', 'PUT', { base_url: fixture.apiUrl, model: 'stream-fixture', api_key: 'review-only-storage-key' });
+    await api('/settings', 'PUT', { base_url: fixture.apiUrl, protocol: 'custom_chat_completions', model: 'stream-fixture', api_key: 'review-only-storage-key' });
     const folder = await api('/folders', 'POST', { name: '迁移验收分类' });
     await api(`/papers/${paper.paper_id}/folder`, 'PATCH', { folder_id: folder.id });
     await api(`/papers/${paper.paper_id}/notes`, 'PUT', { text: '迁移前的独立阅读笔记：137、23.7%、811。' });
     const mark = await api(`/papers/${paper.paper_id}/annotations`, 'POST', { pdf_kind: 'original', page_no: 1, kind: 'comment', color: 'blue', selected_text: '137 independent samples', comment: '迁移后必须保留这条批注', rects: [{ x: .1, y: .2, width: .2, height: .02 }] });
-    await main.getByRole('button', { name: 'AI 设置', exact: true }).click();
+    await main.getByRole('button', { name: '设置', exact: true }).click();
     await main.getByRole('button', { name: '更改存储位置…', exact: true }).waitFor();
     await choose(null);
     assert.equal(await confirm().count(), 0, 'Canceling native picker must not prepare a migration');
@@ -114,7 +114,7 @@ const until = async (check, message) => {
     await reader.getByLabel('向当前文献提问').fill('停止思考测试');
     await reader.getByRole('button', { name: /发送/ }).click();
     await reader.getByTestId('streaming-reasoning').getByText(/思考第一段/).waitFor();
-    await main.getByRole('button', { name: 'AI 设置', exact: true }).click();
+    await main.getByRole('button', { name: '设置', exact: true }).click();
     await choose(target);
     await confirm().waitFor();
     await app.evaluate(({ app }, evidence) => {
@@ -145,6 +145,17 @@ const until = async (check, message) => {
     const newInfo = await main.evaluate(() => window.workbench.getAppInfo());
     assert.equal(newInfo.dataRoot, target);
     assert.equal(newInfo.uiDataRoot, initialInfo.uiDataRoot);
+    await app.evaluate(({ shell }) => {
+      globalThis.reviewLocations = [];
+      shell.showItemInFolder = file => globalThis.reviewLocations.push(file);
+      shell.openPath = async folder => { globalThis.reviewLocations.push(folder); return ''; };
+    });
+    await main.evaluate(id => window.workbench.revealPaperFile(id, 'original'), paper.paper_id);
+    await main.evaluate(() => window.workbench.openLibraryFolder());
+    const located = await app.evaluate(() => globalThis.reviewLocations);
+    assert.ok(located[0].startsWith(path.join(target, 'papers', paper.paper_id) + path.sep));
+    assert.ok(fs.existsSync(located[0]));
+    assert.equal(located[1], path.join(target, 'papers'));
     assert.equal((await api('/settings')).key_configured, true, 'Moving must preserve Credential Manager identity');
     assert.equal((await api('/papers')).length, 1);
     assert.equal((await api(`/papers/${paper.paper_id}`)).folder_id, folder.id);
@@ -170,7 +181,7 @@ const until = async (check, message) => {
     assert.equal(hash(paper.source), sourceHash);
     assert.equal(errors.length, 0, errors.join('\n'));
     await main.screenshot({ path: path.join(output, 'migrated-notes.png') });
-    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version: '0.11.0', seconds: (Date.now() - started) / 1000, paper, initialInfo, newInfo, savedConfig, pdfs, mark, history: history.length, errors }, null, 2));
+    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version: '0.12.0', seconds: (Date.now() - started) / 1000, paper, initialInfo, newInfo, savedConfig, pdfs, mark, history: history.length, errors }, null, 2));
     console.log(JSON.stringify({ result: 'passed', output }));
   } catch (error) {
     fs.writeFileSync(path.join(output, 'failure.txt'), String(error.stack || error));

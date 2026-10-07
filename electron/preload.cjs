@@ -24,6 +24,8 @@ function startChatStream(input, onEvent) {
 contextBridge.exposeInMainWorld('workbench', Object.freeze({
   request: (input) => ipcRenderer.invoke('workbench:request', input),
   choosePdfs: () => ipcRenderer.invoke('workbench:choose-pdfs'),
+  revealPaperFile: (paperId, kind) => ipcRenderer.invoke('workbench:reveal-paper-file', { paperId, kind }),
+  openLibraryFolder: () => ipcRenderer.invoke('workbench:open-library-folder'),
   getDroppedPaths: (files) => Array.from(files, (file) => webUtils.getPathForFile(file)).filter(Boolean),
   cancelPaperStreams: (paperId) => ipcRenderer.invoke('workbench:cancel-paper-streams', paperId),
   startChatStream,
