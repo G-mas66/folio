@@ -52,5 +52,6 @@ runs:
         test -d "$APP"
         export REVIEW_APP_PATH="$APP"
         export REVIEW_EXECUTABLE="$APP/Contents/MacOS/阅川 Folio"
+        REPORT="$RUNNER_TEMP/folio-macos-smoke/smoke-${{ inputs.architecture }}.json"
+        trap 'status=$?; if [[ "$status" -ne 0 && -s "$REPORT" ]]; then cat "$REPORT"; fi; exit "$status"' EXIT
         npm run smoke:macos
-        cat "$RUNNER_TEMP/folio-macos-smoke/smoke-${{ inputs.architecture }}.json"

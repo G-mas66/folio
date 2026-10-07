@@ -71,6 +71,10 @@ function run(command, args, options = {}) {
   });
 }
 
+function commandFailure(result) {
+  return `exit=${result.code}, signal=${result.signal || 'none'}, timedOut=${result.timedOut}: ${result.stderr.slice(-1000)}`;
+}
+
 function jsonEvents(text) {
   return text.split(/\r?\n/).flatMap(line => {
     try { return [JSON.parse(line)]; } catch { return []; }
@@ -117,7 +121,7 @@ function createProvider() {
         response.end('data: [DONE]\n\n');
         return;
       }
-      if (body.messages?.some(message => message.role === 'tool')) {
+      if (lastMessage?.role === 'tool') {
         send({ choices: [{ index: 0, delta: { content: '原文证据读取完成' }, finish_reason: null }] });
         send({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
         response.end('data: [DONE]\n\n');
@@ -229,6 +233,7 @@ async function main() {
   await new Promise(resolve => provider.server.listen(0, '127.0.0.1', resolve));
   const providerUrl = `http://127.0.0.1:${provider.server.address().port}/v1`;
   const browserErrors = [];
+  let smokeFailure;
   try {
     application = await _electron.launch({ executablePath: executable, args: [], cwd: root, env, timeout: 60000 });
     const library = await application.firstWindow();
@@ -318,22 +323,49 @@ async function main() {
     assert.equal(saved.text, note);
     report.checks.notes = 'saved_and_read_back';
     assert.deepEqual(browserErrors, []);
-  } finally {
-    try {
-      if (application) await application.close();
-    } finally {
-      provider.server.closeAllConnections();
-      await new Promise(resolve => provider.server.close(resolve));
-      const cleanup = await run(python, ['-c', [
-        'import keyring',
-        'from backend.ai import credential_service',
-        'service = credential_service()',
-        'if keyring.get_password(service, "api-key") is not None: keyring.delete_password(service, "api-key")',
-      ].join('\n')], { env, timeout: 60000 });
-      assert.equal(cleanup.code, 0, `Temporary app API key could not be removed from Keychain: ${cleanup.stderr.slice(-1000)}`);
-      report.checks.temporary_api_key_removed = true;
-    }
+  } catch (error) {
+    smokeFailure = error;
   }
+  if (!smokeFailure) report.checks.application_smoke = 'passed';
+
+  const cleanupErrors = [];
+  try {
+    if (application) await application.close();
+  } catch (error) {
+    cleanupErrors.push(`Application close failed: ${error.message}`);
+  }
+  try {
+    provider.server.closeAllConnections();
+    await new Promise((resolve, reject) => provider.server.close(error => error ? reject(error) : resolve()));
+  } catch (error) {
+    cleanupErrors.push(`Mock provider close failed: ${error.message}`);
+  }
+  try {
+    const serviceResult = await run(python, ['-c', [
+      'from backend.ai import credential_service',
+      'print(credential_service())',
+    ].join('\n')], { env, timeout: 15000 });
+    assert.equal(serviceResult.code, 0, `Could not identify the temporary Keychain service: ${commandFailure(serviceResult)}`);
+    const service = serviceResult.stdout.trim().split(/\r?\n/).at(-1);
+    assert.match(service, /^personal-paper-workbench-[a-f0-9]{16}$/, 'Unexpected temporary Keychain service name.');
+    const keychainCheck = report.checks.temporary_api_key_cleanup = { service, account: 'api-key' };
+    const keychainArgs = ['-s', service, '-a', 'api-key'];
+    const before = await run('security', ['find-generic-password', ...keychainArgs], { env, timeout: 15000 });
+    assert.equal(before.code, 0, `The packaged app did not leave its temporary API key in Keychain: ${commandFailure(before)}`);
+    keychainCheck.found = true;
+    const deletion = await run('security', ['delete-generic-password', ...keychainArgs], { env, timeout: 15000 });
+    assert.equal(deletion.code, 0, `Could not delete the temporary app API key from Keychain: ${commandFailure(deletion)}`);
+    keychainCheck.deleted = true;
+    const after = await run('security', ['find-generic-password', ...keychainArgs], { env, timeout: 15000 });
+    assert.equal(after.code, 44, `Expected errSecItemNotFound after Keychain cleanup: ${commandFailure(after)}`);
+    keychainCheck.verified_absent = 'errSecItemNotFound';
+    report.checks.temporary_api_key_removed = true;
+  } catch (error) {
+    cleanupErrors.push(`Temporary API key cleanup failed: ${error.message}`);
+  }
+  if (cleanupErrors.length) report.cleanup_errors = cleanupErrors;
+  if (smokeFailure) throw smokeFailure;
+  if (cleanupErrors.length) throw new Error(`macOS smoke cleanup failed: ${cleanupErrors.join('\n')}`);
 
   const translationOutput = path.join(runRoot, 'free-translation-output');
   const translationHome = path.join(runRoot, 'free-translation-runtime');
