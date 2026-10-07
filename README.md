@@ -62,9 +62,11 @@
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | `阅川-Folio-0.13.0-安装程序.exe` | 运行安装程序，可选择安装目录 |
-| Mac · Apple Silicon | `阅川-Folio-0.13.0-arm64-macOS.zip` | 解压，将 `.app` 拖入「应用程序」 |
-| Mac · Intel | `阅川-Folio-0.13.0-x64-macOS.zip` | 解压，将 `.app` 拖入「应用程序」 |
+| Windows x64 | [Folio-0.13.0-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v0.13.0-beta.5/Folio-0.13.0-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
+| Mac · Apple Silicon | [Folio-0.13.0-macOS-arm64.zip](https://github.com/G-mas66/folio/releases/download/v0.13.0-beta.5/Folio-0.13.0-macOS-arm64.zip) | 解压，将 `.app` 拖入「应用程序」 |
+| Mac · Intel | [Folio-0.13.0-macOS-x64.zip](https://github.com/G-mas66/folio/releases/download/v0.13.0-beta.5/Folio-0.13.0-macOS-x64.zip) | 解压，将 `.app` 拖入「应用程序」 |
+
+发布页附有各平台验收报告及 [SHA256SUMS.txt](https://github.com/G-mas66/folio/releases/download/v0.13.0-beta.5/SHA256SUMS.txt)，可用于核对下载文件。
 
 macOS 为测试版，采用 ad-hoc 签名，没有 Apple Developer ID 签名或公证。首次打开可能被 Gatekeeper 阻止，可按照系统「隐私与安全性」提示允许打开；真实用户机器上的首次安装流程尚未验证。
 
@@ -183,7 +185,7 @@ npm run dev
 
 这是 Electron 桌面开发模式，Vite 页面由桌面窗口加载。单独运行前端页面不具备 Electron 桥接能力，不能代替完整应用。
 
-当前版本默认数据和位置配置使用 D 盘路径。如果你的机器没有 D 盘，源码运行前可设置绝对路径：
+Windows 默认数据和位置配置使用 D 盘路径。如果你的机器没有 D 盘，源码运行前可设置绝对路径：
 
 ```powershell
 $env:WORKBENCH_DATA_DIR = 'C:\FolioData'
@@ -205,6 +207,8 @@ npm run test:storage
 ```
 
 Windows x64 0.13.0 后端检查 **124 项通过、1 项 POSIX 专用检查跳过**，13 项存储文件系统检查通过，最终打包程序及安装后的应用均通过桌面验收。此前 0.12.0 的十套桌面验收覆盖笔记/标注、存储失败回滚、公式、布局、停止、联网，以及真实免费翻译样本的图片与矢量图保留；0.13.0 另回归两种标准协议、模型读取、独立会话、中文原件导入、文件定位、阅读页码保留和流式阅读暂停跟随。兼容接口测试使用隔离的模拟服务，不代表任何第三方模型的回答质量。
+
+macOS arm64 与 x64 在 [原生云端验收](https://github.com/G-mas66/folio/actions/runs/37626630901) 中分别通过 **125 项后端检查和 13 项存储检查**。两种打包应用均验证了启动、钥匙串、中文原件阅读、两种 AI 协议、文献工具、停止生成、笔记保存及实际免费翻译；中文和双语 PDF 均生成并通过输出校验。测试系统为 macOS 15.7.9，尚未验证其他 macOS 版本或真实用户首次安装。
 
 `review/` 保留原生桌面验收脚本。部分脚本依赖 `.review/` 中预先生成或翻译的样本，不能在新克隆仓库中直接运行全部桌面验收；准备条件可从各脚本和种子脚本查看。历史结果和哈希记录见 [审批检查](docs/审批检查.md)，运行输出、私人文献和安装包不提交到仓库。
 
@@ -232,7 +236,7 @@ docs/                      方案、验收记录和界面截图
 
 ## 当前限制
 
-- Windows x64 0.12.0 是稳定基线；0.13.0 macOS arm64/x64 仅为测试版，目前没有 Apple Developer ID 签名或公证；Linux 未验证。
+- Windows x64 0.13.0 已通过本机打包安装与桌面验收；macOS arm64/x64 为测试版，目前没有 Apple Developer ID 签名或公证；Linux 未验证。
 - 扫描件和无法提取正文的实质页面会阻止完成，当前没有单独 OCR 步骤。
 - 表格单元格、图片内文字和公式不会被完整翻译；复杂公式、跨页图表和特殊排版应检查输出。
 - 高亮与批注支持同一页内的可提取文字，不支持跨页选择或扫描图上的文字选择。
