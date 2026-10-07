@@ -1,0 +1,6 @@
+fastapi==0.118.0
+uvicorn[standard]==0.37.0
+pypdf==6.1.1
+keyring==25.6.0
+pyinstaller==6.16.0
+httpx==0.28.1

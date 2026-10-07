@@ -1,0 +1,397 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { api, errorMessage, Folder, Paper } from './api';
+import { Reader } from './Reader';
+import { SettingsPanel } from './SettingsPanel';
+
+const statusText: Record<string, string> = {
+  waiting_api: '待继续旧任务', needs_title: '待确认标题', queued: '排队中', translating: 'PDF 版式翻译中',
+  checking: '完成检查', completed: '可阅读', needs_ocr: '需要 OCR', needs_attention: '提取不完整',
+  error: '处理失败', stopped: '已暂停',
+};
+
+const readerTabsKey = 'paper-workbench.reader-tabs.v1';
+
+function readReaderTabs(): { paperIds: string[]; active: string } {
+  try {
+    const saved = JSON.parse(localStorage.getItem(readerTabsKey) || 'null');
+    const paperIds = Array.isArray(saved?.paperIds) ? saved.paperIds.filter((id: unknown) => typeof id === 'string' && /^[a-f0-9]{32}$/.test(id)) : [];
+    return { paperIds, active: typeof saved?.active === 'string' ? saved.active : 'library' };
+  } catch {
+    return { paperIds: [], active: 'library' };
+  }
+}
+
+export function App() {
+  return <Workbench />;
+}
+
+function Workbench() {
+  const [activePanel, setActivePanel] = useState('library');
+  const [readerTabs, setReaderTabs] = useState<string[]>([]);
+  const readerTabsRef = useRef(readerTabs);
+  readerTabsRef.current = readerTabs;
+  const [readerPapers, setReaderPapers] = useState<Record<string, Paper>>({});
+  const [tabsLoaded, setTabsLoaded] = useState(false);
+  const [papers, setPapers] = useState<Paper[]>([]);
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [folderFilter, setFolderFilter] = useState('all');
+  const [search, setSearch] = useState('');
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState<Paper | null>(null);
+  const [folderDialog, setFolderDialog] = useState<'create' | 'rename' | null>(null);
+  const [folderName, setFolderName] = useState('');
+  const [dragging, setDragging] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    const saved = readReaderTabs();
+    void api<Paper[]>('/papers?folder_id=all').then((allPapers) => {
+      if (!mounted) return;
+      const readable = allPapers.filter((paper) => paper.can_read);
+      const byId = Object.fromEntries(readable.map((paper) => [paper.id, paper])) as Record<string, Paper>;
+      const validTabs = [...new Set(saved.paperIds)].filter((id) => Boolean(byId[id]));
+      setReaderPapers(byId);
+      setReaderTabs(validTabs);
+      setActivePanel(saved.active === 'settings' || saved.active === 'library' || validTabs.includes(saved.active) ? saved.active : 'library');
+    }).catch((e) => {
+      if (mounted) setError(errorMessage(e));
+    }).finally(() => {
+      if (mounted) setTabsLoaded(true);
+    });
+    return () => { mounted = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!tabsLoaded) return;
+    try { localStorage.setItem(readerTabsKey, JSON.stringify({ paperIds: readerTabs, active: activePanel })); } catch { /* local preferences are optional */ }
+  }, [tabsLoaded, readerTabs, activePanel]);
+
+  const refresh = useCallback(async () => {
+    try {
+      const query = new URLSearchParams({ folder_id: folderFilter });
+      if (search) query.set('q', search);
+      const [nextPapers, nextFolders] = await Promise.all([
+        api<Paper[]>(`/papers?${query.toString()}`),
+        api<Folder[]>('/folders'),
+      ]);
+      setPapers(nextPapers);
+      setFolders(nextFolders);
+      setReaderPapers((current) => {
+        const next = { ...current };
+        for (const paper of nextPapers) if (next[paper.id]) next[paper.id] = paper;
+        return next;
+      });
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }, [folderFilter, search]);
+
+  useEffect(() => {
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 1500);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
+
+  async function importFiles(paths: string[]) {
+    if (!paths.length) return;
+    setBusy(true);
+    setNotice('正在导入并检查 PDF…');
+    setError('');
+    try {
+      const folder_id = folderFilter !== 'all' && folderFilter !== 'unfiled' ? folderFilter : null;
+      const result = await api<{ results: { duplicate: boolean; paper: Paper }[] }>('/papers/import', 'POST', { paths, folder_id });
+      const added = result.results.filter((item) => !item.duplicate).length;
+      const duplicates = result.results.length - added;
+      setNotice(`导入完成：新增 ${added} 篇${duplicates ? `，${duplicates} 篇内容相同的文献已合并` : ''}。`);
+      await refresh();
+    } catch (e) {
+      setNotice('');
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function chooseFiles() {
+    const paths = await window.workbench.choosePdfs();
+    await importFiles(paths);
+  }
+
+  async function paperAction(paper: Paper, action: 'stop' | 'continue' | 'retry') {
+    setError('');
+    try {
+      await api(`/papers/${paper.id}/translation/${action}`, 'POST');
+      await refresh();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }
+
+  async function saveTitle(paper: Paper, english_title: string, chinese_title: string) {
+    setError('');
+    try {
+      await api(`/papers/${paper.id}/title`, 'PATCH', { english_title, chinese_title });
+      setReaderPapers((current) => current[paper.id]
+        ? { ...current, [paper.id]: { ...current[paper.id], english_title, chinese_title } }
+        : current);
+      setEditing(null);
+      setNotice('标题已更新，文献库副本文件名已同步。');
+      await refresh();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }
+
+  function openReader(paper: Paper) {
+    if (!paper.can_read) return;
+    setReaderPapers((current) => ({ ...current, [paper.id]: paper }));
+    if (!readerTabsRef.current.includes(paper.id)) {
+      const nextTabs = [...readerTabsRef.current, paper.id];
+      readerTabsRef.current = nextTabs;
+      setReaderTabs(nextTabs);
+    }
+    setActivePanel(paper.id);
+  }
+
+  function removeReaderTab(paperId: string) {
+    const currentTabs = readerTabsRef.current;
+    const index = currentTabs.indexOf(paperId);
+    if (index < 0) return;
+    const nextTabs = currentTabs.filter((id) => id !== paperId);
+    readerTabsRef.current = nextTabs;
+    setReaderTabs(nextTabs);
+    setReaderPapers((current) => {
+      const next = { ...current };
+      delete next[paperId];
+      return next;
+    });
+    setActivePanel((current) => current === paperId ? nextTabs[Math.max(0, index - 1)] || 'library' : current);
+  }
+
+  async function closeReaderTab(paperId: string) {
+    try { await window.workbench.cancelPaperStreams(paperId); } catch { /* closing a tab should still complete */ }
+    removeReaderTab(paperId);
+  }
+
+  async function deletePaper(paper: Paper) {
+    const title = paper.chinese_title || paper.english_title || paper.source_name;
+    if (!window.confirm(`确定删除“${title}”吗？这会删除工作台中的原文副本、中文 PDF、双语 PDF、聊天记录、阅读笔记和批注。导入时选择的源文件不会删除。`)) return;
+    setError('');
+    try {
+      await api(`/papers/${paper.id}`, 'DELETE');
+      if (readerTabs.includes(paper.id)) await closeReaderTab(paper.id);
+      try { localStorage.removeItem(`paper-workbench.note-draft.${paper.id}`); } catch { /* the paper is already deleted */ }
+      setNotice('已从工作台删除该文献，原始导入文件未更改。');
+      await refresh();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }
+
+  function beginFolderDialog(mode: 'create' | 'rename') {
+    const selected = folders.find((folder) => folder.id === folderFilter);
+    setFolderName(mode === 'rename' ? selected?.name || '' : '');
+    setFolderDialog(mode);
+  }
+
+  async function saveFolder() {
+    const name = folderName.trim();
+    if (!name || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      if (folderDialog === 'create') {
+        const created = await api<Folder>('/folders', 'POST', { name });
+        setFolderFilter(created.id);
+        setNotice(`已创建文件夹“${created.name}”。`);
+      } else if (folderDialog === 'rename' && folderFilter !== 'all' && folderFilter !== 'unfiled') {
+        await api(`/folders/${folderFilter}`, 'PATCH', { name });
+        setNotice('文件夹名称已更新。');
+        await refresh();
+      }
+      setFolderDialog(null);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteFolder() {
+    const folder = folders.find((item) => item.id === folderFilter);
+    if (!folder || !window.confirm(`删除文件夹“${folder.name}”？文献会移到“未分类”，不会删除文献或 PDF。`)) return;
+    setError('');
+    try {
+      await api(`/folders/${folder.id}`, 'DELETE');
+      setFolderFilter('unfiled');
+      setNotice(`已删除文件夹“${folder.name}”；其中的文献已移到未分类。`);
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }
+
+  async function movePaper(paper: Paper, folder_id: string | null) {
+    setError('');
+    try {
+      await api(`/papers/${paper.id}/folder`, 'PATCH', { folder_id });
+      await refresh();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }
+
+  return (
+    <div className="app-shell" onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}>
+      <header className="topbar">
+        <div className="brand-mark" aria-hidden="true"><img src="./folio-mark.svg" alt="" /></div>
+        <div className="brand-lockup"><div className="brand-name">阅川</div><span>Folio</span></div>
+        <nav className="app-tab-strip" role="tablist" aria-label="工作台标签">
+          <button className={`app-tab library-tab ${activePanel === 'library' ? 'selected' : ''}`} type="button" role="tab" aria-selected={activePanel === 'library'} aria-controls="library-tab-panel" data-testid="library-tab" onClick={() => setActivePanel('library')}>文献库</button>
+          {readerTabs.map((paperId) => {
+            const paper = readerPapers[paperId];
+            if (!paper) return null;
+            const title = paper.chinese_title || paper.english_title || paper.source_name;
+            return <div className={`reader-tab ${activePanel === paperId ? 'selected' : ''}`} key={paperId}>
+              <button className="app-tab reader-tab-title" type="button" role="tab" aria-selected={activePanel === paperId} aria-controls={`reader-tab-panel-${paperId}`} data-testid={`paper-tab-${paperId}`} title={title} onClick={() => setActivePanel(paperId)}>{title}</button>
+              <button className="reader-tab-close" type="button" aria-label={`关闭 ${title}`} data-testid={`close-tab-${paperId}`} title="关闭标签" onClick={() => void closeReaderTab(paperId)}>×</button>
+            </div>;
+          })}
+        </nav>
+        <button className={`nav-button settings-tab ${activePanel === 'settings' ? 'selected' : ''}`} onClick={() => setActivePanel('settings')}>AI 设置</button>
+      </header>
+      <div className="app-content">
+        <section className="app-panel settings-app-panel" hidden={activePanel !== 'settings'}>
+          {activePanel === 'settings' && <SettingsPanel />}
+        </section>
+        <section className="app-panel library-app-panel" id="library-tab-panel" role="tabpanel" hidden={activePanel !== 'library'}>
+        <div className="library-workspace">
+          <aside className="library-sidebar" data-testid="library-sidebar" aria-label="文献分类">
+            <div className="sidebar-section-label">分类</div>
+            <div className="folder-nav" aria-label="文件夹分类">
+              <button className={folderFilter === 'all' ? 'folder-nav-button selected' : 'folder-nav-button'} data-testid="folder-nav-all" onClick={() => setFolderFilter('all')}>全部文献</button>
+              <button className={folderFilter === 'unfiled' ? 'folder-nav-button selected' : 'folder-nav-button'} data-testid="folder-nav-unfiled" onClick={() => setFolderFilter('unfiled')}>未分类</button>
+              {folders.map((folder) => <button key={folder.id} aria-label={folder.name} className={folderFilter === folder.id ? 'folder-nav-button selected' : 'folder-nav-button'} data-testid={`folder-nav-${folder.id}`} onClick={() => setFolderFilter(folder.id)}><span className="folder-color-mark" data-testid={`folder-color-${folder.id}`} style={{ backgroundColor: folder.color }} aria-hidden="true" />{folder.name}</button>)}
+            </div>
+            <div className="folder-actions">
+              <button className="text-button" aria-label="新建文件夹" onClick={() => beginFolderDialog('create')}>＋ 新建文件夹</button>
+              {folderFilter !== 'all' && folderFilter !== 'unfiled' && <>
+                <button className="text-button" aria-label="重命名文件夹" onClick={() => beginFolderDialog('rename')}>重命名</button>
+                <button className="text-button delete-paper-button" aria-label="删除文件夹" onClick={() => void deleteFolder()}>删除文件夹</button>
+              </>}
+            </div>
+          </aside>
+          <main className="library-page" onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (event.currentTarget === event.target) setDragging(false); }} onDrop={(event) => {
+          event.preventDefault(); setDragging(false);
+          const paths = window.workbench.getDroppedPaths(Array.from(event.dataTransfer.files));
+          void importFiles(paths);
+        }}>
+          <div className="page-heading">
+            <div>
+              <div className="eyebrow">本机文献与处理进度</div>
+              <h1>文献库</h1>
+              <p>导入 PDF 后会在后台生成保留版式的中文 PDF 和双语 PDF，检查完成后即可打开阅读。</p>
+            </div>
+            <button className="primary-button import-button" onClick={chooseFiles} disabled={busy}>＋ 导入文献</button>
+          </div>
+          <div className="library-toolbar">
+            <div className="search-wrap"><span aria-hidden="true">⌕</span><input aria-label="搜索文献" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索标题或原文件名" /></div>
+            <span className="paper-count">{papers.length} 篇文献</span>
+          </div>
+          {notice && <div className="notice success-notice" role="status">{notice}</div>}
+          {error && <div className="notice error-notice" role="alert">{error}</div>}
+          {papers.length === 0 ? (
+            <div className={dragging ? 'empty-state dragging' : 'empty-state'}>
+              <div className="empty-icon" aria-hidden="true">PDF</div>
+              <h2>{search ? '没有找到匹配的文献' : papers.length === 0 && folderFilter !== 'all' ? '此文件夹还没有文献' : '把论文放进你的工作台'}</h2>
+              <p>{search ? '试试更短的标题关键词。' : '选择一个或多个 PDF，也可以把文件拖到这里。'}</p>
+              {!search && folderFilter === 'all' && <button className="secondary-button" onClick={chooseFiles} disabled={busy}>选择 PDF 文件</button>}
+            </div>
+          ) : (
+            <section className={dragging ? 'paper-list dragging' : 'paper-list'} aria-label="文献列表">
+              {papers.map((paper) => <PaperCard key={paper.id} paper={paper} folders={folders} onOpen={() => openReader(paper)} onAction={(action) => void paperAction(paper, action)} onEdit={() => setEditing(paper)} onDelete={() => void deletePaper(paper)} onMove={(folderId) => void movePaper(paper, folderId)} />)}
+            </section>
+          )}
+          {dragging && <div className="drop-overlay" aria-hidden="true"><div>松开即可导入 PDF</div></div>}
+          {editing && <TitleDialog paper={editing} onClose={() => setEditing(null)} onSave={(english, chinese) => void saveTitle(editing, english, chinese)} />}
+          {folderDialog && <FolderDialog mode={folderDialog} value={folderName} onChange={setFolderName} onClose={() => setFolderDialog(null)} onSave={() => void saveFolder()} />}
+        </main>
+        </div>
+        </section>
+        {tabsLoaded && readerTabs.map((paperId) => <section key={paperId} role="tabpanel" id={`reader-tab-panel-${paperId}`} className="app-panel reader-tab-panel" data-testid={`reader-tab-panel-${paperId}`} data-paper-id={paperId} hidden={activePanel !== paperId}>
+          {readerPapers[paperId] && <Reader paperId={paperId} active={activePanel === paperId} />}
+        </section>)}
+      </div>
+      {busy && <div className="busy-indicator" role="status">正在处理</div>}
+    </div>
+  );
+}
+
+function PaperCard({ paper, folders, onOpen, onAction, onEdit, onDelete, onMove }: {
+  paper: Paper; folders: Folder[]; onOpen: () => void; onAction: (action: 'stop' | 'continue' | 'retry') => void; onEdit: () => void; onDelete: () => void; onMove: (folderId: string | null) => void;
+}) {
+  const progress = paper.pdf_progress || 0;
+  const canStop = ['queued', 'translating', 'waiting_api'].includes(paper.status);
+  const canContinue = paper.status === 'stopped';
+  const canRetry = ['error', 'waiting_api'].includes(paper.status);
+  const title = paper.chinese_title || paper.english_title || paper.source_name;
+  return (
+    <article className="paper-card">
+      <div className="paper-glyph" aria-hidden="true">PDF</div>
+      <div className="paper-main">
+        <div className="paper-title-row"><h2 title={title}>{title}</h2><span className={`status-pill status-${paper.status}`}>{statusText[paper.status] || paper.status}</span></div>
+        {paper.english_title && paper.chinese_title && <div className="paper-subtitle">{paper.english_title}</div>}
+        <div className="paper-meta"><span>{paper.page_count} 页</span><span>{paper.source_name}</span><span>{new Date(paper.created_at).toLocaleDateString('zh-CN')}</span></div>
+        {paper.status === 'translating' || paper.status === 'queued' || paper.status === 'checking' ? (
+          <div className="progress-row"><div className="progress-track"><div className="progress-value" style={{ width: `${progress}%` }} /></div><span>{progress}%</span></div>
+        ) : null}
+        {paper.error && <p className="paper-error">{paper.error}</p>}
+        {paper.diagnostics.length > 0 && <ul className="diagnostics">{paper.diagnostics.map((item) => <li key={item.page}>第 {item.page} 页：{item.status === 'needs_ocr' ? '有图片但没有可提取文字，需 OCR' : '检测到页面内容，但没有提取到正文文字'}</li>)}</ul>}
+      </div>
+      <div className="paper-actions">
+        <select aria-label="移动文献到文件夹" data-testid={`paper-folder-${paper.id}`} value={paper.folder_id || ''} onChange={(event) => onMove(event.target.value || null)}>
+          <option value="">未分类</option>
+          {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
+        </select>
+        <button className="text-button" onClick={onEdit}>编辑标题</button>
+        {paper.can_read && <button className="primary-button compact-button" onClick={onOpen}>阅读</button>}
+        {canStop && <button className="text-button" onClick={() => onAction('stop')}>暂停</button>}
+        {canContinue && <button className="secondary-button compact-button" onClick={() => onAction('continue')}>继续翻译</button>}
+        {canRetry && <button className="secondary-button compact-button" onClick={() => onAction('retry')}>重试</button>}
+        <button className="text-button delete-paper-button" onClick={onDelete}>删除</button>
+      </div>
+    </article>
+  );
+}
+
+function FolderDialog({ mode, value, onChange, onClose, onSave }: {
+  mode: 'create' | 'rename'; value: string; onChange: (value: string) => void; onClose: () => void; onSave: () => void;
+}) {
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="title-dialog folder-dialog" role="dialog" aria-modal="true" aria-labelledby="folder-dialog-heading">
+        <div className="dialog-heading"><div><div className="eyebrow">文献归类</div><h2 id="folder-dialog-heading">{mode === 'create' ? '新建文件夹' : '重命名文件夹'}</h2></div><button className="icon-button" aria-label="关闭" onClick={onClose}>×</button></div>
+        <label htmlFor="folder-name-input">文件夹名称</label>
+        <input id="folder-name-input" aria-label="文件夹名称" data-testid="folder-name-input" autoFocus value={value} onChange={(event) => onChange(event.target.value)} maxLength={80} />
+        <div className="dialog-actions"><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" data-testid="folder-save" disabled={!value.trim()} onClick={onSave}>保存</button></div>
+      </section>
+    </div>
+  );
+}
+
+function TitleDialog({ paper, onClose, onSave }: { paper: Paper; onClose: () => void; onSave: (english: string, chinese: string) => void }) {
+  const [english, setEnglish] = useState(paper.english_title);
+  const [chinese, setChinese] = useState(paper.chinese_title);
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="title-dialog" role="dialog" aria-modal="true" aria-labelledby="edit-title-heading">
+        <div className="dialog-heading"><div><div className="eyebrow">文献标题</div><h2 id="edit-title-heading">确认或修改标题</h2></div><button className="icon-button" aria-label="关闭" onClick={onClose}>×</button></div>
+        <label htmlFor="english-title">英文标题</label><textarea id="english-title" rows={3} value={english} onChange={(event) => setEnglish(event.target.value)} />
+        <label htmlFor="chinese-title">中文标题</label><input id="chinese-title" value={chinese} onChange={(event) => setChinese(event.target.value)} placeholder="留空时会由免费服务翻译" />
+        <p className="field-help">文献库中的副本会使用中文标题命名，导入时选择的源文件不变。</p>
+        <div className="dialog-actions"><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" onClick={() => onSave(english, chinese)}>保存并继续</button></div>
+      </section>
+    </div>
+  );
+}

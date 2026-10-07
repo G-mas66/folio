@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="阅川 Folio">
+  <rect width="256" height="256" rx="48" fill="#285b52"/>
+  <path d="M49 58 121 73 126 190 61 174Z" fill="#fffefa" stroke="#dce8df" stroke-width="5" stroke-linejoin="round"/>
+  <path d="m135 73 72-15-12 116-65 16Z" fill="#f4f6ef" stroke="#dce8df" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M128 77v110" fill="none" stroke="#285b52" stroke-width="5" stroke-linecap="round"/>
+  <path d="M69 134c20-20 39-28 59-11s39 18 59-11" fill="none" stroke="#c99f59" stroke-width="10" stroke-linecap="round"/>
+</svg>
