@@ -37,6 +37,7 @@ app = FastAPI(title="Personal Paper Workbench", docs_url=None, redoc_url=None, o
 worker_task: asyncio.Task | None = None
 worker_wakeup = asyncio.Event()
 pdf_processes: dict[str, asyncio.subprocess.Process] = {}
+pdf_cleanup_events: dict[str, asyncio.Event] = {}
 paper_ai_tasks: dict[str, set[asyncio.Task]] = {}
 session_ai_tasks: dict[str, set[asyncio.Task]] = {}
 chat_streams: dict[str, dict[str, Any]] = {}
@@ -471,6 +472,8 @@ async def run_pdf_engine(paper_id: str) -> tuple[str, str] | None:
     process: asyncio.subprocess.Process | None = None
     line_task: asyncio.Task | None = None
     finished: dict[str, Any] | None = None
+    cleanup_event = asyncio.Event()
+    pdf_cleanup_events[paper_id] = cleanup_event
     try:
         process = await asyncio.create_subprocess_exec(
             *command, cwd=str(folder), env=environment,
@@ -545,15 +548,20 @@ async def run_pdf_engine(paper_id: str) -> tuple[str, str] | None:
                 old_path.unlink(missing_ok=True)
         return mono_name, dual_name
     finally:
-        if line_task and not line_task.done():
-            line_task.cancel()
-            await asyncio.gather(line_task, return_exceptions=True)
-        if process and process.returncode is None:
-            await terminate_pdf_process(process)
-        if process is not None:
-            pdf_processes.pop(paper_id, None)
-        if output.exists():
-            shutil.rmtree(output, ignore_errors=True)
+        try:
+            if line_task and not line_task.done():
+                line_task.cancel()
+                await asyncio.gather(line_task, return_exceptions=True)
+            if process and process.returncode is None:
+                await terminate_pdf_process(process)
+            if process is not None:
+                pdf_processes.pop(paper_id, None)
+            if output.exists():
+                await asyncio.to_thread(shutil.rmtree, output, ignore_errors=True)
+        finally:
+            cleanup_event.set()
+            if pdf_cleanup_events.get(paper_id) is cleanup_event:
+                pdf_cleanup_events.pop(paper_id, None)
 
 
 async def translate_paper(paper_id: str) -> None:
@@ -1212,6 +1220,9 @@ async def delete_paper(paper_id: str):
     process = pdf_processes.get(paper_id)
     if process:
         await terminate_pdf_process(process)
+    cleanup_event = pdf_cleanup_events.get(paper_id)
+    if cleanup_event:
+        await cleanup_event.wait()
     tasks = [task for task in paper_ai_tasks.get(paper_id, set()) if task is not asyncio.current_task()]
     for task in tasks:
         task.cancel()
