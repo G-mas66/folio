@@ -217,6 +217,9 @@ async function main() {
   const engineTestEvents = jsonEvents(engineTest.stdout);
   assert.equal(engineTest.code, 0, `Packaged PDF engine self-test failed: ${engineTest.stderr.slice(-1500)} ${engineTest.stdout.slice(-1500)}`);
   assert.ok(engineTestEvents.some(event => event.type === 'self_test' && event.status === 'ok'), 'PDF engine did not report successful heavy-import self-test.');
+  const cryptographyNativeTest = engineTestEvents.find(event => event.type === 'cryptography_native_self_test');
+  assert.equal(cryptographyNativeTest?.status, 'ok', 'Packaged PDF engine did not pass its cryptography/OpenSSL native self-test.');
+  report.checks.cryptography_native_self_test = cryptographyNativeTest.version;
   report.checks.pdf_engine_self_test = 'passed';
 
   const generated = await run(python, ['-m', 'review.make_review_pdfs'], {
@@ -435,11 +438,12 @@ async function main() {
   } else {
     const failureEvent = translationEvents.find(event => event.type === 'error');
     const detail = String(failureEvent?.message || translation.stderr || translation.stdout || translation.signal || `exit ${translation.code}`).slice(-1800);
-    const external = /(?:ECONN(?:REFUSED|RESET|TIMEDOUT)|connect(?:ion)?error|cannot connect|could not connect|connection (?:refused|reset|failed)|ENOTFOUND|EAI_AGAIN|network is unreachable|name or service not known|temporary failure in name resolution|could not resolve|SSL|TLS|certificate verify failed|HTTP\s*(?:4|5)\d{2}|\b(?:429|500|502|503|504)\b|status code.*\b(?:4|5)\d{2})/i.test(detail);
+    const nativeLoadFailure = /(?:\bdlopen\b|\bSymbol not found\b|\bLibrary not loaded\b|\bimage not found\b|\bDLL load failed\b)/i.test(detail);
+    const external = !nativeLoadFailure && /(?:ECONN(?:REFUSED|RESET|TIMEDOUT)|connect(?:ion)?error|cannot connect|could not connect|connection (?:refused|reset|failed)|ENOTFOUND|EAI_AGAIN|network is unreachable|name or service not known|temporary failure in name resolution|could not resolve|(?:SSL|TLS)(?:v\d+(?:\.\d+)?)? handshake (?:failed|failure)|(?:SSL|TLS)(?:v\d+(?:\.\d+)?)? alert|TLSv\d+_ALERT_[A-Z0-9_]+|certificate verify failed|CERTIFICATE_VERIFY_FAILED|HTTP\s*(?:4|5)\d{2}|\b(?:429|500|502|503|504)\b|status code.*\b(?:4|5)\d{2})/i.test(detail);
     const timedOut = translation.timedOut || /\b(?:timeout|timed out|timedout)\b/i.test(detail);
-    const status = timedOut ? 'translation_timeout' : external ? 'external_service_unavailable' : 'failed';
-    report.free_translation = { status, ...(timedOut ? { cause: 'undetermined' } : {}), detail };
-    if (!timedOut && !external) throw new Error(`Free translation smoke failed outside a recognizable external-service failure: ${detail}`);
+    const status = nativeLoadFailure ? 'failed' : timedOut ? 'translation_timeout' : external ? 'external_service_unavailable' : 'failed';
+    report.free_translation = { status, ...(status === 'translation_timeout' ? { cause: 'undetermined' } : {}), detail };
+    if (status === 'failed') throw new Error(`Free translation smoke failed outside a recognizable external-service failure: ${detail}`);
   }
 
   report.result = report.free_translation.status === 'success' ? 'passed' : 'core_checks_passed_translation_unverified';
