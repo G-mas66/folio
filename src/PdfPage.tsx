@@ -12,7 +12,15 @@ type RenderTaskRef = { cancel: () => void };
 
 export async function loadPdfDocument(paperId: string, kind: PdfKind): Promise<SharedPdfDocument> {
   const bytes = await window.workbench.request<Uint8Array>({ path: `/papers/${paperId}/pdf?kind=${kind}`, binary: true });
-  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(bytes) });
+  const resources = new URL('./pdfjs/', window.location.href);
+  const loadingTask = pdfjs.getDocument({
+    data: new Uint8Array(bytes),
+    cMapUrl: new URL('cmaps/', resources).href,
+    cMapPacked: true,
+    iccUrl: new URL('iccs/', resources).href,
+    standardFontDataUrl: new URL('standard_fonts/', resources).href,
+    wasmUrl: new URL('wasm/', resources).href,
+  });
   return { pdf: await loadingTask.promise, destroy: () => loadingTask.destroy() };
 }
 

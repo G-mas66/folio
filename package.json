@@ -5,8 +5,8 @@
   "description": "阅川 Folio 个人文献阅读工作台",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env WORKBENCH_DEV=1 electron .\"",
-    "build:ui": "tsc -b && vite build",
+    "dev": "node scripts/copy-pdfjs-assets.cjs && concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env WORKBENCH_DEV=1 electron .\"",
+    "build:ui": "tsc -b && node scripts/copy-pdfjs-assets.cjs && vite build",
     "start": "electron .",
     "build:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-backend.ps1",
     "build:pdf-engine": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-pdf-engine.ps1",

@@ -6,6 +6,7 @@ node_modules/
 .cache/
 dist/
 out/
+public/pdfjs/
 backend/build/
 backend/build-pdf-engine/
 backend/build-macos/

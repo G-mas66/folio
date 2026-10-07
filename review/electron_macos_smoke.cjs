@@ -233,11 +233,21 @@ async function main() {
   await new Promise(resolve => provider.server.listen(0, '127.0.0.1', resolve));
   const providerUrl = `http://127.0.0.1:${provider.server.address().port}/v1`;
   const browserErrors = [];
+  const browserDiagnostics = [];
+  const failedRequests = [];
   let smokeFailure;
+  let readerPage;
+  let readerPaperId;
   try {
     application = await _electron.launch({ executablePath: executable, args: [], cwd: root, env, timeout: 60000 });
     const library = await application.firstWindow();
     library.on('pageerror', error => browserErrors.push(error.message));
+    library.on('console', message => {
+      if (message.type() === 'warning' || message.type() === 'error') {
+        browserDiagnostics.push({ type: message.type(), text: message.text().slice(0, 800) });
+      }
+    });
+    library.on('requestfailed', request => failedRequests.push({ url: request.url(), error: request.failure()?.errorText || 'unknown' }));
     await library.getByRole('button', { name: '设置', exact: true }).waitFor();
     assert.equal(await application.evaluate(({ app }) => app.getVersion()), report.version);
     const appInfo = await library.evaluate(() => window.workbench.getAppInfo());
@@ -274,6 +284,7 @@ async function main() {
     await library.getByRole('button', { name: /导入文献/ }).click();
     const papers = await waitForPaper(library, items => items.some(item => item.source_name === path.basename(chinesePdf) && item.can_read));
     const paper = papers.find(item => item.source_name === path.basename(chinesePdf));
+    readerPaperId = paper.id;
     assert.equal(paper.source_language, 'zh');
     assert.equal(paper.status, 'completed');
     assert.equal(paper.mono_pdf_file_name, '');
@@ -285,7 +296,7 @@ async function main() {
 
     await library.locator('.paper-card').filter({ hasText: path.basename(chinesePdf) }).getByRole('button', { name: '阅读', exact: true }).click();
     const reader = library;
-    reader.on('pageerror', error => browserErrors.push(error.message));
+    readerPage = reader;
     await reader.waitForFunction(id => document.querySelector(`[data-testid="reader-tab-panel-${id}"] canvas`)?.width > 0, paper.id, { timeout: 30000 });
     await reader.waitForFunction(id => {
       const canvas = document.querySelector(`[data-testid="reader-tab-panel-${id}"] canvas`);
@@ -325,6 +336,39 @@ async function main() {
     assert.deepEqual(browserErrors, []);
   } catch (error) {
     smokeFailure = error;
+    report.diagnostics = {
+      browser_console: browserDiagnostics.slice(-40),
+      failed_requests: failedRequests.slice(-40),
+    };
+    if (readerPage) {
+      try {
+        report.diagnostics.reader_canvas = await readerPage.evaluate(id => {
+          const canvas = document.querySelector(`[data-testid="reader-tab-panel-${id}"] canvas`);
+          if (!canvas) return { present: false };
+          const context = canvas.getContext('2d');
+          if (!context) return { present: true, context: false, width: canvas.width, height: canvas.height };
+          const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+          let sampled = 0;
+          let nontransparent = 0;
+          let darkInk = 0;
+          for (let index = 0; index < pixels.length; index += 64) {
+            sampled += 1;
+            if (pixels[index + 3] > 0) nontransparent += 1;
+            if (pixels[index + 3] > 0 && pixels[index] < 200 && pixels[index + 1] < 200 && pixels[index + 2] < 200) darkInk += 1;
+          }
+          return { present: true, context: true, width: canvas.width, height: canvas.height, sampled, nontransparent, darkInk };
+        }, readerPaperId);
+      } catch (error) {
+        report.diagnostics.reader_canvas_error = error.message;
+      }
+      try {
+        const screenshot = path.join(runRoot, `pdf-reader-failure-${arch}.png`);
+        await readerPage.screenshot({ path: screenshot, fullPage: true });
+        report.diagnostics.screenshot = screenshot;
+      } catch (error) {
+        report.diagnostics.screenshot_error = error.message;
+      }
+    }
   }
   if (!smokeFailure) report.checks.application_smoke = 'passed';
 
