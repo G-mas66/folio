@@ -15,6 +15,7 @@ import httpx
 
 from backend import ai
 from backend.db import connect, initialize
+from review.paths import REVIEW_ROOT
 
 
 TOOL = [{
@@ -33,7 +34,7 @@ def sse(*events):
 
 class ProtocolContract(unittest.TestCase):
     def test_legacy_settings_infer_chat_or_preserve_custom_protocol(self):
-        root = Path(__file__).resolve().parents[1] / ".review"
+        root = REVIEW_ROOT
         for base_url, expected in (
             ("https://provider.example/v1", "openai_chat_completions"),
             ("https://provider.example/v1/chat/completions/", "openai_chat_completions"),

@@ -3,11 +3,13 @@
 from pathlib import Path
 
 from reportlab.lib.pagesizes import A4
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfgen import canvas
 
+from review.paths import FIXTURE_ROOT
 
-ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / ".review" / "fixtures"
+OUT = FIXTURE_ROOT
 
 
 def page(pdf, heading, lines):
@@ -53,6 +55,7 @@ def paper(name, sample_count, delta, seed):
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
     paper("quartz_alpha.pdf", 137, "23.7", 811)
     paper("quartz_beta_same_title.pdf", 249, "8.4", 977)
 
@@ -66,6 +69,30 @@ def main():
             for row in range(1, 43)
         )
         page(pdf, f"Section {index:02d}" if index < 24 else "Appendix", lines)
+    pdf.save()
+
+    pdf = canvas.Canvas(str(OUT / "macos_chinese_original.pdf"), pagesize=A4, invariant=1)
+    pdf.setTitle("MacOS Chinese Reading Smoke Test")
+    pdf.setFont("STSong-Light", 14)
+    pdf.drawString(48, 790, "中文测试文献")
+    pdf.setFont("STSong-Light", 11)
+    for index, line in enumerate((
+        "本地测试样本无需翻译，页面内容应能正常阅读。",
+        "中文原文直接导入后应显示完整页面，不需要启动翻译引擎。",
+        "此合成文献仅用于验证 macOS 桌面版本的阅读与笔记功能。",
+    )):
+        pdf.drawString(48, 758 - index * 22, line)
+    pdf.showPage()
+    pdf.save()
+
+    pdf = canvas.Canvas(str(OUT / "macos_translation_sample.pdf"), pagesize=A4, invariant=1)
+    pdf.setTitle("MacOS Free Translation Smoke Test")
+    page(pdf, "A Short Synthetic Measurement Study", [
+        "This synthetic study evaluates a repeatable measurement method.",
+        "The method was tested on 137 independent samples.",
+        "The measured signal increased by 23.7 percent.",
+        "All values in this sample are fictional and created for software testing.",
+    ])
     pdf.save()
 
     pdf = canvas.Canvas(str(OUT / "two_columns.pdf"), pagesize=A4)

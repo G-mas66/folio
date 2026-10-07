@@ -14,8 +14,8 @@ function absolutePath(value, label) {
   return path.resolve(value);
 }
 
-function resolveLocationConfig(configPath, env = process.env, defaultDataRoot = DEFAULT_DATA_ROOT) {
-  const filePath = absolutePath(configPath || env.WORKBENCH_LOCATION_CONFIG || DEFAULT_LOCATION_CONFIG, '配置文件路径');
+function resolveLocationConfig(configPath, env = process.env, defaultDataRoot = DEFAULT_DATA_ROOT, defaultConfigPath = DEFAULT_LOCATION_CONFIG) {
+  const filePath = absolutePath(configPath || env.WORKBENCH_LOCATION_CONFIG || defaultConfigPath, '配置文件路径');
   let saved = {};
   try {
     saved = JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -40,7 +40,7 @@ function normalizedPath(value) {
   const resolved = path.resolve(value);
   const root = path.parse(resolved).root;
   const trimmed = resolved.length > root.length ? resolved.replace(/[\\/]+$/, '') : resolved;
-  return trimmed.toLowerCase();
+  return process.platform === 'win32' ? trimmed.toLowerCase() : trimmed;
 }
 
 function isWithin(parent, child) {

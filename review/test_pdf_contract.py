@@ -6,9 +6,10 @@ import tempfile
 import unittest
 
 from backend.pdf_extract import extract_pdf
+from review.paths import FIXTURE_ROOT, REVIEW_ROOT
 
 
-FIXTURES = Path(__file__).resolve().parents[1] / ".review" / "fixtures"
+FIXTURES = FIXTURE_ROOT
 
 
 class PDFContractReview(unittest.TestCase):
@@ -24,7 +25,7 @@ class PDFContractReview(unittest.TestCase):
         self.assertNotEqual(result["english_title"], "Generic Export Document")
 
     def test_existing_title_filename_does_not_turn_authors_into_title(self):
-        with tempfile.TemporaryDirectory(dir=FIXTURES.parent) as temporary:
+        with tempfile.TemporaryDirectory(dir=REVIEW_ROOT) as temporary:
             path = Path(temporary) / "The Actual Quartz Measurement Study.pdf"
             shutil.copyfile(FIXTURES / "wrong_metadata_title.pdf", path)
             result = extract_pdf(path)

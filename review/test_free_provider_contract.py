@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import httpx
 from backend import free_translation
+from review.paths import FIXTURE_ROOT, REVIEW_ROOT
 
 
 class FreeProviderContractReview(unittest.TestCase):
@@ -106,11 +107,11 @@ class FreeProviderContractReview(unittest.TestCase):
                     return "石英测量研究"
                 return "完整测试译文：" + text
 
-        with tempfile.TemporaryDirectory(dir=root / ".review") as data:
+        with tempfile.TemporaryDirectory(dir=REVIEW_ROOT) as data:
             with patch.dict(os.environ, {"WORKBENCH_DATA_DIR": data}):
                 initialize()
                 app.worker_wakeup = asyncio.Event()
-                paper_id = app.import_pdf(str(root / ".review/fixtures/quartz_alpha.pdf"))["paper"]["id"]
+                paper_id = app.import_pdf(str(FIXTURE_ROOT / "quartz_alpha.pdf"))["paper"]["id"]
                 app.store_status(paper_id, "translating")
                 from review.test_translation_flow import fixture_pdf_engine
                 with patch.object(app.free_translation, "FreeTranslationClient", RacingClient), patch.object(app, 'run_pdf_engine', fixture_pdf_engine):

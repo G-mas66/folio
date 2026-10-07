@@ -1,11 +1,15 @@
 node_modules/
 .venv/
 .venv-pdf-engine/
+.venv-macos/
+.venv-pdf-engine-macos/
 .cache/
 dist/
 out/
 backend/build/
 backend/build-pdf-engine/
+backend/build-macos/
+backend/build-pdf-engine-macos/
 backend/dist/
 backend/pdf-engine-source/
 __pycache__/

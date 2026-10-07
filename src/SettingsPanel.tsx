@@ -211,7 +211,7 @@ export function SettingsPanel() {
 
         <label className="field-label" htmlFor="api-key">AI API Key</label>
         <input id="api-key" disabled={loading || busy || discovering} type="password" autoComplete="new-password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={settings.key_configured ? '已安全保存；留空可保留当前 Key' : '粘贴服务方提供的 API Key'} />
-        <span className="field-help">保存在 Windows 凭据管理器中，不会回读显示。获取模型时使用本次输入的 Key，留空时复用已保存 Key，无 Key 时尝试匿名查询；获取列表不会保存临时 Key。</span>
+        <span className="field-help">保存在系统凭据管理器中，不会回读显示。获取模型时使用本次输入的 Key，留空时复用已保存 Key，无 Key 时尝试匿名查询；获取列表不会保存临时 Key。</span>
         <div className="model-discovery-actions">
           <span className="field-help">从服务读取可用模型，无需手动填写模型名称。</span>
           <button className="secondary-button compact-button" type="button" onClick={() => void discoverModels()} disabled={loading || busy || discovering || !settings.base_url.trim() && !(customModelsUrlEnabled && settings.models_url.trim())}>

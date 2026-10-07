@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import signal
 import shutil
 import sqlite3
 import subprocess
@@ -428,12 +429,21 @@ async def terminate_pdf_process(process: asyncio.subprocess.Process) -> None:
         except (OSError, asyncio.TimeoutError):
             pass
     else:
-        process.terminate()
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
     if process.returncode is None:
         try:
             await asyncio.wait_for(process.wait(), timeout=5)
         except asyncio.TimeoutError:
-            process.kill()
+            if sys.platform == "win32":
+                process.kill()
+            else:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             await process.wait()
 
 
@@ -466,6 +476,7 @@ async def run_pdf_engine(paper_id: str) -> tuple[str, str] | None:
             *command, cwd=str(folder), env=environment,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            start_new_session=sys.platform != "win32",
         )
         pdf_processes[paper_id] = process
         assert process.stdout is not None
@@ -634,6 +645,7 @@ async def startup() -> None:
 async def shutdown() -> None:
     if worker_task:
         worker_task.cancel()
+        await asyncio.gather(worker_task, return_exceptions=True)
 
 
 @app.get("/health")
@@ -885,7 +897,7 @@ def put_settings(value: SettingsInput):
         try:
             ai.save_api_key(value.api_key.strip())
         except Exception:
-            raise HTTPException(status_code=503, detail={"category": "credential_store", "message": "无法安全保存 API Key，请检查 Windows 凭据管理器。"}) from None
+            raise HTTPException(status_code=503, detail={"category": "credential_store", "message": f"无法安全保存 API Key，请检查{ai.credential_store_name()}。"}) from None
     elif not ai.key_is_configured():
         raise HTTPException(status_code=422, detail="请填写 API Key。")
     with connect() as db:

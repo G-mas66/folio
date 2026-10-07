@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit, urlunsplit
@@ -34,8 +35,17 @@ def credential_service() -> str:
         backend = keyring.get_keyring()
         if not isinstance(backend, WinVaultKeyring):
             keyring.set_keyring(WinVaultKeyring())
+    elif sys.platform == "darwin":
+        from keyring.backends.macOS import Keyring as MacOSKeyring
+
+        backend = keyring.get_keyring()
+        if not isinstance(backend, MacOSKeyring):
+            keyring.set_keyring(MacOSKeyring())
     identity_root = os.environ.get("WORKBENCH_CREDENTIAL_ROOT") or str(data_root())
-    namespace = hashlib.sha256(os.path.abspath(identity_root).casefold().encode("utf-8")).hexdigest()[:16]
+    normalized_identity_root = os.path.abspath(identity_root)
+    if os.name == "nt":
+        normalized_identity_root = normalized_identity_root.casefold()
+    namespace = hashlib.sha256(normalized_identity_root.encode("utf-8")).hexdigest()[:16]
     return f"personal-paper-workbench-{namespace}"
 
 
@@ -46,6 +56,14 @@ def key_is_configured() -> bool:
         return bool(keyring.get_password(credential_service(), "api-key"))
     except Exception:
         return False
+
+
+def credential_store_name() -> str:
+    if sys.platform == "darwin":
+        return "macOS 钥匙串"
+    if os.name == "nt":
+        return "Windows 凭据管理器"
+    return "系统凭据管理器"
 
 
 def save_api_key(api_key: str) -> None:
@@ -60,7 +78,7 @@ def saved_api_key() -> str:
     try:
         return keyring.get_password(credential_service(), "api-key") or ""
     except Exception as exc:
-        raise AIError("credential_store", "无法读取 Windows 凭据管理器中的 API Key。") from exc
+        raise AIError("credential_store", f"无法读取{credential_store_name()}中的 API Key。") from exc
 
 
 def current_config() -> tuple[str, str, str]:

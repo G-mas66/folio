@@ -12,13 +12,14 @@ from unittest.mock import patch
 import httpx
 from backend import app
 from backend.db import connect, initialize, library_root
+from review.paths import FIXTURE_ROOT, REVIEW_ROOT
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURES = ROOT / '.review' / 'fixtures'
+FIXTURES = FIXTURE_ROOT
 
 class DeleteContractReview(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(dir=ROOT / '.review')
+        self.temporary = tempfile.TemporaryDirectory(dir=REVIEW_ROOT)
         self.environment = patch.dict(os.environ, {'WORKBENCH_DATA_DIR': self.temporary.name, 'WORKBENCH_SESSION_TOKEN': 'delete-review-token'})
         self.environment.start()
         initialize()

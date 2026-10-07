@@ -8,14 +8,12 @@ from unittest.mock import patch
 
 from backend import ai
 from backend.db import connect, initialize
-
-
-ROOT = Path(__file__).resolve().parents[1]
+from review.paths import REVIEW_ROOT
 
 
 class GlossaryContract(unittest.TestCase):
     def test_translated_terms_are_saved_and_reused_for_the_same_paper(self):
-        with tempfile.TemporaryDirectory(dir=ROOT / ".review") as data_dir:
+        with tempfile.TemporaryDirectory(dir=REVIEW_ROOT) as data_dir:
             with patch.dict(os.environ, {"WORKBENCH_DATA_DIR": data_dir}):
                 initialize()
                 with connect() as db:

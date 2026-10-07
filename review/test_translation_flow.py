@@ -11,10 +11,11 @@ from pypdf import PdfReader, PdfWriter, Transformation
 
 from backend import app, free_translation
 from backend.db import connect, initialize
+from review.paths import FIXTURE_ROOT, REVIEW_ROOT
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURES = ROOT / ".review" / "fixtures"
+FIXTURES = FIXTURE_ROOT
 
 
 def fake_translation(text, *, context="", paper_id=None):
@@ -60,7 +61,7 @@ class FixtureFreeClient:
 
 class TranslationFlowReview(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(dir=ROOT / ".review")
+        self.temporary = tempfile.TemporaryDirectory(dir=REVIEW_ROOT)
         self.environment = patch.dict(os.environ, {"WORKBENCH_DATA_DIR": self.temporary.name})
         self.environment.start()
         self.provider = patch.object(free_translation, "FreeTranslationClient", FixtureFreeClient)

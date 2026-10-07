@@ -1,0 +1,80 @@
+name: macOS Test Builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_draft_release:
+        description: Build and test both packages, then attach them to a draft prerelease.
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: macos-test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test ${{ matrix.architecture }}
+    if: ${{ !inputs.create_draft_release }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            runner: macos-15
+          - architecture: x64
+            runner: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/macos-package-test
+        with:
+          architecture: ${{ matrix.architecture }}
+
+  draft-release:
+    name: Draft release ${{ matrix.architecture }}
+    if: ${{ inputs.create_draft_release }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            runner: macos-15
+          - architecture: x64
+            runner: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/macos-package-test
+        with:
+          architecture: ${{ matrix.architecture }}
+      - name: Attach package and smoke report to a draft prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAC_ARCH: ${{ matrix.architecture }}
+        shell: bash
+        run: |
+          VERSION="$(node -p 'require("./package.json").version')"
+          TAG="v$VERSION-beta.${GITHUB_RUN_NUMBER}"
+          OUTPUT="$GITHUB_WORKSPACE/dist/macos-test-$VERSION-$MAC_ARCH"
+          shopt -s nullglob
+          PACKAGES=("$OUTPUT"/*.zip)
+          test "${#PACKAGES[@]}" -eq 1
+          REPORT="$RUNNER_TEMP/folio-macos-smoke/smoke-$MAC_ARCH.json"
+          test -s "$REPORT"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --draft --prerelease --target "$GITHUB_SHA" \
+              --title "阅川 Folio $VERSION macOS Test $GITHUB_RUN_NUMBER" \
+              --notes "Ad-hoc signed macOS test build for $VERSION without Developer ID signing or notarization. First launch may show a Gatekeeper warning. The packages were built and smoke-tested on standard GitHub-hosted macOS runners. Free translation still depends on the external translation service; see each architecture's attached smoke report." \
+              || gh release view "$TAG" >/dev/null
+          fi
+          gh release upload "$TAG" "${PACKAGES[0]}" "$REPORT" --clobber

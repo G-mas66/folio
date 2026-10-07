@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,7 +14,12 @@ FOLDER_COLORS = ("#42775f", "#4f718f", "#95723e", "#8a6386", "#4a8080", "#a65f4d
 
 def data_root() -> Path:
     configured = os.environ.get("WORKBENCH_DATA_DIR")
-    root = Path(configured) if configured else Path(r"D:\个人工作台\data")
+    if configured:
+        root = Path(configured)
+    elif sys.platform == "darwin":
+        root = Path.home() / "Library" / "Application Support" / "阅川 Folio" / "data"
+    else:
+        root = Path(r"D:\个人工作台\data")
     root.mkdir(parents=True, exist_ok=True)
     return root.resolve()
 

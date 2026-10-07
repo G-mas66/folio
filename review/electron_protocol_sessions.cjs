@@ -91,7 +91,7 @@ const server = http.createServer(async (request, response) => {
     const options = { cwd: root, env, timeout: 90000, executablePath: process.env.REVIEW_EXECUTABLE || path.join(root, 'node_modules/electron/dist/electron.exe'), args: process.env.REVIEW_EXECUTABLE ? [] : ['.'] };
     application = await _electron.launch(options);
     const version = await application.evaluate(({ app }) => app.getVersion());
-    assert.equal(version, '0.12.0');
+    assert.equal(version, require('../package.json').version);
     let page = await application.firstWindow();
     page.on('pageerror', error => errors.push(error.message));
     await page.getByRole('button', { name: '设置', exact: true }).click();

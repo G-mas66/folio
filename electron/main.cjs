@@ -7,10 +7,16 @@ const path = require('node:path');
 const { copyAndVerifyStorage, resolveLocationConfig, validateStorageTarget } = require('./storage-location.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
+const legacyWindowsRoot = 'D:\\个人工作台';
+const defaultStorageRoot = process.platform === 'win32'
+  ? legacyWindowsRoot
+  : path.join(app.getPath('appData'), '阅川 Folio');
+const defaultDataRoot = path.join(defaultStorageRoot, 'data');
+const defaultLocationConfigPath = path.join(defaultStorageRoot, 'config', 'location.json');
 let location;
 let locationStartupError;
 try {
-  location = resolveLocationConfig(process.env.WORKBENCH_LOCATION_CONFIG, process.env);
+  location = resolveLocationConfig(process.env.WORKBENCH_LOCATION_CONFIG, process.env, defaultDataRoot, defaultLocationConfigPath);
   if (location.configuredDataRoot && !fs.existsSync(location.dataRoot)) throw new Error('已配置的文献存储目录不存在，请连接原磁盘或恢复目录后重试。');
   fs.mkdirSync(location.dataRoot, { recursive: true });
   fs.mkdirSync(location.uiDataRoot, { recursive: true });
@@ -18,10 +24,10 @@ try {
 } catch (error) {
   locationStartupError = error;
 }
-const dataRoot = location?.dataRoot || path.resolve(process.env.WORKBENCH_DATA_DIR || 'D:\\个人工作台\\data');
+const dataRoot = location?.dataRoot || path.resolve(process.env.WORKBENCH_DATA_DIR || defaultDataRoot);
 const credentialRoot = location?.credentialRoot || path.resolve(process.env.WORKBENCH_CREDENTIAL_ROOT || dataRoot);
 const uiDataRoot = location?.uiDataRoot || path.join(dataRoot, 'electron-userData');
-const locationConfigPath = location?.locationConfigPath || path.resolve(process.env.WORKBENCH_LOCATION_CONFIG || 'D:\\个人工作台\\config\\location.json');
+const locationConfigPath = location?.locationConfigPath || path.resolve(process.env.WORKBENCH_LOCATION_CONFIG || defaultLocationConfigPath);
 
 let backend;
 let backendStopping = false;
@@ -81,8 +87,10 @@ async function startBackend() {
     TMP: backendTempRoot,
     TMPDIR: backendTempRoot,
     WORKBENCH_PDF_ENGINE_BIN: app.isPackaged
-      ? path.join(process.resourcesPath, 'pdf-engine', 'workbench-pdf-engine.exe')
-      : path.join(projectRoot, '.venv-pdf-engine', 'Scripts', 'python.exe'),
+      ? path.join(process.resourcesPath, 'pdf-engine', process.platform === 'win32' ? 'workbench-pdf-engine.exe' : 'workbench-pdf-engine')
+      : process.platform === 'win32'
+        ? path.join(projectRoot, '.venv-pdf-engine', 'Scripts', 'python.exe')
+        : path.join(projectRoot, '.venv-pdf-engine-macos', 'bin', 'python'),
     WORKBENCH_PDF_ENGINE_ENTRY: app.isPackaged ? '' : path.join(projectRoot, 'backend', 'pdf_engine', 'entrypoint.py'),
     WORKBENCH_PDF_ENGINE_ASSETS: app.isPackaged
       ? path.join(process.resourcesPath, 'pdf-engine-assets', 'babeldoc')
@@ -90,11 +98,14 @@ async function startBackend() {
     WORKBENCH_PDF_ENGINE_HOME: path.join(dataRoot, '.pdf-engine-home'),
   };
   if (app.isPackaged) {
-    backend = spawn(path.join(process.resourcesPath, 'backend', 'workbench-service.exe'), [], {
+    backend = spawn(path.join(process.resourcesPath, 'backend', process.platform === 'win32' ? 'workbench-service.exe' : 'workbench-service'), [], {
       cwd: dataRoot, env, windowsHide: true, stdio: 'ignore',
     });
   } else {
-    backend = spawn(path.join(projectRoot, '.venv', 'Scripts', 'python.exe'), ['-m', 'backend.server'], {
+    const python = process.platform === 'win32'
+      ? path.join(projectRoot, '.venv', 'Scripts', 'python.exe')
+      : path.join(projectRoot, '.venv-macos', 'bin', 'python');
+    backend = spawn(python, ['-m', 'backend.server'], {
       cwd: projectRoot, env: { ...env, PYTHONPATH: projectRoot }, windowsHide: true, stdio: 'ignore',
     });
   }
@@ -184,7 +195,7 @@ async function requestApi(input) {
 
 function secureWindowOptions() {
   return {
-    icon: path.join(app.getAppPath(), 'assets', 'folio-icon.ico'),
+    ...(process.platform === 'win32' ? { icon: path.join(app.getAppPath(), 'assets', 'folio-icon.ico') } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,

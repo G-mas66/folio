@@ -1,0 +1,56 @@
+name: Build and test macOS package
+description: Build one native macOS architecture and run its packaged-app smoke checks.
+inputs:
+  architecture:
+    description: Native runner architecture (arm64 or x64).
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Install JavaScript dependencies and smoke tools
+      shell: bash
+      run: |
+        npm ci
+        npm install --no-save --no-package-lock playwright@1.56.0
+    - name: Build backend and install synthetic-PDF test helper
+      shell: bash
+      run: |
+        npm run build:backend:macos
+        .venv-macos/bin/python -m pip install --quiet --disable-pip-version-check reportlab
+    - name: Run isolated backend contracts
+      shell: bash
+      run: npm run test:backend:macos
+    - name: Run isolated storage contracts
+      shell: bash
+      run: |
+        export WORKBENCH_REVIEW_ROOT="$(node -p 'require("node:fs").realpathSync(process.env.RUNNER_TEMP)')/folio-storage-review"
+        npm run test:storage
+    - name: Build native macOS package
+      shell: bash
+      env:
+        MAC_ARCH: ${{ inputs.architecture }}
+      run: npm run dist:macos
+    - name: Smoke-test the packaged app
+      shell: bash
+      env:
+        MAC_ARCH: ${{ inputs.architecture }}
+        FOLIO_MAC_SMOKE_PYTHON: ${{ github.workspace }}/.venv-macos/bin/python
+      run: |
+        VERSION="$(node -p 'require("./package.json").version')"
+        OUTPUT="$GITHUB_WORKSPACE/dist/macos-test-$VERSION-${{ inputs.architecture }}"
+        if [[ "${{ inputs.architecture }}" == "x64" ]]; then
+          APP="$OUTPUT/mac/阅川 Folio.app"
+        else
+          APP="$OUTPUT/mac-arm64/阅川 Folio.app"
+        fi
+        test -d "$APP"
+        export REVIEW_APP_PATH="$APP"
+        export REVIEW_EXECUTABLE="$APP/Contents/MacOS/阅川 Folio"
+        npm run smoke:macos
+        cat "$RUNNER_TEMP/folio-macos-smoke/smoke-${{ inputs.architecture }}.json"

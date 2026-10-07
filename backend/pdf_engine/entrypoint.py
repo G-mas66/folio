@@ -95,9 +95,38 @@ async def translate(source: Path, output: Path) -> None:
         raise RuntimeError("PDF 引擎未返回完成结果。")
 
 
+def self_test() -> int:
+    asset_value = os.environ.get("WORKBENCH_PDF_ENGINE_ASSETS", "").strip()
+    assets = Path(asset_value).resolve() if asset_value else None
+    if assets is None or not assets.is_dir() or not all((assets / name).is_dir() for name in ("fonts", "models", "cmap", "tiktoken")):
+        emit({"type": "error", "message": "PDF 引擎缓存资源不完整。"})
+        return 2
+    home_value = os.environ.get("WORKBENCH_PDF_ENGINE_HOME", "").strip()
+    if home_value:
+        configure_runtime_home(Path(home_value))
+    try:
+        from pdf2zh_next.config.model import BasicSettings, PDFSettings, SettingsModel, TranslationSettings
+        from pdf2zh_next.config.translate_engine_model import SiliconFlowFreeSettings
+        from babeldoc.format.pdf.high_level import async_translate
+        from pdf2zh_next.high_level import create_babeldoc_config
+
+        if not all((BasicSettings, PDFSettings, SettingsModel, TranslationSettings, SiliconFlowFreeSettings, async_translate, create_babeldoc_config)):
+            raise RuntimeError("PDF 翻译运行时未能加载。")
+    except Exception as error:
+        emit({"type": "error", "message": str(error)[:1000]})
+        return 1
+    emit({"type": "self_test", "status": "ok"})
+    return 0
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    if sys.argv[1:] in (["--help"], ["-h"]):
+        print("Usage: workbench-pdf-engine [--help | --self-test | SOURCE.pdf OUTPUT_DIR RUNTIME_HOME]")
+        return 0
+    if sys.argv[1:] == ["--self-test"]:
+        return self_test()
     if len(sys.argv) != 4:
         emit({"type": "error", "message": "helper 参数无效。"})
         return 2

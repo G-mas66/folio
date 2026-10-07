@@ -4,9 +4,9 @@
 
 # 阅川 · Folio
 
-一个 Windows 桌面文献阅读工作台。英文 PDF 导入后先完成全文翻译，中文文献直接阅读原始 PDF；在同一窗口中结合 AI 问答、笔记和批注理解文献。
+一个桌面文献阅读工作台。英文 PDF 导入后先完成全文翻译，中文文献直接阅读原始 PDF；在同一窗口中结合 AI 问答、笔记和批注理解文献。
 
-**当前版本：0.12.0 · Windows x64 · Electron + React + Python**
+**当前源码版本：0.13.0 · Windows x64 正式版基线：0.12.0 · macOS 测试版：0.13.0 · Electron + React + Python**
 
 [功能](#功能) · [界面预览](#界面预览) · [使用](#使用) · [AI 配置](#ai-配置) · [源码构建](#源码构建) · [数据与隐私](#数据与隐私) · [当前限制](#当前限制)
 
@@ -60,13 +60,13 @@
 
 本仓库提供源码和构建所需的静态资源，生成的安装程序不提交到 Git。安装包可按下方[源码构建](#源码构建)步骤生成。
 
-构建完成后运行：
+Windows 0.12.0 正式版安装路径：
 
 ```text
 dist/installer-0.12.0/阅川-Folio-0.12.0-安装程序.exe
 ```
 
-也可使用 `dist/installer-0.12.0/win-unpacked/阅川 Folio.exe`；需要保留整个 `win-unpacked` 文件夹。打包程序包含本地服务、Python 运行时、PDF 引擎、字体和布局模型，使用时不用手动启动 Python 或另装 Python。
+也可使用 `dist/installer-0.12.0/win-unpacked/阅川 Folio.exe`；需要保留整个 `win-unpacked` 文件夹。打包程序包含本地服务、Python 运行时、PDF 引擎、字体和布局模型，使用时不用手动启动 Python 或另装 Python。当前源码构建的 Windows 安装包版本号为 0.13.0。
 
 1. 在文献库创建分类文件夹，然后导入 PDF。程序保存库内副本，最初选择的文件保持不变。
 2. 英文文献等待中文和双语 PDF 生成；中文文献直接阅读。英文翻译可暂停、继续或重试，不需要逐段点击翻译。
@@ -89,7 +89,7 @@ dist/installer-0.12.0/阅川-Folio-0.12.0-安装程序.exe
 | API 基础地址 | 例如 `https://api.example.com/v1`，替换为服务商提供的地址 |
 | API 协议 | 默认 OpenAI Chat Completions；也可选择 OpenAI Responses |
 | 默认模型 | 点击「获取模型列表」后从下拉菜单选择，无需手动输入名称 |
-| AI API Key | 服务商提供的 Key，保存到 Windows 凭据管理器 |
+| AI API Key | 服务商提供的 Key，保存到 Windows 凭据管理器或 macOS 钥匙串 |
 
 标准协议根据基础地址处理 `/chat/completions` 或 `/responses` 路径，已包含端点时不会重复追加，查询参数保留。服务使用特殊对话地址时可选择「自定义完整地址（Chat Completions）」；此模式按填写的完整 URL 原样请求，保留尾斜线与查询参数。旧自定义地址升级后保留原样请求模式。
 
@@ -112,7 +112,7 @@ dist/installer-0.12.0/阅川-Folio-0.12.0-安装程序.exe
 
 高亮和批注是工作台内的覆盖显示，不改写原 PDF；当前没有带标注 PDF 导出功能。笔记与批注不自动发送给 AI。
 
-默认文献库位于 `D:\个人工作台\data`。在「设置 → 文献存储位置」点击「更改存储位置…」，选择一个空文件夹，确认后执行：
+Windows 默认文献库位于 `D:\个人工作台\data`；macOS 默认位于 `~/Library/Application Support/阅川 Folio/data`。AI Key 分别保存在 Windows 凭据管理器和 macOS 钥匙串。在「设置 → 文献存储位置」点击「更改存储位置…」，选择一个空文件夹，确认后执行：
 
 1. 停止当前任务和本地服务。
 2. 复制 PDF、数据库、分类、聊天、笔记、批注及引擎缓存，并逐文件校验。
@@ -150,7 +150,20 @@ npm ci
 npm run dist
 ```
 
-`npm run dist` 依次构建界面、本地后端与 PDF 引擎，再生成 NSIS 安装包。PDF 引擎构建会准备 `.venv-pdf-engine`，使用 PDF2zh-Next **2.9.0**、BabelDOC **0.6.2** 和 PyInstaller **6.16.0**。完成后产物在 `dist/installer-0.12.0/`。
+`npm run dist` 依次构建界面、本地后端与 PDF 引擎，再生成 NSIS 安装包。PDF 引擎构建会准备 `.venv-pdf-engine`，使用 PDF2zh-Next **2.9.0**、BabelDOC **0.6.2** 和 PyInstaller **6.16.0**。Windows 0.12.0 正式版安装目录为 `dist/installer-0.12.0/`；当前源码生成的 Windows 包使用 0.13.0 版本号。
+
+### macOS 测试版
+
+0.13.0 macOS 测试版支持 Apple Silicon arm64 和 Intel x64。GitHub Actions 的「macOS Test Builds」工作流只接受手动运行，使用标准 `macos-15` 与 `macos-15-intel` runner 原生构建，并运行后端契约测试和打包应用 smoke。默认仅在 Actions 日志中保留测试报告，不上传大型 Actions artifact；勾选 `create_draft_release` 会在重新构建并验证后，把 zip 安装包和逐架构 smoke 报告放到草稿预发布中。
+
+macOS 本地构建需要对应架构的 Mac、Xcode Command Line Tools、Node.js 22 和 Python 3.12：
+
+```bash
+npm ci
+MAC_ARCH=arm64 npm run dist:macos
+```
+
+Intel Mac 将 `arm64` 改为 `x64`。产物位于 `dist/macos-test-0.13.0-<架构>/`。应用自带原生后端、PDF 翻译引擎、字体和布局模型，不需要用户安装 Python。测试版使用临时 ad-hoc 签名，没有 Developer ID 签名或公证；首次打开可能出现 Gatekeeper 提示，因此只作为测试包分发。
 
 ### 开发运行
 
@@ -183,7 +196,7 @@ npm run test:backend
 npm run test:storage
 ```
 
-0.12.0 已通过 **123 项后端检查、13 项存储文件系统检查和 10 套最终打包程序桌面验收**。检查覆盖两种标准协议、模型读取、独立会话、中文原件导入、文件定位、阅读位置、笔记/标注、存储失败回滚、公式与流式停止，以及真实免费翻译样本的图片与矢量图保留。兼容接口测试使用隔离的模拟服务，不代表任何第三方模型的回答质量。
+Windows x64 0.12.0 已通过 **123 项后端检查、13 项存储文件系统检查和 10 套最终打包程序桌面验收**。检查覆盖两种标准协议、模型读取、独立会话、中文原件导入、文件定位、阅读位置、笔记/标注、存储失败回滚、公式与流式停止，以及真实免费翻译样本的图片与矢量图保留。兼容接口测试使用隔离的模拟服务，不代表任何第三方模型的回答质量。
 
 `review/` 保留原生桌面验收脚本。部分脚本依赖 `.review/` 中预先生成或翻译的样本，不能在新克隆仓库中直接运行全部桌面验收；准备条件可从各脚本和种子脚本查看。历史结果和哈希记录见 [审批检查](docs/审批检查.md)，运行输出、私人文献和安装包不提交到仓库。
 
@@ -195,7 +208,7 @@ electron/                 桌面主进程、IPC 与存储迁移
 backend/                   FastAPI、SQLite、AI 与翻译协调
 backend/pdf_engine/        随应用运行的 PDF 翻译入口
 backend/pdf_engine_assets/ 字体、布局模型和必要资源
-scripts/                   Windows 构建与安装脚本
+scripts/                   Windows 与 macOS 构建脚本
 review/                    契约测试、合成样本和桌面验收脚本
 docs/                      方案、验收记录和界面截图
 ```
@@ -204,14 +217,14 @@ docs/                      方案、验收记录和界面截图
 
 - 文献、生成的 PDF、分类、聊天、笔记与批注保存在本机；导入会创建副本，不修改源文件。
 - 免费翻译服务会接收标题和可提取的正文文本；AI 服务会接收对话及模型调用工具取得的原文。两者都属于外部服务，完整生成的 PDF 可以离线阅读。
-- API Key 保存到 Windows 凭据管理器，不写入应用数据库，不回读显示，不随文献目录复制。
+- API Key 保存到 Windows 凭据管理器或 macOS 钥匙串，不写入应用数据库，不回读显示，不随文献目录复制。
 - 联网搜索只发送搜索关键词，不发送整篇论文或 AI Key；网页来源由用户点击后打开。
 - 原始 HTML 不执行，远程回答图片不自动加载，只显示图片说明。
 - `.gitignore` 排除文献库、位置配置、环境文件、虚拟环境、缓存、安装目录和构建输出。界面截图使用合成样本。
 
 ## 当前限制
 
-- 目前针对 Windows x64 开发与验收；macOS / Linux 未验证。
+- Windows x64 0.12.0 是稳定基线；0.13.0 macOS arm64/x64 仅为测试版，目前没有 Apple Developer ID 签名或公证；Linux 未验证。
 - 扫描件和无法提取正文的实质页面会阻止完成，当前没有单独 OCR 步骤。
 - 表格单元格、图片内文字和公式不会被完整翻译；复杂公式、跨页图表和特殊排版应检查输出。
 - 高亮与批注支持同一页内的可提取文字，不支持跨页选择或扫描图上的文字选择。
