@@ -32,9 +32,9 @@ node node_modules/electron-builder/cli.js \
   --config.mac.icon="$MAC_ICON"
 
 if [[ "$ARCH" == "x64" ]]; then
-  APP="$OUTPUT/mac/阅川 Folio.app"
+  APP="$OUTPUT/mac/Folio.app"
 else
-  APP="$OUTPUT/mac-$ARCH/阅川 Folio.app"
+  APP="$OUTPUT/mac-$ARCH/Folio.app"
 fi
 codesign --verify --deep --strict "$APP"
 echo "Built macOS test package: $OUTPUT"

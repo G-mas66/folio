@@ -75,11 +75,28 @@ export type ChatStreamEvent = { requestId: string; type: string; data: Record<st
 export type ChatStreamHandle = { requestId: string; cancel: () => Promise<boolean>; dispose: () => void };
 export type StorageLocationInfo = { dataRoot: string; uiDataRoot: string; credentialRoot: string; locationConfigPath: string };
 export type StorageMigrationProgress = { phase: 'stopping' | 'copying' | 'complete'; copiedFiles: number; totalFiles: number; copiedBytes: number; totalBytes: number };
+export type UpdateState = {
+  platform: 'windows' | 'macos' | 'unsupported';
+  status: 'idle' | 'checking' | 'not-available' | 'available' | 'downloading' | 'downloaded' | 'manual-available' | 'error';
+  currentVersion: string;
+  enabled: boolean;
+  version?: string;
+  releaseNotes?: string;
+  downloadUrl?: string;
+  releaseUrl?: string;
+  architecture?: string;
+  percent?: number;
+  bytesPerSecond?: number;
+  total?: number;
+  transferred?: number;
+  message?: string;
+};
 
 declare global {
   interface Window {
     workbench: {
       request<T = unknown>(input: ApiRequest): Promise<T>;
+      setThemePreference(preference: 'system' | 'light' | 'dark'): Promise<string>;
       choosePdfs(): Promise<string[]>;
       revealPaperFile(paperId: string, kind: 'original' | 'mono' | 'dual'): Promise<boolean>;
       openLibraryFolder(): Promise<boolean>;
@@ -88,6 +105,15 @@ declare global {
       startChatStream(input: ChatStreamInput, onEvent: (event: ChatStreamEvent) => void): Promise<ChatStreamHandle>;
       openExternal(url: string): Promise<boolean>;
       getAppInfo(): Promise<StorageLocationInfo>;
+      getUpdateState(): Promise<UpdateState>;
+      checkForUpdates(): Promise<UpdateState>;
+      downloadUpdate(): Promise<UpdateState>;
+      cancelUpdateDownload(): Promise<boolean>;
+      installUpdate(): Promise<boolean>;
+      openUpdateDownload(): Promise<boolean>;
+      onUpdateState(callback: (state: UpdateState) => void): () => void;
+      onPrepareUpdateInstall(callback: (requestId: string) => void): () => void;
+      updateInstallReady(requestId: string, error?: string): void;
       chooseStorageLocation(): Promise<string | null>;
       migrateStorageLocation(input: { target: string }): Promise<{ dataRoot: string; copiedFiles: number; copiedBytes: number; restarting: boolean }>;
       onStorageMigrationProgress(callback: (progress: StorageMigrationProgress) => void): () => void;

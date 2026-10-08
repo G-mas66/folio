@@ -34,7 +34,7 @@ const originalCacheFingerprint = cacheFingerprint();
     else Object.assign(options, { executablePath: path.join(root, 'node_modules', 'electron', 'dist', 'electron.exe'), args: ['.'] });
     application = await _electron.launch(options);
     const version = await application.evaluate(({ app }) => app.getVersion());
-    assert.equal(version, '0.12.0');
+    assert.equal(version, require(path.join(root, 'package.json')).version);
     let main = await application.firstWindow();
     main.on('pageerror', error => errors.push(error.message));
     await main.getByRole('button', { name: '设置', exact: true }).waitFor();
@@ -44,7 +44,7 @@ const originalCacheFingerprint = cacheFingerprint();
     await application.evaluate(({ dialog }, source) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [source] });
     }, source);
-    await main.getByRole('button', { name: /导入文献/ }).click();
+    await main.getByRole('button', { name: /导入 PDF/ }).click();
     let paper;
     const deadline = Date.now() + 900000;
     while (Date.now() < deadline) {
@@ -111,6 +111,7 @@ const originalCacheFingerprint = cacheFingerprint();
     assert.equal(fixture.requests.length, 2, 'restart must use persisted chat');
     // Endpoint deletion is also exercised by Python tests; native confirmation is checked here.
     await main.getByTestId('library-tab').click();
+    await main.locator('.paper-card').filter({ hasText: 'layout_images.pdf' }).locator('summary').click();
     const remove = main.locator('.paper-card').filter({ hasText: 'layout_images.pdf' }).getByRole('button', { name: '删除', exact: true });
     let confirmation = main.waitForEvent('dialog');
     let click = remove.click();

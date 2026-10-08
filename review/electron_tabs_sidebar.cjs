@@ -59,7 +59,7 @@ const until = async (check, message) => {
     delete env.WORKBENCH_DEV;
     const options = { cwd: root, env, timeout: 90000, executablePath: process.env.REVIEW_EXECUTABLE || path.join(root, 'node_modules/electron/dist/electron.exe'), args: process.env.REVIEW_EXECUTABLE ? [] : ['.'] };
     application = await _electron.launch(options);
-    assert.equal(await application.evaluate(({ app }) => app.getVersion()), '0.12.0');
+    assert.equal(await application.evaluate(({ app }) => app.getVersion()), require(path.join(root, 'package.json')).version);
     main = await application.firstWindow();
     main.on('pageerror', error => errors.push(error.message));
     await main.getByTestId('library-tab').waitFor();
@@ -240,6 +240,7 @@ const until = async (check, message) => {
     assert.equal(await tab(second.paper_id).count(), 0);
     await main.getByTestId('library-tab').click();
     await main.getByTestId('folder-nav-all').click();
+    await main.locator('.paper-card summary').click();
     const dialogPromise = main.waitForEvent('dialog');
     const deleting = main.locator('.paper-card').getByRole('button', { name: '删除', exact: true }).click();
     await (await dialogPromise).accept();
@@ -249,7 +250,7 @@ const until = async (check, message) => {
     assert.equal(application.windows().length, 1);
     for (const source of sources) assert.equal(hash(source.path), source.hash);
     assert.equal(errors.length, 0, errors.join('\n'));
-    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version: '0.12.0', seconds: (Date.now() - started) / 1000, first, second, colors: folders.map(folder => folder.color), sidebar, list, firstState, secondState, pdfLoads: loadsBeforeSwitch, requests: fixture.requests.length, sessions: fixture.sessions, windows: 1, errors }, null, 2));
+    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version: require(path.join(root, 'package.json')).version, seconds: (Date.now() - started) / 1000, first, second, colors: folders.map(folder => folder.color), sidebar, list, firstState, secondState, pdfLoads: loadsBeforeSwitch, requests: fixture.requests.length, sessions: fixture.sessions, windows: 1, errors }, null, 2));
     console.log(JSON.stringify({ result: 'passed', output }));
   } catch (error) {
     fs.writeFileSync(path.join(output, 'failure.txt'), String(error.stack || error));

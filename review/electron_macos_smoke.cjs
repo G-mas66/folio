@@ -7,6 +7,7 @@ const http = require('node:http');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const { _electron } = require('playwright');
+const { selectMacUpdate } = require('../electron/update-service.cjs');
 
 const root = path.resolve(__dirname, '..');
 const runRoot = path.resolve(process.env.RUNNER_TEMP || process.cwd(), 'folio-macos-smoke');
@@ -161,9 +162,29 @@ async function main() {
   fs.mkdirSync(runRoot, { recursive: true });
   assert.ok(['arm64', 'x64'].includes(arch), 'MAC_ARCH must be arm64 or x64.');
   assert.ok(fs.existsSync(path.join(appPath, 'Contents', 'Info.plist')), `Packaged app not found: ${appPath}`);
-  assert.equal(executable, path.join(contents, 'MacOS', '阅川 Folio'), 'Smoke must launch the executable inside the packaged .app.');
+  assert.equal(executable, path.join(contents, 'MacOS', 'Folio'), 'Smoke must launch the executable inside the packaged .app.');
   assert.ok(fs.statSync(executable).isFile(), `Packaged executable not found: ${executable}`);
   assert.ok(fs.statSync(backend).isFile() && fs.statSync(engine).isFile(), 'Frozen backend and PDF engine must be packaged.');
+
+  const updateVersion = '0.14.1-beta.1';
+  const updateRelease = {
+    tag_name: `v${updateVersion}`,
+    draft: false,
+    body: 'Architecture-specific manual update fixture.',
+    assets: ['arm64', 'x64'].map(value => ({ name: `Folio-${updateVersion}-macOS-${value}.zip`, state: 'uploaded' })),
+  };
+  const selectedUpdate = selectMacUpdate([updateRelease], report.version, arch);
+  assert.equal(selectedUpdate?.architecture, arch);
+  assert.equal(selectedUpdate?.downloadUrl, `https://github.com/G-mas66/folio/releases/download/v${updateVersion}/Folio-${updateVersion}-macOS-${arch}.zip`);
+  const wrongArchitectureRelease = { ...updateRelease, assets: updateRelease.assets.filter(asset => !asset.name.endsWith(`-${arch}.zip`)) };
+  assert.equal(selectMacUpdate([wrongArchitectureRelease], report.version, arch), null, 'macOS update selection must never fall back to the other architecture.');
+  const channelRelease = (version) => ({ tag_name: `v${version}`, draft: false, assets: [{ name: `Folio-${version}-macOS-${arch}.zip`, state: 'uploaded' }] });
+  assert.equal(selectMacUpdate([channelRelease('0.14.1-alpha.1')], report.version, arch), null, 'beta installs must not receive alpha updates.');
+  assert.equal(selectMacUpdate([channelRelease('0.14.1-beta.2')], '0.14.0', arch), null, 'stable installs must not receive beta updates.');
+  assert.equal(selectMacUpdate([channelRelease('0.14.1')], '0.14.0', arch)?.version, '0.14.1', 'stable installs may receive newer stable updates.');
+  assert.equal(selectMacUpdate([channelRelease('0.14.1')], report.version, arch)?.version, '0.14.1', 'beta installs may receive stable updates.');
+  report.checks.manual_update_asset = { architecture: arch, version: selectedUpdate.version, exact_asset: path.basename(selectedUpdate.downloadUrl), wrong_architecture_rejected: true };
+  report.checks.update_channel_filter = { beta_rejects_alpha: true, stable_rejects_beta: true, beta_accepts_stable: true, stable_accepts_stable: true };
 
   const resourceFiles = walkFiles(resources);
   assert.equal(resourceFiles.some(file => file.toLowerCase().endsWith('.exe')), false, 'macOS resources must not contain Windows executables.');
@@ -284,7 +305,7 @@ async function main() {
     await application.evaluate(({ dialog }, file) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [file] });
     }, chinesePdf);
-    await library.getByRole('button', { name: /导入文献/ }).click();
+    await library.getByRole('button', { name: /导入 PDF/ }).click();
     const papers = await waitForPaper(library, items => items.some(item => item.source_name === path.basename(chinesePdf) && item.can_read));
     const paper = papers.find(item => item.source_name === path.basename(chinesePdf));
     readerPaperId = paper.id;

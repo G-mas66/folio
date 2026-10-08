@@ -146,6 +146,7 @@ const server = http.createServer(async (request, response) => {
       shell.showItemInFolder = file => globalThis.__reviewLocations.push(file);
       shell.openPath = async folder => { globalThis.__reviewLocations.push(folder); return ''; };
     });
+    await page.locator('.paper-card summary').click();
     await page.getByRole('button', { name: '打开文件位置', exact: true }).click();
     await page.getByRole('button', { name: '打开文献目录', exact: true }).click();
     await page.locator('.paper-card').getByRole('button', { name: '阅读', exact: true }).click();

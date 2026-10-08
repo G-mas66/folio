@@ -86,7 +86,7 @@ const until = async (check, message) => {
   };
   try {
     app = await _electron.launch(options);
-    assert.equal(await app.evaluate(({ app }) => app.getVersion()), '0.12.0');
+    assert.equal(await app.evaluate(({ app }) => app.getVersion()), require(path.join(root, 'package.json')).version);
     main = await app.firstWindow();
     main.on('pageerror', error => errors.push(error.message));
     await main.getByTestId('library-tab').waitFor();
@@ -252,6 +252,7 @@ const until = async (check, message) => {
       localStorage.setItem(`paper-workbench.note-draft.${secondId}`, '其他篇草稿不得清理');
     }, [first.paper_id, second.paper_id]);
     await main.getByTestId('library-tab').click();
+    await main.locator('.paper-card').filter({ hasText: '连续阅读验收文献' }).locator('summary').click();
     const confirmation = main.waitForEvent('dialog');
     const deletion = main.locator('.paper-card').filter({ hasText: '连续阅读验收文献' }).getByRole('button', { name: '删除', exact: true }).click();
     await (await confirmation).accept();
@@ -263,7 +264,7 @@ const until = async (check, message) => {
     for (const source of sources) assert.equal(digest(source.path), source.hash);
     assert.equal(errors.length, 0, errors.join('\n'));
     assert.equal(app.windows().length, 1);
-    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version: '0.12.0', seconds: (Date.now() - started) / 1000, first, second, highlight, comment, sourceHashes: sources, aiRequests: fixture.requests.length, errors }, null, 2));
+    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version: require(path.join(root, 'package.json')).version, seconds: (Date.now() - started) / 1000, first, second, highlight, comment, sourceHashes: sources, aiRequests: fixture.requests.length, errors }, null, 2));
     console.log(JSON.stringify({ result: 'passed', output }));
   } catch (error) {
     fs.writeFileSync(path.join(output, 'failure.txt'), String(error.stack || error));

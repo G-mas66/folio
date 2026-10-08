@@ -48,7 +48,7 @@ const until = async (check, message) => {
   const confirm = () => main.getByRole('button', { name: '确认迁移并重启', exact: true });
   try {
     app = await _electron.launch(options);
-    assert.equal(await app.evaluate(({ app }) => app.getVersion()), '0.12.0');
+    assert.equal(await app.evaluate(({ app }) => app.getVersion()), require(path.join(root, 'package.json')).version);
     main = await app.firstWindow();
     main.on('pageerror', error => errors.push(error.message));
     await main.getByTestId('library-tab').waitFor();
@@ -181,7 +181,7 @@ const until = async (check, message) => {
     assert.equal(hash(paper.source), sourceHash);
     assert.equal(errors.length, 0, errors.join('\n'));
     await main.screenshot({ path: path.join(output, 'migrated-notes.png') });
-    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version: '0.12.0', seconds: (Date.now() - started) / 1000, paper, initialInfo, newInfo, savedConfig, pdfs, mark, history: history.length, errors }, null, 2));
+    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version: require(path.join(root, 'package.json')).version, seconds: (Date.now() - started) / 1000, paper, initialInfo, newInfo, savedConfig, pdfs, mark, history: history.length, errors }, null, 2));
     console.log(JSON.stringify({ result: 'passed', output }));
   } catch (error) {
     fs.writeFileSync(path.join(output, 'failure.txt'), String(error.stack || error));

@@ -35,7 +35,7 @@ const sourceHash = crypto.createHash('sha256').update(fs.readFileSync(source)).d
     await application.evaluate(({ dialog }, source) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [source] });
     }, source);
-    await main.getByRole('button', { name: /导入文献/ }).click();
+    await main.getByRole('button', { name: /导入 PDF/ }).click();
     let paper;
     const deadline = Date.now() + 180000;
     while (Date.now() < deadline) {

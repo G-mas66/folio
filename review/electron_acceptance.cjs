@@ -64,7 +64,7 @@ async function waitForPapers(page, predicate, timeout = 60000) {
     await application.evaluate(({ dialog }, files) => {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: files });
     }, sourcePaths);
-    await main.getByRole('button', { name: /导入文献/ }).click();
+    await main.getByRole('button', { name: /导入 PDF/ }).click();
     const papers = await waitForPapers(main, papers =>
       ['quartz_alpha.pdf', 'quartz_beta_same_title.pdf'].every(name =>
         papers.some(paper => paper.source_name === name && paper.can_read)));

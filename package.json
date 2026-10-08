@@ -1,8 +1,8 @@
 {
   "name": "paper-workbench",
-  "version": "0.13.0",
+  "version": "0.14.0-beta.1",
   "private": true,
-  "description": "阅川 Folio 个人文献阅读工作台",
+  "description": "Folio personal literature reader",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "node scripts/copy-pdfjs-assets.cjs && concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env WORKBENCH_DEV=1 electron .\"",
@@ -21,6 +21,7 @@
     "smoke:macos": "node review/electron_macos_smoke.cjs"
   },
   "dependencies": {
+    "electron-updater": "6.8.9",
     "katex": "0.19.0",
     "pdfjs-dist": "6.2.108",
     "react": "^19.1.1",
@@ -28,7 +29,8 @@
     "react-markdown": "^10.1.0",
     "rehype-katex": "7.0.1",
     "remark-gfm": "^4.0.1",
-    "remark-math": "6.0.0"
+    "remark-math": "6.0.0",
+    "semver": "7.7.3"
   },
   "overrides": {
     "katex": "$katex"
@@ -47,7 +49,7 @@
   },
   "build": {
     "appId": "local.paperworkbench.desktop",
-    "productName": "阅川 Folio",
+    "productName": "Folio",
     "directories": {
       "output": "dist/installer"
     },
@@ -57,6 +59,17 @@
       "electron/**",
       "package.json",
       "!dist/installer*/**"
+    ],
+    "generateUpdatesFilesForAllChannels": true,
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "G-mas66",
+        "repo": "folio",
+        "channel": "beta",
+        "releaseType": "prerelease",
+        "private": false
+      }
     ],
     "extraResources": [
       {
@@ -84,10 +97,11 @@
         }
       ],
       "icon": "assets/folio-icon.ico",
+      "executableName": "阅川 Folio",
       "target": [
         "nsis"
       ],
-      "artifactName": "阅川-Folio-${version}-安装程序.${ext}"
+      "artifactName": "Folio-${version}-Windows-${arch}-Setup.${ext}"
     },
     "mac": {
       "extraResources": [
@@ -103,14 +117,14 @@
       "target": ["zip"],
       "identity": "-",
       "hardenedRuntime": false,
-      "artifactName": "阅川-Folio-${version}-${arch}-macOS.${ext}"
+      "artifactName": "Folio-${version}-macOS-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "阅川 Folio",
+      "shortcutName": "Folio",
       "installerLanguages": [
         "zh_CN"
       ],

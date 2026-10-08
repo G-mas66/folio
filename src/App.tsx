@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, errorMessage, Folder, Paper } from './api';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { api, errorMessage, Folder, Paper, UpdateState } from './api';
+import { loadPdfDocument } from './PdfPage';
 import { Reader } from './Reader';
 import { SettingsPanel } from './SettingsPanel';
 
@@ -10,6 +11,21 @@ const statusText: Record<string, string> = {
 };
 
 const readerTabsKey = 'paper-workbench.reader-tabs.v1';
+const themePreferenceKey = 'folio.theme.v1';
+type ThemePreference = 'system' | 'light' | 'dark';
+
+function readThemePreference(): ThemePreference {
+  try {
+    const value = localStorage.getItem(themePreferenceKey);
+    return value === 'light' || value === 'dark' || value === 'system' ? value : 'system';
+  } catch {
+    return 'system';
+  }
+}
+
+function resolveTheme(preference: ThemePreference): 'light' | 'dark' {
+  return preference === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : preference === 'dark' ? 'dark' : 'light';
+}
 
 function readReaderTabs(): { paperIds: string[]; active: string } {
   try {
@@ -26,6 +42,8 @@ export function App() {
 }
 
 function Workbench() {
+  const [themePreference, setThemePreference] = useState<ThemePreference>(readThemePreference);
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => resolveTheme(readThemePreference()));
   const [activePanel, setActivePanel] = useState('library');
   const [readerTabs, setReaderTabs] = useState<string[]>([]);
   const readerTabsRef = useRef(readerTabs);
@@ -38,12 +56,59 @@ function Workbench() {
   const [search, setSearch] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const [updateNotice, setUpdateNotice] = useState<UpdateState | null>(null);
+  const dismissedUpdateRef = useRef<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<Paper | null>(null);
   const [folderDialog, setFolderDialog] = useState<'create' | 'rename' | null>(null);
   const [folderName, setFolderName] = useState('');
   const [dragging, setDragging] = useState(false);
   const dragDepthRef = useRef(0);
+
+  useEffect(() => {
+    let active = true;
+    const receiveUpdateState = (value: UpdateState) => {
+      if (!active) return;
+      if (value.status === 'available' || value.status === 'manual-available') {
+        if ((value.version || '') !== dismissedUpdateRef.current) setUpdateNotice(value);
+      } else {
+        setUpdateNotice(null);
+      }
+    };
+    const unsubscribe = window.workbench.onUpdateState(receiveUpdateState);
+    void window.workbench.getUpdateState().then(receiveUpdateState).catch(() => {});
+    return () => { active = false; unsubscribe(); };
+  }, []);
+
+  useLayoutEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const apply = () => {
+      const next = themePreference === 'system' ? media.matches ? 'dark' : 'light' : themePreference;
+      document.documentElement.dataset.theme = next;
+      document.documentElement.style.colorScheme = next;
+      setTheme(next);
+    };
+    apply();
+    void window.workbench.setThemePreference(themePreference).catch((error) => setError(errorMessage(error)));
+    if (themePreference !== 'system') return;
+    media.addEventListener('change', apply);
+    return () => media.removeEventListener('change', apply);
+  }, [themePreference]);
+
+  useEffect(() => {
+    try { localStorage.setItem(themePreferenceKey, themePreference); } catch { /* theme preference is optional */ }
+  }, [themePreference]);
+
+  useEffect(() => window.workbench.onPrepareUpdateInstall(async (requestId) => {
+    const pending: Promise<void>[] = [];
+    window.dispatchEvent(new CustomEvent('folio:prepare-update-install', { detail: { pending } }));
+    try {
+      await Promise.all(pending);
+      window.workbench.updateInstallReady(requestId);
+    } catch (error) {
+      window.workbench.updateInstallReady(requestId, errorMessage(error));
+    }
+  }), []);
 
   function clearFileDrag() {
     dragDepthRef.current = 0;
@@ -279,6 +344,20 @@ function Workbench() {
     }
   }
 
+  function dismissUpdateNotice() {
+    dismissedUpdateRef.current = updateNotice?.version || '';
+    setUpdateNotice(null);
+  }
+
+  function actOnUpdateNotice() {
+    const action = updateNotice?.platform === 'windows'
+      ? window.workbench.downloadUpdate()
+      : window.workbench.openUpdateDownload();
+    dismissedUpdateRef.current = updateNotice?.version || '';
+    setUpdateNotice(null);
+    void action.catch((updateError) => setError(errorMessage(updateError)));
+  }
+
   return (
     <div className="app-shell" onDragEnter={(event) => {
       if (activePanel !== 'library' || !event.dataTransfer.types.includes('Files')) return;
@@ -301,7 +380,7 @@ function Workbench() {
     }}>
       <header className="topbar">
         <div className="brand-mark" aria-hidden="true"><img src="./folio-mark.svg" alt="" /></div>
-        <div className="brand-lockup"><div className="brand-name">阅川</div><span>Folio</span></div>
+        <div className="brand-wordmark">Folio</div>
         <nav className="app-tab-strip" role="tablist" aria-label="工作台标签">
           <button className={`app-tab library-tab ${activePanel === 'library' ? 'selected' : ''}`} type="button" role="tab" aria-selected={activePanel === 'library'} aria-controls="library-tab-panel" data-testid="library-tab" onClick={() => setActivePanel('library')}>文献库</button>
           {readerTabs.map((paperId) => {
@@ -314,11 +393,21 @@ function Workbench() {
             </div>;
           })}
         </nav>
-        <button className={`nav-button settings-tab ${activePanel === 'settings' ? 'selected' : ''}`} onClick={() => setActivePanel('settings')}>设置</button>
+        <button className="topbar-icon-button theme-toggle" type="button" data-testid="theme-toggle" aria-label={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'} title={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'} onClick={() => setThemePreference(theme === 'dark' ? 'light' : 'dark')}>
+          <svg aria-hidden="true" viewBox="0 0 24 24">{theme === 'dark' ? <path d="M20.4 15.7A8.6 8.6 0 0 1 8.3 3.6 8.7 8.7 0 1 0 20.4 15.7Z" /> : <><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42" /></>}</svg>
+        </button>
+        <button className={`topbar-icon-button settings-tab ${activePanel === 'settings' ? 'selected' : ''}`} type="button" data-testid="settings-tab" aria-label="设置" title="设置" onClick={() => setActivePanel('settings')}>
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9.7 3.8.5-1.3h3.6l.5 1.3a8.7 8.7 0 0 1 1.7 1l1.3-.4 1.8 3.1-1 1a8.3 8.3 0 0 1 0 2l1 1-1.8 3.1-1.3-.4a8.7 8.7 0 0 1-1.7 1l-.5 1.3h-3.6l-.5-1.3a8.7 8.7 0 0 1-1.7-1l-1.3.4-1.8-3.1 1-1a8.3 8.3 0 0 1 0-2l-1-1 1.8-3.1 1.3.4a8.7 8.7 0 0 1 1.7-1Z" transform="translate(0 2)" /><circle cx="12" cy="12" r="3" /></svg>
+        </button>
       </header>
+      {updateNotice && <div className="update-toast" data-testid="update-toast" role="status">
+        <div className="update-toast-heading"><strong>Folio 有可用更新</strong><button type="button" className="update-toast-dismiss" aria-label="稍后提醒" onClick={dismissUpdateNotice}>×</button></div>
+        <p>版本 {updateNotice.version} 已准备好。{updateNotice.platform === 'macos' ? `下载适用于 ${updateNotice.architecture || '当前'} 架构的安装包。` : '下载后可选择何时重启安装。'}</p>
+        <div className="update-toast-actions"><button className="primary-button compact-button" type="button" onClick={actOnUpdateNotice}>{updateNotice.platform === 'macos' ? '获取更新' : '下载更新'}</button><button className="text-button" type="button" onClick={() => { dismissUpdateNotice(); setActivePanel('settings'); }}>查看详情</button><button className="text-button" type="button" onClick={dismissUpdateNotice}>稍后</button></div>
+      </div>}
       <div className="app-content">
         <section className="app-panel settings-app-panel" hidden={activePanel !== 'settings'}>
-          {activePanel === 'settings' && <SettingsPanel />}
+          {activePanel === 'settings' && <SettingsPanel theme={themePreference} onThemeChange={setThemePreference} />}
         </section>
         <section className="app-panel library-app-panel" id="library-tab-panel" role="tabpanel" hidden={activePanel !== 'library'}>
         <div className="library-workspace">
@@ -343,9 +432,9 @@ function Workbench() {
             <div>
               <div className="eyebrow">本机文献与处理进度</div>
               <h1>文献库</h1>
-              <p>英文文献会生成保留版式的中文 PDF 和双语 PDF；中文文献无需翻译，可直接阅读原始 PDF。</p>
+              <p>PDF 原文与译文</p>
             </div>
-            <button className="primary-button import-button" onClick={chooseFiles} disabled={busy}>＋ 导入文献</button>
+            <button className="primary-button import-button" onClick={chooseFiles} disabled={busy}>＋ 导入 PDF</button>
           </div>
           <div className="library-toolbar">
             <div className="search-wrap"><span aria-hidden="true">⌕</span><input aria-label="搜索文献" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索标题或原文件名" /></div>
@@ -388,13 +477,19 @@ function PaperCard({ paper, folders, onOpen, onAction, onEdit, onDelete, onRevea
   const canContinue = paper.status === 'stopped';
   const canRetry = ['error', 'waiting_api'].includes(paper.status);
   const title = paper.chinese_title || paper.english_title || paper.source_name;
+  const folder = folders.find((item) => item.id === paper.folder_id);
   return (
     <article className="paper-card">
-      <div className="paper-glyph" aria-hidden="true">PDF</div>
+      <PaperThumbnail paper={paper} />
       <div className="paper-main">
         <div className="paper-title-row"><h2 title={title}>{title}</h2><span className={`status-pill status-${paper.status}`}>{statusText[paper.status] || paper.status}</span></div>
         {paper.english_title && paper.chinese_title && paper.english_title !== paper.chinese_title && <div className="paper-subtitle">{paper.english_title}</div>}
-        <div className="paper-meta"><span>{paper.page_count} 页</span><span>{paper.source_name}</span><span>{new Date(paper.created_at).toLocaleDateString('zh-CN')}</span></div>
+        <div className="paper-meta">
+          <span>{paper.page_count} 页</span>
+          <span className="paper-folder-label"><i style={{ backgroundColor: folder?.color || '#8a928d' }} aria-hidden="true" />{folder?.name || '未分类'}</span>
+          <span title={paper.source_name}>{paper.source_name}</span>
+          <span>{new Date(paper.created_at).toLocaleDateString('zh-CN')}</span>
+        </div>
         {paper.status === 'translating' || paper.status === 'queued' || paper.status === 'checking' ? (
           <div className="progress-row"><div className="progress-track"><div className="progress-value" style={{ width: `${progress}%` }} /></div><span>{progress}%</span></div>
         ) : null}
@@ -402,20 +497,101 @@ function PaperCard({ paper, folders, onOpen, onAction, onEdit, onDelete, onRevea
         {paper.diagnostics.length > 0 && <ul className="diagnostics">{paper.diagnostics.map((item) => <li key={item.page}>第 {item.page} 页：{item.status === 'needs_ocr' ? '有图片但没有可提取文字，需 OCR' : '检测到页面内容，但没有提取到正文文字'}</li>)}</ul>}
       </div>
       <div className="paper-actions">
-        <select aria-label="移动文献到文件夹" data-testid={`paper-folder-${paper.id}`} value={paper.folder_id || ''} onChange={(event) => onMove(event.target.value || null)}>
-          <option value="">未分类</option>
-          {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
-        </select>
-        <button className="text-button" onClick={onEdit}>编辑标题</button>
-        <button className="text-button" type="button" onClick={onReveal}>打开文件位置</button>
-        {paper.can_read && <button className="primary-button compact-button" onClick={onOpen}>阅读</button>}
-        {canStop && <button className="text-button" onClick={() => onAction('stop')}>暂停</button>}
-        {canContinue && <button className="secondary-button compact-button" onClick={() => onAction('continue')}>继续翻译</button>}
-        {canRetry && <button className="secondary-button compact-button" onClick={() => onAction('retry')}>重试</button>}
-        <button className="text-button delete-paper-button" onClick={onDelete}>删除</button>
+        {paper.can_read && <button className="primary-button compact-button" data-testid={`paper-read-${paper.id}`} onClick={onOpen}>阅读</button>}
+        <details className="paper-more-actions">
+          <summary>更多</summary>
+          <div className="paper-more-menu">
+            <label>分类<select aria-label="移动文献到文件夹" data-testid={`paper-folder-${paper.id}`} value={paper.folder_id || ''} onChange={(event) => onMove(event.target.value || null)}>
+              <option value="">未分类</option>
+              {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
+            </select></label>
+            <button className="text-button" onClick={onEdit}>编辑标题</button>
+            <button className="text-button" type="button" onClick={onReveal}>打开文件位置</button>
+            {canStop && <button className="text-button" onClick={() => onAction('stop')}>暂停</button>}
+            {canContinue && <button className="text-button" onClick={() => onAction('continue')}>继续翻译</button>}
+            {canRetry && <button className="text-button" onClick={() => onAction('retry')}>重试</button>}
+            <button className="text-button delete-paper-button" onClick={onDelete}>删除</button>
+          </div>
+        </details>
       </div>
     </article>
   );
+}
+
+function PaperThumbnail({ paper }: { paper: Paper }) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [visible, setVisible] = useState(false);
+  const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || typeof IntersectionObserver === 'undefined') {
+      setVisible(true);
+      return;
+    }
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry.isIntersecting) return;
+      setVisible(true);
+      observer.disconnect();
+    }, { rootMargin: '120px' });
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    let loaded: Awaited<ReturnType<typeof loadPdfDocument>> | null = null;
+    let renderTask: { cancel: () => void; promise: Promise<void> } | null = null;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    void (async () => {
+      try {
+        loaded = await loadPdfDocument(paper.id, 'original');
+        if (cancelled) {
+          await loaded.destroy();
+          loaded = null;
+          return;
+        }
+        const page = await loaded.pdf.getPage(1);
+        const base = page.getViewport({ scale: 1 });
+        const scale = Math.min(176 / base.width, 232 / base.height);
+        const viewport = page.getViewport({ scale });
+        const outputScale = Math.min(window.devicePixelRatio || 1, 2);
+        const context = canvas.getContext('2d');
+        if (!context) throw new Error('无法绘制 PDF 首页。');
+        canvas.width = Math.ceil(viewport.width * outputScale);
+        canvas.height = Math.ceil(viewport.height * outputScale);
+        canvas.style.width = `${viewport.width}px`;
+        canvas.style.height = `${viewport.height}px`;
+        renderTask = page.render({ canvas, canvasContext: context, viewport, transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0] });
+        await renderTask.promise;
+        if (!cancelled) setState('ready');
+      } catch {
+        if (!cancelled) setState('error');
+      } finally {
+        if (loaded) await loaded.destroy();
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      renderTask?.cancel();
+    };
+  }, [paper.id, visible]);
+
+  return (
+    <div ref={hostRef} className={`paper-thumbnail ${state === 'ready' ? 'loaded' : ''}`} role="img" aria-label={`${titleFor(paper)}首页缩略图`}>
+      <canvas ref={canvasRef} aria-hidden="true" />
+      {state !== 'ready' && <span>{state === 'error' ? '预览不可用' : '载入首页'}</span>}
+    </div>
+  );
+}
+
+function titleFor(paper: Paper) {
+  return paper.chinese_title || paper.english_title || paper.source_name;
 }
 
 function FolderDialog({ mode, value, onChange, onClose, onSave }: {

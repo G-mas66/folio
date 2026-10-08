@@ -63,7 +63,7 @@ jobs:
         shell: bash
         run: |
           VERSION="$(node -p 'require("./package.json").version')"
-          TAG="v$VERSION-beta.${GITHUB_RUN_NUMBER}"
+          TAG="v$VERSION"
           OUTPUT="$GITHUB_WORKSPACE/dist/macos-test-$VERSION-$MAC_ARCH"
           shopt -s nullglob
           PACKAGES=("$OUTPUT"/*.zip)
@@ -73,7 +73,7 @@ jobs:
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --draft --prerelease --target "$GITHUB_SHA" \
-              --title "阅川 Folio $VERSION macOS Test $GITHUB_RUN_NUMBER" \
+              --title "Folio $VERSION macOS Test" \
               --notes "Ad-hoc signed macOS test build for $VERSION without Developer ID signing or notarization. First launch may show a Gatekeeper warning. The packages were built and smoke-tested on standard GitHub-hosted macOS runners. Free translation still depends on the external translation service; see each architecture's attached smoke report." \
               || gh release view "$TAG" >/dev/null
           fi

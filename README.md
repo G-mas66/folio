@@ -2,11 +2,11 @@
   <img src="assets/folio-icon.png" width="72" alt="Folio 图标" />
 </p>
 
-# 阅川 · Folio
+# Folio
 
 一个桌面文献阅读工作台。英文 PDF 导入后先完成全文翻译，中文文献直接阅读原始 PDF；在同一窗口中结合 AI 问答、笔记和批注理解文献。
 
-**当前版本：0.13.0 · Windows x64 / macOS arm64、x64 · Electron + React + Python**
+**当前开发版本：0.14.0-beta.1（尚未发布） · 当前公开下载：0.13.0 · Windows x64 / macOS arm64、x64 · Electron + React + Python**
 
 [功能](#功能) · [界面预览](#界面预览) · [使用](#使用) · [AI 配置](#ai-配置) · [源码构建](#源码构建) · [数据与隐私](#数据与隐私) · [当前限制](#当前限制)
 
@@ -15,6 +15,7 @@
 | 功能 | 说明 |
 | --- | --- |
 | 导入与归类 | 选择或拖入 PDF；按中文标题重命名库内副本；相同文件去重；文件夹使用持久颜色标签 |
+| 阅读外观 | 浅色、深色或跟随系统；文献缩略图与 PDF 保持原始颜色 |
 | 全文翻译 | 英文文献使用 PDF2zh-Next / BabelDOC 和免费翻译服务，生成中文 PDF 与左右双语 PDF；检测为中文的正文跳过翻译 |
 | 原版阅读 | 连续滚动、高清绘制、缩放、页码跳转和原文查找；切换原文、中文、双语 PDF 保持当前页 |
 | 文献标签 | 多篇文献在顶部标签间切换；关闭标签保留文献，阅读页码和聊天按文献隔离 |
@@ -24,35 +25,35 @@
 | 流式与联网 | 实时显示回答和服务返回的思考；可停止生成；向上阅读暂停自动滚动；免 Key 搜索、Markdown 和 LaTeX 公式 |
 | 阅读笔记 | 每篇文献独立笔记，自动保存和草稿恢复；四种颜色高亮、批注、编辑、删除及跳转定位 |
 | 自定义存储 | 选择新的空文件夹，复制、校验并切换文献库；保留旧目录，迁移后无需重新填写 AI Key |
+| 软件更新 | Windows 可检查、下载并手动确认重启安装；macOS 提供当前架构的手动下载 |
 | 文件定位 | 在资源管理器中打开文献目录，或定位选中原文、中文和双语 PDF，便于分享 |
 
 全文翻译使用免费服务，AI 问答使用你配置的模型，费用由相应服务商决定。翻译会适配中文文字的字号与换行，并尽量保留页面结构和图表；不承诺复杂论文逐像素一致。
 
 ## 界面预览
 
-以下均为实际桌面应用截图，使用合成测试文献，不包含个人文献或 API Key。
+以下三张截图展示 0.14.0-beta.1 当前开发界面，使用合成测试文献；设置截图中的 API Key 输入框为空。
 
-**文献库与彩色分类**
+**浅色主题文献库与分类**
 
-![文献库与分类侧栏](docs/screenshots/library.png)
+![Folio 浅色主题文献库与合成文献缩略图](docs/screenshots/library-light.png)
 
-**正文阅读、高亮与独立笔记**
+**深色主题双语阅读与 AI 助手**
 
-![PDF 高亮、批注和每篇阅读笔记](docs/screenshots/reader-notes.png)
+![Folio 深色主题下的合成论文阅读与 AI 助手](docs/screenshots/reader-dark.png)
 
-<details>
-<summary>查看 AI 助手、公式排版和模型切换</summary>
+**深色主题设置与更新入口**
 
-![AI 助手中的 LaTeX 公式和模型选择](docs/screenshots/ai-assistant.png)
-
-</details>
+![Folio 深色主题设置页，API Key 输入框为空](docs/screenshots/settings-dark.png)
 
 <details>
-<summary>查看独立会话和协议设置</summary>
+<summary>查看较早版本的 AI 公式与会话功能截图</summary>
 
-![同一篇文献的独立 AI 会话](docs/screenshots/ai-sessions.png)
+以下图片记录较早版本的功能，不代表当前界面外观。
 
-![基础地址、协议与模型列表选择](docs/screenshots/settings.png)
+![较早版本的 AI 助手 LaTeX 公式排版](docs/screenshots/ai-assistant.png)
+
+![较早版本的独立 AI 会话](docs/screenshots/ai-sessions.png)
 
 </details>
 
@@ -76,7 +77,9 @@ macOS 为测试版，采用 ad-hoc 签名，没有 Apple Developer ID 签名或�
 dist/installer-0.13.0/阅川-Folio-0.13.0-安装程序.exe
 ```
 
-也可使用 `dist/installer-0.13.0/win-unpacked/阅川 Folio.exe`；需要保留整个 `win-unpacked` 文件夹。打包程序包含本地服务、Python 运行时、PDF 引擎、字体和布局模型，使用时不用手动启动 Python 或另装 Python。
+0.14.0-beta.1 构建会生成 `dist/installer-0.14.0-beta.1/Folio-0.14.0-beta.1-Windows-x64-Setup.exe`。界面品牌使用 Folio；Windows 可执行文件名和默认安装目录仍保留旧名称，以便覆盖现有安装并继续使用原来的用户数据与凭据身份。
+
+也可使用 `dist/installer-0.14.0-beta.1/win-unpacked/阅川 Folio.exe`；需要保留整个 `win-unpacked` 文件夹。打包程序包含本地服务、Python 运行时、PDF 引擎、字体和布局模型，使用时不用手动启动 Python 或另装 Python。
 
 1. 在文献库创建分类文件夹，然后导入 PDF。程序保存库内副本，最初选择的文件保持不变。
 2. 英文文献等待中文和双语 PDF 生成；中文文献直接阅读。英文翻译可暂停、继续或重试，不需要逐段点击翻译。
@@ -160,11 +163,11 @@ npm ci
 npm run dist
 ```
 
-`npm run dist` 依次构建界面、本地后端与 PDF 引擎，再生成 NSIS 安装包。PDF 引擎构建会准备 `.venv-pdf-engine`，使用 PDF2zh-Next **2.9.0**、BabelDOC **0.6.2** 和 PyInstaller **6.16.0**。当前安装目录为 `dist/installer-0.13.0/`。
+`npm run dist` 依次构建界面、本地后端与 PDF 引擎，再生成 NSIS 安装包。PDF 引擎构建会准备 `.venv-pdf-engine`，使用 PDF2zh-Next **2.9.0**、BabelDOC **0.6.2** 和 PyInstaller **6.16.0**。0.14.0-beta.1 的安装目录为 `dist/installer-0.14.0-beta.1/`。
 
 ### macOS 测试版
 
-0.13.0 macOS 测试版支持 Apple Silicon arm64 和 Intel x64。GitHub Actions 的「macOS Test Builds」工作流只接受手动运行，使用标准 `macos-15` 与 `macos-15-intel` runner 原生构建，并运行后端契约测试和打包应用 smoke。默认仅在 Actions 日志中保留测试报告，不上传大型 Actions artifact；勾选 `create_draft_release` 会在重新构建并验证后，把 zip 安装包和逐架构 smoke 报告放到草稿预发布中。
+0.14.0-beta.1 macOS 测试版支持 Apple Silicon arm64 和 Intel x64。GitHub Actions 的「macOS Test Builds」工作流只接受手动运行，使用标准 `macos-15` 与 `macos-15-intel` runner 原生构建，并运行后端契约测试和打包应用 smoke。默认仅在 Actions 日志中保留测试报告，不上传大型 Actions artifact；勾选 `create_draft_release` 会在重新构建并验证后，把 zip 安装包和逐架构 smoke 报告放到草稿预发布中。
 
 macOS 本地构建需要对应架构的 Mac、Xcode Command Line Tools、Node.js 22 和 Python 3.12：
 
@@ -173,7 +176,7 @@ npm ci
 MAC_ARCH=arm64 npm run dist:macos
 ```
 
-Intel Mac 将 `arm64` 改为 `x64`。产物位于 `dist/macos-test-0.13.0-<架构>/`。应用自带原生后端、PDF 翻译引擎、字体和布局模型，不需要用户安装 Python。测试版使用临时 ad-hoc 签名，没有 Developer ID 签名或公证；首次打开可能出现 Gatekeeper 提示，因此只作为测试包分发。
+Intel Mac 将 `arm64` 改为 `x64`。产物位于 `dist/macos-test-0.14.0-beta.1-<架构>/`。应用自带原生后端、PDF 翻译引擎、字体和布局模型，不需要用户安装 Python。测试版使用临时 ad-hoc 签名，没有 Developer ID 签名或公证；首次打开可能出现 Gatekeeper 提示，因此只作为测试包分发。macOS 更新不会自动替换应用，需要下载当前架构的 zip 并手动安装。
 
 ### 开发运行
 

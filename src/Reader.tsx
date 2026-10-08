@@ -115,6 +115,7 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
   const noteStatusRef = useRef<NoteSaveStatus>('未保存');
   const noteSaveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const saveNoteOnUnmountRef = useRef<(text: string, revision: number) => void>(() => undefined);
+  const flushNoteBeforeUpdateRef = useRef<() => Promise<void>>(async () => undefined);
   const noteSaveTimerRef = useRef<number | null>(null);
   const pendingAnnotationJumpRef = useRef<{ pdfKind: PdfKind; page: number } | null>(null);
   const previousPdfKindRef = useRef<PdfKind>(pdfKind);
@@ -162,6 +163,14 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
       }
     }
   }
+
+  flushNoteBeforeUpdateRef.current = async () => {
+    if (!noteLoadedRef.current || noteRevisionRef.current <= noteSavedRevisionRef.current) return;
+    const text = noteDraftRef.current;
+    const revision = noteRevisionRef.current;
+    await persistPaperNotes(text, revision);
+    if (noteSavedRevisionRef.current < revision) throw new Error('笔记尚未保存，更新安装已取消。');
+  };
 
   saveNoteOnUnmountRef.current = (text, revision) => { void persistPaperNotes(text, revision, false); };
 
@@ -346,6 +355,15 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
     if (noteLoadedRef.current && noteRevisionRef.current > noteSavedRevisionRef.current) {
       saveNoteOnUnmountRef.current(noteDraftRef.current, noteRevisionRef.current);
     }
+  }, [paperId]);
+
+  useEffect(() => {
+    const prepare = (event: Event) => {
+      const detail = (event as CustomEvent<{ pending: Promise<void>[] }>).detail;
+      detail.pending.push(flushNoteBeforeUpdateRef.current());
+    };
+    window.addEventListener('folio:prepare-update-install', prepare);
+    return () => window.removeEventListener('folio:prepare-update-install', prepare);
   }, [paperId]);
 
   useEffect(() => {
@@ -709,11 +727,8 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
   return (
     <div className="reader-shell">
       <header className="reader-topbar">
-        <div className="brand-mark small-mark" aria-hidden="true"><img src="./folio-mark.svg" alt="" /></div>
-        <div className="reader-brand-name">阅川 <span>Folio</span></div>
         <div className="reader-title-wrap">
           <div className="reader-title">{paper?.chinese_title || paper?.english_title || '正在加载文献…'}</div>
-          <div className="reader-binding">正在解读：{paper?.chinese_title || paper?.english_title || '当前文献'}</div>
         </div>
         <div className="reader-top-actions">
           {paper?.source_language === 'zh' ? <span className="reader-binding">中文原文 · 无需翻译</span> : <>
@@ -1234,7 +1249,7 @@ function ChatPanel({ paperId, title, active, visible, onJump, settings, currentM
           {run.status !== 'running' && run.status !== 'completed' && <button className="secondary-button compact-button" disabled={busy} onClick={() => void resume(run)}>继续总结</button>}
         </div>)}
         {activeStream && <div className="chat-message assistant active-chat-stream">
-          <div className="message-role">阅川 · 正在生成</div>
+          <div className="message-role">Folio · 正在生成</div>
           {activeStream.reasoning && <details className="reasoning-panel" open><summary>思考过程</summary><div data-testid="streaming-reasoning">{activeStream.reasoning}</div></details>}
           <div className="message-content" data-testid="streaming-answer"><MarkdownContent markdown={activeStream.answer || '…'} sources={activeStream.sources} onJump={onJump} /></div>
           <div className="assistant-thinking"><span className="typing-dots">•••</span>{activeLabel}{activeStream.query ? ` ${activeStream.query}` : ''}</div>
@@ -1318,7 +1333,7 @@ function MarkdownContent({ markdown, sources, onJump }: { markdown: string; sour
 function Message({ message, onJump }: { message: ChatMessage; onJump: (source: Source) => void }) {
   const incomplete = message.role === 'assistant' && message.status && message.status !== 'completed';
   return <div className={`chat-message ${message.role}`}>
-    <div className="message-role">{message.role === 'user' ? '你' : '阅川'}{incomplete ? ` · ${message.status === 'cancelled' ? '已停止，未完成' : message.status === 'interrupted' ? '窗口关闭时中断' : message.status === 'error' ? '未完成' : '处理中断'}` : ''}</div>
+    <div className="message-role">{message.role === 'user' ? '你' : 'Folio'}{incomplete ? ` · ${message.status === 'cancelled' ? '已停止，未完成' : message.status === 'interrupted' ? '窗口关闭时中断' : message.status === 'error' ? '未完成' : '处理中断'}` : ''}</div>
     {message.reasoning && <details className="reasoning-panel"><summary>思考过程</summary><div>{message.reasoning}</div></details>}
     <div className="message-content"><MarkdownContent markdown={message.content} sources={message.sources} onJump={onJump} /></div>
     {message.error && <div className="message-incomplete-error">{message.error}</div>}

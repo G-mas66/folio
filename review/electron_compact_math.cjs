@@ -34,7 +34,7 @@ function checkMathInstructions(messages) {
     delete env.WORKBENCH_DEV;
     const options = { cwd: root, env, timeout: 90000, executablePath: process.env.REVIEW_EXECUTABLE || path.join(root, 'node_modules/electron/dist/electron.exe'), args: process.env.REVIEW_EXECUTABLE ? [] : ['.'] };
     application = await _electron.launch(options);
-    assert.equal(await application.evaluate(({ app }) => app.getVersion()), '0.12.0');
+    assert.equal(await application.evaluate(({ app }) => app.getVersion()), require(path.join(root, 'package.json')).version);
     let main = await application.firstWindow();
     main.on('pageerror', error => errors.push(error.message));
     await main.getByRole('button', { name: '设置', exact: true }).waitFor();
@@ -151,7 +151,7 @@ function checkMathInstructions(messages) {
     assert.equal(await reader.locator('.chat-message.assistant .katex').count(), 5);
     assert.equal(fixture.requests.length, requestCount, 'Saved formulas and model must restore without another AI request');
     assert.equal(errors.length, 0, errors.join('\n'));
-    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version: '0.12.0', seconds: (Date.now() - started) / 1000, math, narrow, formulaScroll, requests: requestCount, errors }, null, 2));
+    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version: require(path.join(root, 'package.json')).version, seconds: (Date.now() - started) / 1000, math, narrow, formulaScroll, requests: requestCount, errors }, null, 2));
     console.log(JSON.stringify({ result: 'passed', output }));
   } catch (error) {
     fs.writeFileSync(path.join(output, 'failure.txt'), String(error.stack || error));

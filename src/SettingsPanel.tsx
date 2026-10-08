@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, errorMessage, StorageLocationInfo, StorageMigrationProgress } from './api';
+import { api, errorMessage, StorageLocationInfo, StorageMigrationProgress, UpdateState } from './api';
 
 type Settings = {
   base_url: string;
@@ -11,9 +11,11 @@ type Settings = {
   api_tokens: number | null;
 };
 
+type ThemePreference = 'system' | 'light' | 'dark';
+
 const emptySettings: Settings = { base_url: '', protocol: 'openai_chat_completions', models_url: '', model: '', model_options: [], key_configured: false, api_tokens: null };
 
-export function SettingsPanel() {
+export function SettingsPanel({ theme, onThemeChange }: { theme: ThemePreference; onThemeChange: (value: ThemePreference) => void }) {
   const [settings, setSettings] = useState<Settings>(emptySettings);
   const [apiKey, setApiKey] = useState('');
   const [customModelsUrlEnabled, setCustomModelsUrlEnabled] = useState(false);
@@ -30,6 +32,10 @@ export function SettingsPanel() {
   const [storageBusy, setStorageBusy] = useState(false);
   const [storageStatus, setStorageStatus] = useState('');
   const [storageFailure, setStorageFailure] = useState('');
+  const [updateState, setUpdateState] = useState<UpdateState | null>(null);
+  const [updateActionBusy, setUpdateActionBusy] = useState(false);
+  const [updateCancelRequested, setUpdateCancelRequested] = useState(false);
+  const [updateFailure, setUpdateFailure] = useState('');
 
   useEffect(() => {
     let active = true;
@@ -39,6 +45,38 @@ export function SettingsPanel() {
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    const receiveUpdateState = (value: UpdateState) => {
+      if (!active) return;
+      setUpdateState(value);
+      if (value.status !== 'downloading') setUpdateCancelRequested(false);
+    };
+    const unsubscribe = window.workbench.onUpdateState(receiveUpdateState);
+    void window.workbench.getUpdateState().then(receiveUpdateState)
+      .catch((error) => { if (active) setUpdateFailure(errorMessage(error)); });
+    return () => { active = false; unsubscribe(); };
+  }, []);
+
+  async function runUpdateAction(action: () => Promise<unknown>) {
+    setUpdateActionBusy(true);
+    setUpdateFailure('');
+    try { await action(); }
+    catch (error) { setUpdateFailure(errorMessage(error)); }
+    finally { setUpdateActionBusy(false); }
+  }
+
+  async function cancelUpdateDownload() {
+    setUpdateCancelRequested(true);
+    setUpdateFailure('');
+    try {
+      if (!await window.workbench.cancelUpdateDownload()) setUpdateCancelRequested(false);
+    } catch (error) {
+      setUpdateFailure(errorMessage(error));
+      setUpdateCancelRequested(false);
+    }
+  }
 
   useEffect(() => {
     let active = true;
@@ -198,6 +236,38 @@ export function SettingsPanel() {
           <p>此处 AI 配置仅用于原文问答和全文总结；文献翻译由免费翻译服务处理，不需要此处的 API Key。</p>
         </div>
       </div>
+      <section className="settings-card appearance-card" aria-labelledby="appearance-heading">
+        <div>
+          <div className="eyebrow">阅读显示</div>
+          <h2 id="appearance-heading">界面主题</h2>
+          <p className="field-help">PDF 页面保持原有显示效果。</p>
+        </div>
+        <label className="field-label" htmlFor="theme-select">主题</label>
+        <select id="theme-select" data-testid="theme-select" aria-label="界面主题" value={theme} onChange={(event) => onThemeChange(event.target.value as ThemePreference)}>
+          <option value="light">浅色</option>
+          <option value="dark">深色</option>
+          <option value="system">跟随系统</option>
+        </select>
+      </section>
+      <section className="settings-card update-card" aria-labelledby="update-heading">
+        <div>
+          <div className="eyebrow">应用维护</div>
+          <h2 id="update-heading">软件更新</h2>
+          <p className="field-help">当前版本 {updateState?.currentVersion || '…'}。Windows 可在此下载并选择重启安装；macOS 提供当前芯片架构的手动安装包。</p>
+        </div>
+        <div className="update-actions">
+          <button className="secondary-button compact-button" type="button" data-testid="update-check" disabled={!updateState?.enabled || updateActionBusy || ['checking', 'downloading', 'downloaded'].includes(updateState?.status || '')} onClick={() => void runUpdateAction(() => window.workbench.checkForUpdates())}>检查更新</button>
+          {updateState?.status === 'available' && updateState.platform === 'windows' && <button className="primary-button compact-button" type="button" data-testid="update-download" disabled={updateActionBusy} onClick={() => void runUpdateAction(() => window.workbench.downloadUpdate())}>下载更新</button>}
+          {updateState?.status === 'downloading' && <button className="secondary-button compact-button" type="button" data-testid="update-cancel" disabled={updateCancelRequested} onClick={() => void cancelUpdateDownload()}>{updateCancelRequested ? '正在取消…' : '取消下载'}</button>}
+          {updateState?.status === 'downloaded' && <button className="primary-button compact-button" type="button" data-testid="update-install" disabled={updateActionBusy} onClick={() => void runUpdateAction(() => window.workbench.installUpdate())}>重启并安装</button>}
+          {updateState?.status === 'manual-available' && <button className="primary-button compact-button" type="button" data-testid="update-open-download" disabled={updateActionBusy} onClick={() => void runUpdateAction(() => window.workbench.openUpdateDownload())}>下载 macOS 更新</button>}
+        </div>
+        {updateState && <div className="update-status" data-testid="update-status" role="status">{updateStatusText(updateState)}</div>}
+        {updateState?.status === 'downloading' && <div className="update-progress" aria-label={`下载进度 ${Math.round(updateState.percent || 0)}%`}><span style={{ width: `${Math.max(0, Math.min(100, updateState.percent || 0))}%` }} /></div>}
+        {updateFailure && <div className="notice error-notice" role="alert">{updateFailure}</div>}
+        {updateState?.message && updateState.status !== 'error' && <div className="field-help">{updateState.message}</div>}
+        {updateState?.releaseNotes && <details className="update-release-notes"><summary>查看版本说明</summary><pre>{updateState.releaseNotes}</pre></details>}
+      </section>
       <div className="settings-card">
         <label className="field-label" htmlFor="base-url">{settings.protocol === 'custom_chat_completions' ? '完整请求地址' : 'API 基础地址'}</label>
         <input id="base-url" disabled={loading || busy || discovering} value={settings.base_url} onChange={(e) => { setSettings({ ...settings, base_url: e.target.value }); setCustomModelsUrlEnabled(false); setDiscovered([]); setSelectedDiscovered([]); }} placeholder={settings.protocol === 'custom_chat_completions' ? '粘贴完整对话接口 URL' : '例如 https://api.example.com/v1'} />
@@ -296,6 +366,18 @@ export function SettingsPanel() {
       </div>
     </section>
   );
+}
+
+function updateStatusText(state: UpdateState) {
+  if (!state.enabled) return '此版本不支持自动检查更新。';
+  if (state.status === 'checking') return '正在检查更新…';
+  if (state.status === 'not-available') return '当前已是最新版本。';
+  if (state.status === 'available') return `发现新版本 ${state.version || ''}。`;
+  if (state.status === 'downloading') return `正在下载更新… ${Math.round(state.percent || 0)}%`;
+  if (state.status === 'downloaded') return `版本 ${state.version || ''} 已下载完成。`;
+  if (state.status === 'manual-available') return `可下载版本 ${state.version || ''}（${state.architecture || '当前架构'}）。`;
+  if (state.status === 'error') return state.message || '检查更新失败。';
+  return '更新检查尚未运行。';
 }
 
 function storageProgressText(progress: StorageMigrationProgress) {

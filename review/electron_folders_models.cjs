@@ -46,6 +46,7 @@ const pdfHashes = Object.fromEntries(fs.readdirSync(paperFolder).filter(name => 
     assert.equal(folders.length, 1);
     const folder = folders[0];
     await main.getByRole('button', { name: '全部文献', exact: true }).click();
+    await main.locator('.paper-card summary').click();
     await main.locator('.paper-card').getByLabel('移动文献到文件夹', { exact: true }).selectOption(folder.id);
     await main.waitForFunction(id => document.querySelector('.paper-card select[aria-label="移动文献到文件夹"]')?.value === id, folder.id);
     await main.getByRole('button', { name: '未分类', exact: true }).click();

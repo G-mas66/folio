@@ -45,13 +45,13 @@ runs:
         VERSION="$(node -p 'require("./package.json").version')"
         OUTPUT="$GITHUB_WORKSPACE/dist/macos-test-$VERSION-${{ inputs.architecture }}"
         if [[ "${{ inputs.architecture }}" == "x64" ]]; then
-          APP="$OUTPUT/mac/阅川 Folio.app"
+          APP="$OUTPUT/mac/Folio.app"
         else
-          APP="$OUTPUT/mac-arm64/阅川 Folio.app"
+          APP="$OUTPUT/mac-arm64/Folio.app"
         fi
         test -d "$APP"
         export REVIEW_APP_PATH="$APP"
-        export REVIEW_EXECUTABLE="$APP/Contents/MacOS/阅川 Folio"
+        export REVIEW_EXECUTABLE="$APP/Contents/MacOS/Folio"
         REPORT="$RUNNER_TEMP/folio-macos-smoke/smoke-${{ inputs.architecture }}.json"
         trap 'status=$?; if [[ "$status" -ne 0 && -s "$REPORT" ]]; then cat "$REPORT"; fi; exit "$status"' EXIT
         npm run smoke:macos
