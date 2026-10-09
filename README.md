@@ -69,7 +69,7 @@
 | --- | --- | --- |
 | Windows x64 | [Folio-0.14.0-beta.3-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/Folio-0.14.0-beta.3-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
 | Mac · Apple Silicon | [Folio-0.14.0-beta.3-macOS-arm64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/Folio-0.14.0-beta.3-macOS-arm64.zip) | 解压，将 `.app` 拖入「应用程序」 |
-| Mac · Intel | [Folio-0.14.0-beta.3-macOS-x64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/Folio-0.14.0-beta.3-macOS-x64.zip) | 解压，将 `.app` 拖入「应用程序」 |
+| Mac · Intel | [Folio-0.14.0-beta.2-macOS-x64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.2/Folio-0.14.0-beta.2-macOS-x64.zip) | beta.3 等待免费翻译验收；先使用 beta.2，解压并拖入「应用程序」 |
 
 发布页附有各平台验收报告及 [SHA256SUMS.txt](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/SHA256SUMS.txt)，可用于核对下载文件。
 
