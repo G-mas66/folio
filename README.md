@@ -6,7 +6,7 @@
 
 一个桌面文献阅读工作台。英文 PDF 导入后先完成全文翻译，中文文献直接阅读原始 PDF；在同一窗口中结合 AI 问答、笔记和批注理解文献。
 
-**当前开发版本：0.14.0-beta.1（尚未发布） · 当前公开下载：0.13.0 · Windows x64 / macOS arm64、x64 · Electron + React + Python**
+**当前版本：0.14.0-beta.1 · Windows x64 / macOS arm64、x64 · Electron + React + Python**
 
 [功能](#功能) · [界面预览](#界面预览) · [使用](#使用) · [AI 配置](#ai-配置) · [源码构建](#源码构建) · [数据与隐私](#数据与隐私) · [当前限制](#当前限制)
 
@@ -63,21 +63,23 @@
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | [Folio-0.13.0-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v0.13.0-beta.5/Folio-0.13.0-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
-| Mac · Apple Silicon | [Folio-0.13.0-macOS-arm64.zip](https://github.com/G-mas66/folio/releases/download/v0.13.0-beta.5/Folio-0.13.0-macOS-arm64.zip) | 解压，将 `.app` 拖入「应用程序」 |
-| Mac · Intel | [Folio-0.13.0-macOS-x64.zip](https://github.com/G-mas66/folio/releases/download/v0.13.0-beta.5/Folio-0.13.0-macOS-x64.zip) | 解压，将 `.app` 拖入「应用程序」 |
+| Windows x64 | [Folio-0.14.0-beta.1-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.1/Folio-0.14.0-beta.1-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
+| Mac · Apple Silicon | [Folio-0.14.0-beta.1-macOS-arm64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.1/Folio-0.14.0-beta.1-macOS-arm64.zip) | 解压，将 `.app` 拖入「应用程序」 |
+| Mac · Intel | [Folio-0.14.0-beta.1-macOS-x64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.1/Folio-0.14.0-beta.1-macOS-x64.zip) | 解压，将 `.app` 拖入「应用程序」 |
 
-发布页附有各平台验收报告及 [SHA256SUMS.txt](https://github.com/G-mas66/folio/releases/download/v0.13.0-beta.5/SHA256SUMS.txt)，可用于核对下载文件。
+发布页附有各平台验收报告及 [SHA256SUMS.txt](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.1/SHA256SUMS.txt)，可用于核对下载文件。
+
+现有 0.13.0 需要手动安装本版一次，之后 Windows 启动时会检查更新，也可在「设置 → 软件更新」手动检查。下载可以取消或重试，完成后由你点击「重启并安装」；退出应用不会自动安装。macOS 使用当前芯片架构的手动下载与替换方式。
 
 macOS 为测试版，采用 ad-hoc 签名，没有 Apple Developer ID 签名或公证。首次打开可能被 Gatekeeper 阻止，可按照系统「隐私与安全性」提示允许打开；真实用户机器上的首次安装流程尚未验证。
 
 自行构建后的 Windows 安装包路径：
 
 ```text
-dist/installer-0.13.0/阅川-Folio-0.13.0-安装程序.exe
+dist/installer-0.14.0-beta.1/Folio-0.14.0-beta.1-Windows-x64-Setup.exe
 ```
 
-0.14.0-beta.1 构建会生成 `dist/installer-0.14.0-beta.1/Folio-0.14.0-beta.1-Windows-x64-Setup.exe`。界面品牌使用 Folio；Windows 可执行文件名和默认安装目录仍保留旧名称，以便覆盖现有安装并继续使用原来的用户数据与凭据身份。
+界面品牌使用 Folio；Windows 可执行文件名和默认安装目录仍保留旧名称，以便覆盖现有安装并继续使用原来的用户数据与凭据身份。
 
 也可使用 `dist/installer-0.14.0-beta.1/win-unpacked/阅川 Folio.exe`；需要保留整个 `win-unpacked` 文件夹。打包程序包含本地服务、Python 运行时、PDF 引擎、字体和布局模型，使用时不用手动启动 Python 或另装 Python。
 
@@ -209,9 +211,9 @@ npm run test:backend
 npm run test:storage
 ```
 
-Windows x64 0.13.0 后端检查 **124 项通过、1 项 POSIX 专用检查跳过**，13 项存储文件系统检查通过，最终打包程序及安装后的应用均通过桌面验收。此前 0.12.0 的十套桌面验收覆盖笔记/标注、存储失败回滚、公式、布局、停止、联网，以及真实免费翻译样本的图片与矢量图保留；0.13.0 另回归两种标准协议、模型读取、独立会话、中文原件导入、文件定位、阅读页码保留和流式阅读暂停跟随。兼容接口测试使用隔离的模拟服务，不代表任何第三方模型的回答质量。
+Windows x64 0.14.0-beta.1 后端检查 **124 项通过、1 项 POSIX 专用检查跳过**，13 项存储文件系统检查通过。最终打包程序通过深浅主题、系统标题栏、真实 PDF 翻译、文献标签、独立会话、模型与三栏布局验收；笔记、批注、公式、流式停止和存储迁移也已回归。两个不同已安装测试版本完成本地更新源下的检测、下载、取消重试、重启安装及数据保留检查。兼容接口测试使用隔离的模拟服务，不代表任何第三方模型的回答质量。
 
-macOS arm64 与 x64 在 [原生云端验收](https://github.com/G-mas66/folio/actions/runs/37626630901) 中分别通过 **125 项后端检查和 13 项存储检查**。两种打包应用均验证了启动、钥匙串、中文原件阅读、两种 AI 协议、文献工具、停止生成、笔记保存及实际免费翻译；中文和双语 PDF 均生成并通过输出校验。测试系统为 macOS 15.7.9，尚未验证其他 macOS 版本或真实用户首次安装。
+macOS arm64 与 x64 在 [原生云端验收](https://github.com/G-mas66/folio/actions/runs/37814249355) 中分别通过 **125 项后端检查和 13 项存储检查**。两种打包应用均验证了启动、钥匙串、中文原件阅读、两种 AI 协议、文献工具、停止生成、笔记保存、更新架构匹配及实际免费翻译；中文和双语 PDF 均生成并通过输出校验。尚未验证真实用户机器上的首次安装。
 
 `review/` 保留原生桌面验收脚本。部分脚本依赖 `.review/` 中预先生成或翻译的样本，不能在新克隆仓库中直接运行全部桌面验收；准备条件可从各脚本和种子脚本查看。历史结果和哈希记录见 [审批检查](docs/审批检查.md)，运行输出、私人文献和安装包不提交到仓库。
 
@@ -239,7 +241,7 @@ docs/                      方案、验收记录和界面截图
 
 ## 当前限制
 
-- Windows x64 0.13.0 已通过本机打包安装与桌面验收；macOS arm64/x64 为测试版，目前没有 Apple Developer ID 签名或公证；Linux 未验证。
+- Windows x64 0.14.0-beta.1 已通过本机打包与升级验收；macOS arm64/x64 为测试版，目前没有 Apple Developer ID 签名或公证；Linux 未验证。
 - 扫描件和无法提取正文的实质页面会阻止完成，当前没有单独 OCR 步骤。
 - 表格单元格、图片内文字和公式不会被完整翻译；复杂公式、跨页图表和特殊排版应检查输出。
 - 高亮与批注支持同一页内的可提取文字，不支持跨页选择或扫描图上的文字选择。
