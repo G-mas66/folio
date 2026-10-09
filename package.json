@@ -1,6 +1,6 @@
 {
   "name": "paper-workbench",
-  "version": "0.14.0-beta.4",
+  "version": "1.0.0",
   "private": true,
   "description": "Folio personal literature reader",
   "main": "electron/main.cjs",
@@ -67,8 +67,8 @@
         "provider": "github",
         "owner": "G-mas66",
         "repo": "folio",
-        "channel": "beta",
-        "releaseType": "prerelease",
+        "channel": "latest",
+        "releaseType": "release",
         "private": false
       }
     ],

@@ -16,6 +16,8 @@ class AutomaticModelsReview(unittest.TestCase):
     def setUp(self):
         flow.TranslationFlowReview.setUp(self)
         self.requests = []
+        self.user_agents = []
+        self.require_folio_user_agent = False
         self.status = 200
         self.catalog = {'data': [{'id': 'mimo-v6pro'}, {'id': 'review-B'}]}
         self.password = patch('keyring.get_password', return_value=None)
@@ -27,7 +29,11 @@ class AutomaticModelsReview(unittest.TestCase):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 owner.requests.append((self.path, self.headers.get('Authorization')))
+                user_agent = self.headers.get('User-Agent')
+                owner.user_agents.append(user_agent)
                 status = 200 if self.path == '/sink' else owner.status
+                if owner.require_folio_user_agent and user_agent != ai.API_USER_AGENT:
+                    status = 403
                 self.send_response(status)
                 self.send_header('Content-Type', 'application/json')
                 if status == 302:
@@ -63,6 +69,13 @@ class AutomaticModelsReview(unittest.TestCase):
         self.assertEqual(settings['base_url'], '')
         self.assertEqual(settings['model'], '')
         self.assertEqual(settings['model_options'], [])
+
+    def test_model_discovery_uses_folio_user_agent_required_by_gateway(self):
+        self.require_folio_user_agent = True
+        result = self.discover(self.origin + '/v1')
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(self.user_agents, [ai.API_USER_AGENT])
+        self.assertEqual(self.requests, [('/v1/models', None)])
 
     def test_base_paths_and_encoded_query_are_preserved(self):
         for base in ['', '/', '/v1', '/v1/', '/gateway/v2/']:
@@ -110,7 +123,8 @@ class AutomaticModelsReview(unittest.TestCase):
         result = self.discover(self.origin + '/v1')
         self.assertEqual(result.status_code, 502, result.text)
         self.assertEqual(self.requests, [('/v1/models', None)])
-        self.assertRegex(result.text, 'Key|授权|权限')
+        self.assertIn('HTTP 401', result.text)
+        self.assertIn('认证未通过', result.text)
 
     def test_redirect_does_not_forward_credentials_or_change_host(self):
         self.status = 302

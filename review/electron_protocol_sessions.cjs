@@ -10,17 +10,24 @@ const root = path.resolve(__dirname, '..');
 const output = path.join(root, '.review', `protocol-sessions-${Date.now()}`);
 const dataRoot = path.join(output, 'data');
 const temp = path.join(output, 'temp');
-fs.mkdirSync(temp, { recursive: true });
-const prepared = spawnSync(path.join(root, '.venv/Scripts/python.exe'), ['-B', '-m', 'review.seed_reader_fixture', dataRoot, '--mixed', '--chinese'], { cwd: root, env: { ...process.env, WORKBENCH_DATA_DIR: dataRoot, TEMP: temp, TMP: temp, PYTHONIOENCODING: 'utf-8' }, encoding: 'utf8' });
+const credentialRoot = path.join(output, 'credential-identity');
+const locationConfig = path.join(output, 'location.json');
+const userProfile = path.join(output, 'user-profile');
+const appData = path.join(userProfile, 'AppData', 'Roaming');
+const localAppData = path.join(userProfile, 'AppData', 'Local');
+for (const directory of [temp, appData, localAppData]) fs.mkdirSync(directory, { recursive: true });
+const prepared = spawnSync(path.join(root, '.venv/Scripts/python.exe'), ['-B', '-m', 'review.seed_reader_fixture', dataRoot, '--mixed', '--chinese'], { cwd: root, env: { ...process.env, WORKBENCH_DATA_DIR: dataRoot, WORKBENCH_CREDENTIAL_ROOT: credentialRoot, WORKBENCH_LOCATION_CONFIG: locationConfig, APPDATA: appData, LOCALAPPDATA: localAppData, USERPROFILE: userProfile, TEMP: temp, TMP: temp, PYTHONIOENCODING: 'utf-8' }, encoding: 'utf8' });
 assert.equal(prepared.status, 0, prepared.stderr);
 const seeded = JSON.parse(prepared.stdout.trim());
 const digest = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const chineseHash = digest(seeded.chinese);
 const requests = [];
 const modelRequests = [];
+const upstreamRequests = [];
 const state = { long: false, release: false, session: null };
 const delay = time => new Promise(resolve => setTimeout(resolve, time));
 const server = http.createServer(async (request, response) => {
+  upstreamRequests.push({ path: request.url, userAgent: request.headers['user-agent'] || '' });
   if (request.method === 'GET') {
     modelRequests.push(request.url);
     assert.equal(request.url, '/gateway/v1/models?tenant=fixture');
@@ -85,7 +92,7 @@ const server = http.createServer(async (request, response) => {
   try {
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const baseUrl = `http://127.0.0.1:${server.address().port}/gateway/v1?tenant=fixture`;
-    const env = { ...process.env, WORKBENCH_DATA_DIR: dataRoot, TEMP: temp, TMP: temp };
+    const env = { ...process.env, WORKBENCH_DATA_DIR: dataRoot, WORKBENCH_CREDENTIAL_ROOT: credentialRoot, WORKBENCH_LOCATION_CONFIG: locationConfig, APPDATA: appData, LOCALAPPDATA: localAppData, USERPROFILE: userProfile, TEMP: temp, TMP: temp };
     delete env.ELECTRON_RUN_AS_NODE;
     delete env.WORKBENCH_DEV;
     const options = { cwd: root, env, timeout: 90000, executablePath: process.env.REVIEW_EXECUTABLE || path.join(root, 'node_modules/electron/dist/electron.exe'), args: process.env.REVIEW_EXECUTABLE ? [] : ['.'] };
@@ -263,8 +270,10 @@ const server = http.createServer(async (request, response) => {
     assert.ok((await activeChat().innerText()).includes('第 60 段'));
     assert.equal((await page.evaluate(id => window.workbench.request({ path: `/papers/${id}` }), chinese.id)).status, 'completed');
     assert.equal(application.windows().length, 1);
+    assert.ok(upstreamRequests.length > 0);
+    assert.ok(upstreamRequests.every(request => request.userAgent === 'Folio/1.0'), JSON.stringify(upstreamRequests));
     assert.deepEqual(errors, []);
-    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version, seconds: (Date.now() - started) / 1000, seeded, chinese, modelRequests, requests: requests.length, locations, scroll: { before, after }, first, second, errors }, null, 2));
+    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version, seconds: (Date.now() - started) / 1000, seeded, chinese, modelRequests, requests: requests.length, upstreamRequests, locations, scroll: { before, after }, first, second, errors }, null, 2));
     fs.writeFileSync(path.join(output, 'requests.json'), JSON.stringify(requests, null, 2));
     console.log(JSON.stringify({ result: 'passed', output }));
   } catch (error) {
@@ -276,7 +285,7 @@ const server = http.createServer(async (request, response) => {
     if (application) await application.close();
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
-    const cleanup = spawnSync(path.join(root, '.venv/Scripts/python.exe'), ['-B', '-c', 'from backend.ai import credential_service; import keyring; service=credential_service(); keyring.delete_password(service,"api-key") if keyring.get_password(service,"api-key") else None'], { cwd: root, env: { ...process.env, WORKBENCH_DATA_DIR: dataRoot }, encoding: 'utf8' });
+    const cleanup = spawnSync(path.join(root, '.venv/Scripts/python.exe'), ['-B', '-c', 'from backend.ai import credential_service; import keyring; service=credential_service(); keyring.delete_password(service,"api-key") if keyring.get_password(service,"api-key") else None'], { cwd: root, env: { ...process.env, WORKBENCH_DATA_DIR: dataRoot, WORKBENCH_CREDENTIAL_ROOT: credentialRoot, WORKBENCH_LOCATION_CONFIG: locationConfig, APPDATA: appData, LOCALAPPDATA: localAppData, USERPROFILE: userProfile }, encoding: 'utf8' });
     assert.equal(cleanup.status, 0, 'Review credential cleanup failed');
   }
 })();

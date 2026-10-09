@@ -3,6 +3,7 @@ import { api, errorMessage, Folder, Paper, UpdateState } from './api';
 import { loadPdfDocument } from './PdfPage';
 import { Reader } from './Reader';
 import { SettingsPanel } from './SettingsPanel';
+import { getThumbnailCover, removeThumbnailCover, saveThumbnailCover } from './thumbnailCoverCache';
 
 const statusText: Record<string, string> = {
   waiting_api: '待继续旧任务', needs_title: '待确认标题', queued: '排队中', translating: 'PDF 版式翻译中',
@@ -327,6 +328,7 @@ function Workbench() {
     setError('');
     try {
       await api(`/papers/${paper.id}`, 'DELETE');
+      removeThumbnailCover(paper.id);
       setTotalPaperCount((current) => current === null ? null : Math.max(0, current - 1));
       setRecentPaperIds((current) => current.filter((id) => id !== paper.id));
       if (readerTabs.includes(paper.id)) await closeReaderTab(paper.id);
@@ -626,8 +628,9 @@ function PaperCard({ paper, folders, onOpen, onAction, onEdit, onDelete, onRevea
 function PaperThumbnail({ paper }: { paper: Paper }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [cachedCover, setCachedCover] = useState(() => getThumbnailCover(paper.id));
   const [visible, setVisible] = useState(false);
-  const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [state, setState] = useState<'loading' | 'ready' | 'error'>(() => cachedCover ? 'ready' : 'loading');
 
   useEffect(() => {
     const host = hostRef.current;
@@ -645,7 +648,7 @@ function PaperThumbnail({ paper }: { paper: Paper }) {
   }, []);
 
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || cachedCover) return;
     let cancelled = false;
     let loaded: Awaited<ReturnType<typeof loadPdfDocument>> | null = null;
     let renderTask: { cancel: () => void; promise: Promise<void> } | null = null;
@@ -671,7 +674,10 @@ function PaperThumbnail({ paper }: { paper: Paper }) {
         canvas.height = Math.ceil(viewport.height * outputScale);
         renderTask = page.render({ canvas, canvasContext: context, viewport, transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0] });
         await renderTask.promise;
-        if (!cancelled) setState('ready');
+        if (!cancelled) {
+          try { saveThumbnailCover(paper.id, canvas.toDataURL('image/png')); } catch { /* the canvas remains usable if caching fails */ }
+          setState('ready');
+        }
       } catch {
         if (!cancelled) setState('error');
       } finally {
@@ -683,11 +689,21 @@ function PaperThumbnail({ paper }: { paper: Paper }) {
       cancelled = true;
       renderTask?.cancel();
     };
-  }, [paper.id, visible]);
+  }, [cachedCover, paper.id, visible]);
 
   return (
     <div ref={hostRef} className={`paper-thumbnail ${state === 'ready' ? 'loaded' : ''}`} role="img" aria-label={`${titleFor(paper)}首页缩略图`}>
-      <canvas ref={canvasRef} aria-hidden="true" />
+      <canvas ref={canvasRef} aria-hidden="true" style={cachedCover ? { visibility: 'hidden' } : undefined} />
+      {cachedCover && <img
+        src={cachedCover}
+        aria-hidden="true"
+        onError={() => {
+          removeThumbnailCover(paper.id);
+          setCachedCover(null);
+          setState('loading');
+        }}
+        style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', background: 'white', boxShadow: '0 2px 7px #0002' }}
+      />}
       {state !== 'ready' && <span>{state === 'error' ? '预览不可用' : '载入首页'}</span>}
     </div>
   );

@@ -89,12 +89,13 @@ class ModelDiscoveryReview(unittest.TestCase):
         self.assertEqual(self.request('PUT','/settings/models',{'models':['mimo-v6pro']}).status_code,200)
 
     def test_authentication_errors_do_not_return_keys(self):
-        for status in [401,403]:
+        for status, expected in [(401,'认证未通过'),(403,'请求被拒绝')]:
             self.status = status
             response = self.discover()
             self.assertEqual(response.status_code,502,response.text)
             self.assertNotIn('review-only-discovery-key',response.text)
-            self.assertRegex(response.text,'Key|权限|认证')
+            self.assertIn(f'HTTP {status}',response.text)
+            self.assertIn(expected,response.text)
 
     def test_malformed_list_is_not_success(self):
         for payload in [{}, {'data':'not-a-list'}, {'data':[{'id':17}]}]:

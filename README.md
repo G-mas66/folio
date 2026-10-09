@@ -6,7 +6,7 @@
 
 一个桌面文献阅读工作台。英文 PDF 导入后先完成全文翻译，中文文献直接阅读原始 PDF；在同一窗口中结合 AI 问答、笔记和批注理解文献。
 
-**当前版本：Windows x64 0.14.0-beta.4 / macOS arm64、x64 0.14.0-beta.3 · Electron + React + Python**
+**当前版本：Windows x64 1.0.0 / macOS arm64、x64 0.14.0-beta.3 · Electron + React + Python**
 
 [功能](#功能) · [界面预览](#界面预览) · [使用](#使用) · [AI 配置](#ai-配置) · [源码构建](#源码构建) · [数据与隐私](#数据与隐私) · [当前限制](#当前限制)
 
@@ -23,7 +23,8 @@
 | AI 文献助手 | 可选择 Chat Completions 或 Responses 协议；读取模型列表后选择；按需读取正文或发送全文总结 |
 | 独立会话 | 同一篇文献可新建、切换和删除多个 AI 会话；各自保存记录，切换不中断生成 |
 | 流式与联网 | 实时显示回答和服务返回的思考；可停止生成；向上阅读暂停自动滚动；免 Key 搜索、Markdown 和 LaTeX 公式 |
-| 阅读笔记 | 每篇文献独立笔记，自动保存和草稿恢复；四种颜色高亮、批注、编辑、删除及跳转定位 |
+| 阅读笔记 | 每篇文献独立笔记，自动保存和草稿恢复；选中文字后右键添加四色高亮、下划线或批注，支持编辑、删除及跳转定位 |
+| 句子翻译 | 选中 PDF 文字后右键翻译为简体中文，在可移动、可关闭的小窗口显示结果 |
 | 自定义存储 | 选择新的空文件夹，复制、校验并切换文献库；保留旧目录，迁移后无需重新填写 AI Key |
 | 软件更新 | Windows 支持免费代理与差分下载，失败回退，可取消并手动确认重启安装；macOS 提供当前架构的手动下载 |
 | 文件定位 | 在资源管理器中打开文献目录，或定位选中原文、中文和双语 PDF，便于分享 |
@@ -67,32 +68,34 @@
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | [Folio-0.14.0-beta.4-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.4/Folio-0.14.0-beta.4-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
+| Windows x64 | [Folio-1.0.0-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v1.0.0/Folio-1.0.0-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
 | Mac · Apple Silicon | [Folio-0.14.0-beta.3-macOS-arm64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/Folio-0.14.0-beta.3-macOS-arm64.zip) | 解压，将 `.app` 拖入「应用程序」 |
 | Mac · Intel | [Folio-0.14.0-beta.3-macOS-x64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/Folio-0.14.0-beta.3-macOS-x64.zip) | 解压，将 `.app` 拖入「应用程序」 |
 
-发布页附有各平台验收报告及校验清单：[Windows beta.4](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.4/SHA256SUMS.txt)、[macOS beta.3](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/SHA256SUMS.txt)。
+发布页附有各平台验收报告及校验清单：[Windows 1.0.0](https://github.com/G-mas66/folio/releases/download/v1.0.0/SHA256SUMS.txt)、[macOS beta.3](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/SHA256SUMS.txt)。
+
+Windows 1.0.0 的功能回归、安装升级与发布检查见[验收记录](docs/Folio-1.0.0-验收报告.md)。
 
 现有 0.13.0 需要手动安装本版一次，之后 Windows 启动时会检查更新，也可在「设置 → 软件更新」手动检查。下载可以取消或重试，完成后由你点击「重启并安装」；退出应用不会自动安装。macOS 使用当前芯片架构的手动下载与替换方式。
 
-Windows beta.4 优先通过 ghfast.top 下载安装包及差分 blockmap，失败依次回退 ghproxy.net、GitHub；版本清单与 SHA-512 校验值仍来自官方 GitHub。现有旧客户端首次升级仍使用原 GitHub 下载通道，也可[通过免费代理手动下载 beta.4](https://ghfast.top/https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.4/Folio-0.14.0-beta.4-Windows-x64-Setup.exe)。安装新版并启动后，应用联网获取当前版本的官方清单并校验，删除已安装更新的重复缓存，保留一份当前安装包供下次差分使用（beta.4 约 481 MiB）。尚未安装的新版包会保留；清单暂时不可用时，下次启动再尝试清理。
+Windows 1.0.0 沿用 beta.4 的代理与差分下载：优先经 ghfast.top 下载安装包及 blockmap，失败依次回退 ghproxy.net、GitHub；版本清单与 SHA-512 校验值仍来自官方 GitHub。beta.4 客户端可在软件更新中升级，也可[通过免费代理手动下载 1.0.0](https://ghfast.top/https://github.com/G-mas66/folio/releases/download/v1.0.0/Folio-1.0.0-Windows-x64-Setup.exe)。安装新版并启动后，应用联网获取当前版本的官方清单并校验，删除已安装更新的重复缓存，保留一份当前安装包供下次差分使用。尚未安装的新版包会保留；清单暂时不可用时，下次启动再尝试清理。
 
 macOS 为测试版，采用 ad-hoc 签名，没有 Apple Developer ID 签名或公证。首次打开可能被 Gatekeeper 阻止，可按照系统「隐私与安全性」提示允许打开；真实用户机器上的首次安装流程尚未验证。
 
 自行构建后的 Windows 安装包路径：
 
 ```text
-dist/installer-0.14.0-beta.4/Folio-0.14.0-beta.4-Windows-x64-Setup.exe
+dist/installer-1.0.0/Folio-1.0.0-Windows-x64-Setup.exe
 ```
 
 界面品牌使用 Folio；Windows 可执行文件名和默认安装目录仍保留旧名称，以便覆盖现有安装并继续使用原来的用户数据与凭据身份。
 
-也可使用 `dist/installer-0.14.0-beta.4/win-unpacked/阅川 Folio.exe`；需要保留整个 `win-unpacked` 文件夹。打包程序包含本地服务、Python 运行时、PDF 引擎、字体和布局模型，使用时不用手动启动 Python 或另装 Python。
+也可使用 `dist/installer-1.0.0/win-unpacked/阅川 Folio.exe`；需要保留整个 `win-unpacked` 文件夹。打包程序包含本地服务、Python 运行时、PDF 引擎、字体和布局模型，使用时不用手动启动 Python 或另装 Python。
 
 1. 在文献库创建分类文件夹，然后导入 PDF。程序保存库内副本，最初选择的文件保持不变。
 2. 英文文献等待中文和双语 PDF 生成；中文文献直接阅读。英文翻译可暂停、继续或重试，不需要逐段点击翻译。
 3. 点击「阅读」，在顶部文献标签中切换。选择原文、中文或双语对照，按需调整三栏宽度。
-4. 选中同一页内的文字，添加高亮或批注；右侧切换到「笔记」记录阅读心得。
+4. 选中同一页内的文字后右键，添加高亮、下划线或批注，或在小窗口翻译选中的句子；右侧切换到「笔记」记录阅读心得。
 5. 如需 AI 问答，在「设置」完成接口配置，再在助手中提问或总结。同一篇文献可用助手顶部的 ＋ 新建会话，× 删除会话。
 
 文献卡片的「打开文件位置」定位原文副本，阅读窗口的「文件位置」定位当前版本的 PDF。分类属于数据库中的逻辑归类，不是实体文件夹；「打开文献目录」打开当前文献库的 `papers` 目录。
@@ -129,9 +132,9 @@ dist/installer-0.14.0-beta.4/Folio-0.14.0-beta.4-Windows-x64-Setup.exe
 
 ## 笔记与存储
 
-每篇文献的阅读笔记独立保存。输入先保留为本地草稿，再延迟保存到数据库，也可点击「保存笔记」。高亮和批注按原文、中文、双语 PDF 版本及页码分别保存，列表中可以编辑、删除或定位。
+每篇文献的阅读笔记独立保存。输入先保留为本地草稿，再延迟保存到数据库，也可点击「保存笔记」。高亮、下划线和批注按原文、中文、双语 PDF 版本及页码分别保存，列表中可以编辑、删除或定位。选择文字时不会自动弹出菜单；在选区内右键才显示操作。
 
-高亮和批注是工作台内的覆盖显示，不改写原 PDF；当前没有带标注 PDF 导出功能。笔记与批注不自动发送给 AI。
+高亮、下划线和批注是工作台内的覆盖显示，不改写原 PDF；当前没有带标注 PDF 导出功能。笔记与批注不自动发送给 AI。点击句子翻译时，仅将选中文字发送给现有免费翻译服务，无需 AI Key。
 
 Windows 默认文献库位于 `D:\个人工作台\data`；macOS 默认位于 `~/Library/Application Support/阅川 Folio/data`。AI Key 分别保存在 Windows 凭据管理器和 macOS 钥匙串。在「设置 → 文献存储位置」点击「更改存储位置…」，选择一个空文件夹，确认后执行：
 
@@ -171,7 +174,7 @@ npm ci
 npm run dist
 ```
 
-`npm run dist` 依次构建界面、本地后端与 PDF 引擎，再生成 NSIS 安装包。PDF 引擎构建会准备 `.venv-pdf-engine`，使用 PDF2zh-Next **2.9.0**、BabelDOC **0.6.2** 和 PyInstaller **6.16.0**。0.14.0-beta.4 Windows 的安装目录为 `dist/installer-0.14.0-beta.4/`。
+`npm run dist` 依次构建界面、本地后端与 PDF 引擎，再生成 NSIS 安装包。PDF 引擎构建会准备 `.venv-pdf-engine`，使用 PDF2zh-Next **2.9.0**、BabelDOC **0.6.2** 和 PyInstaller **6.16.0**。1.0.0 Windows 的安装包目录为 `dist/installer-1.0.0/`。
 
 ### macOS 测试版
 
@@ -255,7 +258,7 @@ docs/                      方案、验收记录和界面截图
 - Windows x64 beta.4 已通过本机打包、隔离安装升级、数据保留、缓存清理及公开更新检测；macOS arm64/x64 继续使用已验收的 beta.3 测试版，目前没有 Apple Developer ID 签名或公证；Linux 未验证。
 - 扫描件和无法提取正文的实质页面会阻止完成，当前没有单独 OCR 步骤。
 - 表格单元格、图片内文字和公式不会被完整翻译；复杂公式、跨页图表和特殊排版应检查输出。
-- 高亮与批注支持同一页内的可提取文字，不支持跨页选择或扫描图上的文字选择。
+- 高亮、下划线、批注与句子翻译支持同一页内的可提取文字，不支持跨页选择或扫描图上的文字选择。
 - 全文总结容量由所选模型与服务决定；读取模型列表也取决于服务是否提供相应接口。
 - 免费翻译和免 Key 搜索依赖第三方服务，不保证长期可用或固定速度。
 

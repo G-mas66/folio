@@ -1,6 +1,7 @@
 """Independent notes/annotation persistence, coordinate and isolation checks."""
 import asyncio
 import hashlib
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -54,16 +55,39 @@ class NotesReview(unittest.TestCase):
             response = self.mark(pdf_kind=kind, kind="comment", comment=f"{kind} 独立批注")
             self.assertEqual(response.status_code, 200, response.text)
             marks.append(response.json())
+        underline = self.mark(kind="underline", rects=[
+            {"x": .1, "y": .2, "width": .3, "height": .02, "underline_edge": "left"},
+            {"x": .1, "y": .225, "width": .2, "height": .02},
+        ]).json()
+        self.assertEqual(underline["kind"], "underline")
+        self.assertEqual([rect["underline_edge"] for rect in underline["rects"]], ["left", "bottom"])
         initialize()
         loaded = self.request("GET", f"/papers/{self.first}/annotations").json()
-        self.assertEqual(len(loaded), 3)
+        self.assertEqual(len(loaded), 4)
         self.assertEqual({item["pdf_kind"] for item in loaded}, {"original", "mono", "dual"})
-        for item in loaded:
+        for expected in marks:
+            item = next(saved for saved in loaded if saved["id"] == expected["id"])
             self.assertEqual(len(item["rects"]), 2)
             self.assertEqual(item["selected_text"], "137 independent samples")
             self.assertEqual(item["comment"], f"{item['pdf_kind']} 独立批注")
             self.assertAlmostEqual(item["rects"][0]["x"], .1)
+        self.assertEqual(next(item for item in loaded if item["id"] == underline["id"])["kind"], "underline")
+        self.assertEqual([rect["underline_edge"] for rect in next(item for item in loaded if item["id"] == underline["id"])["rects"]], ["left", "bottom"])
+        legacy_rects = [{"x": .1, "y": .2, "width": .3, "height": .02}]
+        with connect() as db:
+            db.execute("UPDATE paper_annotations SET rects_json = ? WHERE id = ?", (json.dumps(legacy_rects), underline["id"]))
+        legacy = next(item for item in self.request("GET", f"/papers/{self.first}/annotations").json() if item["id"] == underline["id"])
+        self.assertEqual(legacy["rects"], legacy_rects, "Legacy annotation JSON without underline_edge must still load unchanged")
         self.assertEqual(self.request("GET", f"/papers/{self.second}/annotations").json(), [])
+
+    def test_selected_sentence_translation_reuses_free_service(self):
+        sentence = "The measured signal increased by 23.7 percent."
+        response = self.request("POST", f"/papers/{self.first}/translate-selection", {"text": sentence})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {"translation": f"测试译文：{sentence}"})
+        for text in ("", "   ", "x" * 10001):
+            with self.subTest(text_length=len(text)):
+                self.assertEqual(self.request("POST", f"/papers/{self.first}/translate-selection", {"text": text}).status_code, 422)
 
     def test_update_and_delete_only_target_annotation(self):
         first = self.mark().json()
@@ -87,19 +111,26 @@ class NotesReview(unittest.TestCase):
 
     def test_all_mutations_and_reads_require_session(self):
         mark = self.mark().json()
-        cases = [("GET", "notes", None), ("PUT", "notes", {"text": "forbidden"}), ("GET", "annotations", None), ("POST", "annotations", {}), ("PATCH", f"annotations/{mark['id']}", {"comment": "forbidden"}), ("DELETE", f"annotations/{mark['id']}", None)]
+        cases = [("GET", "notes", None), ("PUT", "notes", {"text": "forbidden"}), ("GET", "annotations", None), ("POST", "annotations", {}), ("POST", "translate-selection", {"text": "forbidden"}), ("PATCH", f"annotations/{mark['id']}", {"comment": "forbidden"}), ("DELETE", f"annotations/{mark['id']}", None)]
         for method, suffix, body in cases:
             with self.subTest(method=method, suffix=suffix):
                 self.assertEqual(self.request(method, f"/papers/{self.first}/{suffix}", body, token="bad-token").status_code, 401)
 
     def test_unknown_papers_cannot_create_orphan_notes_or_annotations(self):
-        for method, suffix, body in (("GET", "notes", None), ("PUT", "notes", {"text": "orphan"}), ("GET", "annotations", None)):
+        for method, suffix, body in (("GET", "notes", None), ("PUT", "notes", {"text": "orphan"}), ("GET", "annotations", None), ("POST", "translate-selection", {"text": "orphan"})):
             self.assertEqual(self.request(method, f"/papers/missing/{suffix}", body).status_code, 404)
         self.assertEqual(self.mark("missing").status_code, 404)
 
+    def test_annotation_rect_limit_allows_many_text_fragments_but_remains_bounded(self):
+        rects = [{"x": index / 1000, "y": .2, "width": .001, "height": .01} for index in range(512)]
+        response = self.mark(rects=rects)
+        self.assertEqual(response.status_code, 200, response.text)
+        rects.append({"x": .512, "y": .2, "width": .001, "height": .01})
+        self.assertEqual(self.mark(rects=rects).status_code, 422)
+
     def test_invalid_pages_kinds_colors_and_coordinates_rejected(self):
         page_count = app.require_paper(self.first)["page_count"]
-        invalid = [{"page_no": 0}, {"page_no": page_count + 1}, {"page_no": 1.5}, {"pdf_kind": "other"}, {"kind": "unknown"}, {"color": "red;position:fixed"}, {"rects": []}, {"rects": [{"x": -.1, "y": .2, "width": .3, "height": .02}]}, {"rects": [{"x": .8, "y": .2, "width": .3, "height": .02}]}, {"rects": [{"x": .1, "y": .99, "width": .3, "height": .02}]}, {"rects": [{"x": .1, "y": .2, "width": 0, "height": .02}]}, {"rects": [{"x": .1, "y": .2, "width": .3, "height": -1}]}]
+        invalid = [{"page_no": 0}, {"page_no": page_count + 1}, {"page_no": 1.5}, {"pdf_kind": "other"}, {"kind": "unknown"}, {"color": "red;position:fixed"}, {"rects": []}, {"rects": [{"x": -.1, "y": .2, "width": .3, "height": .02}]}, {"rects": [{"x": .8, "y": .2, "width": .3, "height": .02}]}, {"rects": [{"x": .1, "y": .99, "width": .3, "height": .02}]}, {"rects": [{"x": .1, "y": .2, "width": 0, "height": .02}]}, {"rects": [{"x": .1, "y": .2, "width": .3, "height": -1}]}, {"rects": [{"x": .1, "y": .2, "width": .3, "height": .02, "underline_edge": "diagonal"}]}]
         for body in invalid:
             with self.subTest(body=body):
                 self.assertEqual(self.mark(**body).status_code, 422)

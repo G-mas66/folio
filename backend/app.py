@@ -838,21 +838,26 @@ class AnnotationRectInput(BaseModel):
     y: float
     width: float
     height: float
+    underline_edge: Literal["bottom", "left", "top", "right"] = "bottom"
 
 
 class AnnotationInput(BaseModel):
     pdf_kind: Literal["original", "mono", "dual"]
     page_no: int
-    rects: list[AnnotationRectInput] = Field(min_length=1, max_length=32)
+    rects: list[AnnotationRectInput] = Field(min_length=1, max_length=512)
     selected_text: str = Field(min_length=1, max_length=10000)
     comment: str = Field(default="", max_length=5000)
     color: Literal["yellow", "green", "blue", "pink"]
-    kind: Literal["highlight", "comment"]
+    kind: Literal["highlight", "comment", "underline"]
 
 
 class AnnotationPatchInput(BaseModel):
     comment: str | None = Field(default=None, max_length=5000)
     color: Literal["yellow", "green", "blue", "pink"] | None = None
+
+
+class SelectedSentenceInput(BaseModel):
+    text: str = Field(min_length=1, max_length=10000)
 
 
 @app.get("/settings", dependencies=[Depends(authorize)])
@@ -964,7 +969,7 @@ def discover_models(value: ModelDiscoveryInput):
             api_key = ai.saved_api_key()
         except AIError:
             api_key = ""
-    headers = {"Accept": "application/json"}
+    headers = {"Accept": "application/json", "User-Agent": ai.API_USER_AGENT}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(
@@ -986,8 +991,10 @@ def discover_models(value: ModelDiscoveryInput):
         exc.close()
         if status in {404, 405}:
             message = "此地址不支持模型列表查询；可继续手动添加模型名称。"
-        elif status in {401, 403}:
-            message = "模型列表请求未获授权，请检查 API Key 或服务商权限；也可手动添加模型名称。"
+        elif status == 401:
+            message = "模型列表请求返回 HTTP 401（认证未通过）。请检查 API URL、认证方式、凭据及服务端网关/防火墙规则；也可手动添加模型名称。"
+        elif status == 403:
+            message = "模型列表请求返回 HTTP 403（请求被拒绝）。请检查服务端网关/防火墙策略、凭据或模型列表访问权限；也可手动添加模型名称。"
         else:
             message = f"模型列表请求失败（HTTP {status}）；也可手动添加模型名称。"
         raise HTTPException(status_code=502, detail={"category": "models_service", "message": message}) from None
@@ -1127,7 +1134,7 @@ def create_paper_annotation(paper_id: str, value: AnnotationInput):
         raise HTTPException(status_code=422, detail="请填写批注内容。")
     rects = [rect.model_dump() for rect in value.rects]
     for rect in rects:
-        values = tuple(rect.values())
+        values = tuple(rect[key] for key in ("x", "y", "width", "height"))
         if not all(math.isfinite(item) and 0 <= item <= 1 for item in values):
             raise HTTPException(status_code=422, detail="批注坐标无效。")
         if rect["width"] <= 0 or rect["height"] <= 0 or rect["x"] + rect["width"] > 1 or rect["y"] + rect["height"] > 1:
@@ -1308,6 +1315,20 @@ async def translation_action(paper_id: str, action: str):
     else:
         raise HTTPException(status_code=404, detail="未知操作。")
     return paper_view(require_paper(paper_id))
+
+
+@app.post("/papers/{paper_id}/translate-selection", dependencies=[Depends(authorize)])
+async def translate_selection(paper_id: str, value: SelectedSentenceInput):
+    require_paper(paper_id)
+    text = value.text.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="请先选择要翻译的 PDF 文字。")
+    try:
+        async with free_translation.FreeTranslationClient() as translator:
+            translation = await translator.translate(text)
+    except FreeTranslationError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    return {"translation": translation}
 
 
 @app.patch("/papers/{paper_id}/progress", dependencies=[Depends(authorize)])

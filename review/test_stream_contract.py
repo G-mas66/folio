@@ -21,6 +21,10 @@ class StreamReview(unittest.TestCase):
         self.token = patch.dict(os.environ, {'WORKBENCH_SESSION_TOKEN': 'stream-review-token'})
         self.token.start()
         self.requests = []
+        self.request_user_agents = []
+        self.request_authorization = []
+        self.require_folio_user_agent = False
+        self.rejection_status = None
         self.mode = 'normal'
         self.closed = threading.Event()
         owner = self
@@ -32,6 +36,19 @@ class StreamReview(unittest.TestCase):
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 owner.requests.append({'path': self.path, **body})
+                user_agent = self.headers.get('User-Agent')
+                owner.request_user_agents.append(user_agent)
+                owner.request_authorization.append(self.headers.get('Authorization'))
+                if owner.require_folio_user_agent and user_agent != ai.API_USER_AGENT:
+                    owner.rejection_status = 403
+                if owner.rejection_status:
+                    payload = json.dumps({'error': {'message': 'synthetic gateway rejection'}}).encode('utf-8')
+                    self.send_response(owner.rejection_status)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream')
                 self.end_headers()
@@ -103,6 +120,8 @@ class StreamReview(unittest.TestCase):
         self.assertEqual(len(self.requests), 1)
         request = self.requests[0]
         self.assertEqual(request['path'], '/literal/custom/?r=keep%2Bquery')
+        self.assertEqual(self.request_user_agents, [ai.API_USER_AGENT])
+        self.assertEqual(self.request_authorization, ['Bearer review-only-key'])
         self.assertTrue(request['stream'])
         self.assertEqual(request['model'], 'chosen-stream')
         assert_math_prompt(self, request['messages'])
@@ -112,6 +131,29 @@ class StreamReview(unittest.TestCase):
         self.assertEqual(message['status'], 'completed')
         self.assertEqual(message['content'], '第一段正文。第二段正文。')
         self.assertEqual(message['reasoning'], '实际返回的思考第一段。思考第二段。')
+
+    def test_stream_uses_folio_user_agent_required_by_gateway(self):
+        self.require_folio_user_agent = True
+
+        async def run():
+            async with self.client() as client:
+                return await self.stream(client)
+
+        events = asyncio.run(run())
+        self.assertIn('event: done', events)
+        self.assertEqual(self.request_user_agents, [ai.API_USER_AGENT])
+
+    def test_stream_authentication_errors_distinguish_401_from_403(self):
+        for status, expected in ((401, '认证未通过'), (403, '请求被拒绝')):
+            self.rejection_status = status
+
+            async def run():
+                async with self.client() as client:
+                    return await self.stream(client, question=f'synthetic {status}')
+
+            events = asyncio.run(run())
+            self.assertIn(f'HTTP {status}', events)
+            self.assertIn(expected, events)
 
     def test_stop_closes_real_upstream_and_preserves_incomplete_reasoning(self):
         self.mode = 'cancel'

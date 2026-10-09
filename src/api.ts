@@ -47,16 +47,21 @@ export type ApiRequest = {
   binary?: boolean;
 };
 
+export type PdfAnnotationRect = {
+  x: number; y: number; width: number; height: number;
+  underline_edge?: 'bottom' | 'left' | 'top' | 'right';
+};
+
 export type PdfAnnotation = {
   id: string;
   paper_id: string;
   pdf_kind: 'original' | 'mono' | 'dual';
   page_no: number;
-  rects: { x: number; y: number; width: number; height: number }[];
+  rects: PdfAnnotationRect[];
   selected_text: string;
   comment: string;
   color: 'yellow' | 'green' | 'blue' | 'pink';
-  kind: 'highlight' | 'comment';
+  kind: 'highlight' | 'comment' | 'underline';
   created_at: string;
   updated_at: string;
 };
@@ -64,7 +69,7 @@ export type PdfAnnotation = {
 export type PdfSelection = {
   page_no: number;
   selected_text: string;
-  rects: { x: number; y: number; width: number; height: number }[];
+  rects: PdfAnnotationRect[];
   anchor: { left: number; top: number; bottom: number };
 };
 
@@ -126,5 +131,6 @@ export function api<T>(path: string, method = 'GET', body?: unknown): Promise<T>
 }
 
 export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : '操作失败，请稍后重试。';
+  const message = error instanceof Error ? error.message : '操作失败，请稍后重试。';
+  return message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '');
 }

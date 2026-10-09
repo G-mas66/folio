@@ -2,8 +2,10 @@
 
 import io
 import json
+import threading
 import unittest
 import urllib.error
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
 from backend import ai
@@ -81,6 +83,47 @@ class APIContractReview(unittest.TestCase):
         self.assertEqual(body['tool_choice'], 'auto')
         self.assertEqual(body['tools'], [tool])
         self.assertEqual(result['tool_calls'], [call])
+        self.assertEqual(sent.get_header('Authorization'), 'Bearer review-only-key')
+        self.assertEqual(sent.get_header('User-agent'), ai.API_USER_AGENT)
+
+    def test_chat_completion_passes_a_gateway_that_rejects_python_user_agents(self):
+        requests = []
+
+        class Provider(BaseHTTPRequestHandler):
+            def do_POST(self):
+                requests.append((self.path, self.headers.get('Authorization'), self.headers.get('User-Agent')))
+                self.rfile.read(int(self.headers.get('Content-Length', '0')))
+                if self.headers.get('User-Agent') != ai.API_USER_AGENT:
+                    status = 403
+                    payload = {'error': {'message': 'browser signature blocked'}}
+                else:
+                    status = 200
+                    payload = {'choices': [{'finish_reason': 'stop', 'message': {'content': 'ok'}}]}
+                body = json.dumps(payload).encode('utf-8')
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Provider)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = ai.chat_completion(
+                [{'role': 'user', 'content': 'synthetic test'}],
+                config=(f'http://127.0.0.1:{server.server_port}/v1', 'fixture', 'review-only-key'),
+                protocol='openai_chat_completions',
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+        self.assertEqual(result['content'], 'ok')
+        self.assertEqual(requests, [('/v1/chat/completions', 'Bearer review-only-key', ai.API_USER_AGENT)])
 
     def test_malformed_tool_calls_and_truncated_calls_cannot_execute(self):
         tools = [{'type': 'function', 'function': {'name': 'read_paper', 'parameters': {'type': 'object', 'properties': {}}}}]
@@ -104,6 +147,17 @@ class APIContractReview(unittest.TestCase):
             with self.subTest(status=status,body=body), patch.object(ai,'current_config',return_value=('http://127.0.0.1:9999/literal/','mimo-v6pro','review-only-key')), patch.object(ai.urllib.request,'urlopen',side_effect=failure), self.assertRaises(ai.AIError) as caught:
                 ai.chat_completion([{'role':'user','content':'完整正文'}],tools=[{'type':'function','function':{'name':'read_paper','parameters':{'type':'object'}}}])
             self.assertEqual(caught.exception.category,expected)
+            failure.close()
+
+    def test_authentication_errors_distinguish_401_from_403(self):
+        for status, expected in ((401, '认证未通过'), (403, '请求被拒绝')):
+            failure = urllib.error.HTTPError('https://provider.example/v1/chat/completions', status, 'fixture', {}, io.BytesIO(b'{}'))
+            with self.subTest(status=status), patch.object(ai, 'current_config', return_value=('https://provider.example/v1', 'm', 'review-only-key')), patch.object(ai.urllib.request, 'urlopen', side_effect=failure), self.assertRaises(ai.AIError) as caught:
+                ai.chat_completion([{'role': 'user', 'content': 'synthetic test'}])
+            self.assertEqual(caught.exception.category, 'authentication')
+            self.assertIn(f'HTTP {status}', caught.exception.message)
+            self.assertIn(expected, caught.exception.message)
+            self.assertNotIn('review-only-key', caught.exception.message)
             failure.close()
 
 

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.mjs?url';
-import { PdfAnnotation, PdfSelection } from './api';
+import { PdfAnnotation, PdfAnnotationRect, PdfSelection } from './api';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -9,6 +9,44 @@ export type PdfKind = 'original' | 'mono' | 'dual';
 export type SharedPdfDocument = { pdf: pdfjs.PDFDocumentProxy; destroy: () => Promise<void> };
 
 type RenderTaskRef = { cancel: () => void };
+
+const MAX_SELECTION_LINES = 32;
+const MAX_SELECTION_RECTS = 512;
+const MAX_SELECTION_TEXT_LENGTH = 10000;
+type UnderlineEdge = NonNullable<PdfAnnotationRect['underline_edge']>;
+
+function underlineEdgeFor(textNode: Text): UnderlineEdge {
+  const span = textNode.parentElement;
+  const textRotation = Number.parseFloat(span ? getComputedStyle(span).getPropertyValue('--rotate') : '0');
+  const pageRotation = Number.parseFloat(span?.closest<HTMLElement>('.textLayer')?.dataset.mainRotation || '0');
+  const rotation = textRotation + pageRotation;
+  if (!Number.isFinite(rotation)) return 'bottom';
+  const quarterTurns = Math.round(rotation / 90);
+  if (Math.abs(rotation - quarterTurns * 90) > 0.5) return 'bottom';
+  switch ((quarterTurns % 4 + 4) % 4) {
+    case 1: return 'left';
+    case 2: return 'top';
+    case 3: return 'right';
+    default: return 'bottom';
+  }
+}
+
+function visualLineCount(rects: { rect: DOMRect; underline_edge: UnderlineEdge }[]) {
+  const bands: { vertical: boolean; position: number; thickness: number }[] = [];
+  for (const { rect, underline_edge } of rects) {
+    const vertical = underline_edge === 'left' || underline_edge === 'right';
+    const position = vertical ? rect.left : rect.top;
+    const thickness = vertical ? rect.width : rect.height;
+    const band = bands.find((item) => item.vertical === vertical && Math.abs(item.position - position) <= Math.max(2, Math.min(item.thickness, thickness) * 0.6));
+    if (band) {
+      band.position = (band.position + position) / 2;
+      band.thickness = Math.max(band.thickness, thickness);
+    } else {
+      bands.push({ vertical, position, thickness });
+    }
+  }
+  return bands.length;
+}
 
 export async function loadPdfDocument(paperId: string, kind: PdfKind): Promise<SharedPdfDocument> {
   const bytes = await window.workbench.request<Uint8Array>({ path: `/papers/${paperId}/pdf?kind=${kind}`, binary: true });
@@ -41,7 +79,7 @@ export function PdfPage({
   document: SharedPdfDocument; pageNumber: number; scale: number; fitWidth?: boolean;
   containerWidth: number; scrollRoot: HTMLElement | null; pageAspectRatio: number;
   annotations: PdfAnnotation[]; active: boolean;
-  onSelection: (selection: PdfSelection | null, notice?: string) => void;
+  onSelection: (selection: PdfSelection | null, notice?: string, contextMenuPoint?: { left: number; top: number }) => void;
 }) {
   const frameRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -55,58 +93,91 @@ export function PdfPage({
   const placeholderWidth = Math.max(100, containerWidth - 28) * (fitWidth ? scale : 1);
   const placeholderHeight = pageAspectRatio > 0 ? placeholderWidth / pageAspectRatio + 28 : 540;
 
-  function captureSelection() {
+  function captureSelection(contextMenuPoint?: { left: number; top: number }) {
     const textLayer = textRef.current;
     const stage = stageRef.current;
     const selection = window.getSelection();
-    if (!active || !textLayer || !stage || !selection || selection.isCollapsed || !selection.toString().trim()) {
+    if (!active || !textLayer || !stage || !selection || selection.isCollapsed || !selection.rangeCount || !selection.toString().trim()) {
       onSelection(null);
-      return;
+      return false;
     }
     const range = selection.getRangeAt(0);
     if (!textLayer.contains(range.startContainer) || !textLayer.contains(range.endContainer)) {
       const startPage = range.startContainer.parentElement?.closest<HTMLElement>('.pdf-page-frame')?.dataset.pageNumber;
       const endPage = range.endContainer.parentElement?.closest<HTMLElement>('.pdf-page-frame')?.dataset.pageNumber;
       onSelection(null, startPage && endPage && startPage !== endPage ? '当前一次只能标记同一页内的文字。' : undefined);
-      return;
+      return false;
     }
     const bounds = stage.getBoundingClientRect();
     if (bounds.width <= 0 || bounds.height <= 0) {
       onSelection(null);
-      return;
+      return false;
     }
     const seenRects = new Set<string>();
-    const rects = Array.from(range.getClientRects()).flatMap((rect) => {
-      const left = Math.max(bounds.left, rect.left);
-      const top = Math.max(bounds.top, rect.top);
-      const right = Math.min(bounds.right, rect.right);
-      const bottom = Math.min(bounds.bottom, rect.bottom);
-      if (right <= left || bottom <= top) return [];
-      const key = [left, top, right, bottom].map((value) => Math.round(value * 10) / 10).join(':');
-      if (seenRects.has(key)) return [];
-      seenRects.add(key);
-      return [{
-        x: Math.max(0, Math.min(1, (left - bounds.left) / bounds.width)),
-        y: Math.max(0, Math.min(1, (top - bounds.top) / bounds.height)),
-        width: Math.max(0, Math.min(1, (right - left) / bounds.width)),
-        height: Math.max(0, Math.min(1, (bottom - top) / bounds.height)),
-      }];
-    });
+    const clientRects: { rect: DOMRect; underline_edge: UnderlineEdge }[] = [];
+    const walker = textLayer.ownerDocument.createTreeWalker(textLayer, NodeFilter.SHOW_TEXT);
+    const textRange = textLayer.ownerDocument.createRange();
+    let node = walker.nextNode();
+    while (node) {
+      const textNode = node as Text;
+      if (range.intersectsNode(textNode)) {
+        const start = range.startContainer === textNode ? range.startOffset : 0;
+        const end = range.endContainer === textNode ? range.endOffset : textNode.length;
+        if (end > start) {
+          textRange.setStart(textNode, start);
+          textRange.setEnd(textNode, end);
+          const underlineEdge = underlineEdgeFor(textNode);
+          for (const rect of Array.from(textRange.getClientRects())) {
+            const left = Math.max(bounds.left, rect.left);
+            const top = Math.max(bounds.top, rect.top);
+            const right = Math.min(bounds.right, rect.right);
+            const bottom = Math.min(bounds.bottom, rect.bottom);
+            if (right <= left || bottom <= top) continue;
+            const key = [...[left, top, right, bottom].map((value) => Math.round(value * 10) / 10), underlineEdge].join(':');
+            if (seenRects.has(key)) continue;
+            seenRects.add(key);
+            clientRects.push({ rect, underline_edge: underlineEdge });
+          }
+        }
+      }
+      node = walker.nextNode();
+    }
+    const domRects = clientRects.map((item) => item.rect);
+    const rects = clientRects.map(({ rect, underline_edge }) => ({
+      x: Math.max(0, Math.min(1, (Math.max(bounds.left, rect.left) - bounds.left) / bounds.width)),
+      y: Math.max(0, Math.min(1, (Math.max(bounds.top, rect.top) - bounds.top) / bounds.height)),
+      width: Math.max(0, Math.min(1, (Math.min(bounds.right, rect.right) - Math.max(bounds.left, rect.left)) / bounds.width)),
+      height: Math.max(0, Math.min(1, (Math.min(bounds.bottom, rect.bottom) - Math.max(bounds.top, rect.top)) / bounds.height)),
+      underline_edge,
+    }));
     if (!rects.length) {
       onSelection(null);
-      return;
+      return false;
     }
-    if (rects.length > 32) {
+    const selectedText = selection.toString().trim();
+    if (clientRects.length > MAX_SELECTION_RECTS || selectedText.length > MAX_SELECTION_TEXT_LENGTH) {
+      onSelection(null, '选区过大，请缩小范围后再标记。');
+      return false;
+    }
+    if (visualLineCount(clientRects) > MAX_SELECTION_LINES) {
       onSelection(null, '选区跨越过多行，请缩小范围后再标记。');
-      return;
+      return false;
+    }
+    if (contextMenuPoint && !domRects.some((rect) => (
+      contextMenuPoint.left >= rect.left - 2 && contextMenuPoint.left <= rect.right + 2
+      && contextMenuPoint.top >= rect.top - 2 && contextMenuPoint.top <= rect.bottom + 2
+    ))) {
+      onSelection(null);
+      return false;
     }
     const anchor = range.getBoundingClientRect();
     onSelection({
       page_no: pageNumber,
-      selected_text: selection.toString().trim(),
+      selected_text: selectedText,
       rects,
       anchor: { left: anchor.left, top: anchor.top, bottom: anchor.bottom },
-    });
+    }, undefined, contextMenuPoint);
+    return true;
   }
 
   useEffect(() => {
@@ -204,7 +275,7 @@ export function PdfPage({
         <div className="pdf-annotation-layer" aria-label="PDF 高亮和批注">
           {annotations.flatMap((annotation) => annotation.rects.map((rect, index) => <span
             key={`${annotation.id}-${index}`}
-            className={`pdf-annotation-rect annotation-color-${annotation.color}${annotation.kind === 'comment' ? ' has-comment' : ''}`}
+            className={`pdf-annotation-rect annotation-color-${annotation.color} annotation-kind-${annotation.kind} annotation-edge-${rect.underline_edge || 'bottom'}${annotation.kind === 'comment' ? ' has-comment' : ''}`}
             data-testid={`annotation-rect-${annotation.id}-${index}`}
             data-annotation-id={annotation.id}
             aria-hidden="true"
@@ -212,7 +283,9 @@ export function PdfPage({
             style={{ left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` }}
           />))}
         </div>
-        <div className="textLayer" ref={textRef} onMouseUp={captureSelection} />
+        <div className="textLayer" ref={textRef} onMouseUp={() => captureSelection()} onContextMenu={(event) => {
+          if (captureSelection({ left: event.clientX, top: event.clientY })) event.preventDefault();
+        }} />
       </div>
     </div>
   </div>;

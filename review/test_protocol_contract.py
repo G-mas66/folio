@@ -116,22 +116,28 @@ class ProtocolContract(unittest.TestCase):
         self.assertEqual(second_input[1:3], raw_output)
         self.assertEqual(second_input[3]["type"], "function_call_output")
         self.assertEqual(second_input[3]["call_id"], "call_1")
+        self.assertEqual(sent[0].get_header("User-agent"), ai.API_USER_AGENT)
+        self.assertEqual(sent[0].get_header("Authorization"), "Bearer test-only-key")
 
     def test_sync_responses_errors_keep_auth_and_incomplete_categories(self):
-        failure = urllib.error.HTTPError(
-            "https://provider.example/v1/responses", 401, "Unauthorized", {}, io.BytesIO(b'{"error":{"message":"bad key"}}')
-        )
-        with patch.object(ai, "current_config", return_value=("https://provider.example/v1", "m", "test-only-key")), \
-             patch.object(ai.urllib.request, "urlopen", side_effect=failure), self.assertRaises(ai.AIError) as caught:
-            ai.chat_completion([{"role": "user", "content": "hi"}], protocol="openai_responses")
-        self.assertEqual(caught.exception.category, "authentication")
-        failure.close()
+        for status, expected in ((401, "认证未通过"), (403, "请求被拒绝")):
+            failure = urllib.error.HTTPError(
+                "https://provider.example/v1/responses", status, "Unauthorized", {}, io.BytesIO(b'{"error":{"message":"synthetic rejection"}}')
+            )
+            with self.subTest(status=status), patch.object(ai, "current_config", return_value=("https://provider.example/v1", "m", "test-only-key")), \
+                 patch.object(ai.urllib.request, "urlopen", side_effect=failure), self.assertRaises(ai.AIError) as caught:
+                ai.chat_completion([{"role": "user", "content": "hi"}], protocol="openai_responses")
+            self.assertEqual(caught.exception.category, "authentication")
+            self.assertIn(f"HTTP {status}", caught.exception.message)
+            self.assertIn(expected, caught.exception.message)
+            failure.close()
         with self.assertRaises(ai.AIError) as caught:
             ai._parse_responses_payload({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}, tools=None, paper_id=None, operation="test")
         self.assertEqual(caught.exception.category, "incomplete_response")
 
     def test_responses_sse_streams_text_thoughts_and_usage(self):
         request_bodies = []
+        request_user_agents = []
         response_payload = sse(
             {"type": "response.reasoning_summary_text.delta", "delta": "分析中"},
             {"type": "response.output_text.delta", "delta": "答案"},
@@ -143,6 +149,9 @@ class ProtocolContract(unittest.TestCase):
 
         def handler(request):
             request_bodies.append(json.loads(request.content))
+            request_user_agents.append(request.headers.get("user-agent"))
+            if request.headers.get("user-agent") != ai.API_USER_AGENT:
+                return httpx.Response(403, json={"error": {"message": "synthetic gateway rejection"}})
             return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=response_payload)
 
         original_client = httpx.AsyncClient
@@ -164,6 +173,7 @@ class ProtocolContract(unittest.TestCase):
         self.assertEqual(result[-1]["result"]["reasoning"], "分析中")
         self.assertEqual(result[-1]["result"]["usage"]["total_tokens"], 6)
         self.assertEqual(request_bodies[0]["stream"], True)
+        self.assertEqual(request_user_agents, [ai.API_USER_AGENT])
 
     def test_responses_sse_tool_arguments_and_followup_keep_raw_output(self):
         raw = [

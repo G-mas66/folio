@@ -16,6 +16,11 @@ type ReaderSettings = { model: string; model_options: string[]; web_search_enabl
 type ReaderLayoutState = { outlineWidth: number; chatWidth: number; outlineVisible: boolean; chatVisible: boolean };
 type ReaderSelection = PdfSelection & { pdf_kind: PdfKind };
 type AnnotationDraft = { selection: ReaderSelection; comment: string };
+type SelectionContextMenu = { left: number; top: number };
+type SentenceTranslation = {
+  requestId: number; paperId: string; text: string; translation: string; failure: string;
+  status: 'loading' | 'complete' | 'error'; left: number; top: number;
+};
 type NoteSaveStatus = '未保存' | '保存中…' | '已保存' | '保存失败';
 
 const readerLayoutKey = 'paper-workbench.reader-layout.v1';
@@ -70,9 +75,11 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   const [notesFailure, setNotesFailure] = useState('');
   const [annotations, setAnnotations] = useState<PdfAnnotation[]>([]);
   const [selection, setSelection] = useState<ReaderSelection | null>(null);
+  const [selectionContextMenu, setSelectionContextMenu] = useState<SelectionContextMenu | null>(null);
   const [selectionNotice, setSelectionNotice] = useState('');
   const [highlightPaletteOpen, setHighlightPaletteOpen] = useState(false);
   const [annotationDraft, setAnnotationDraft] = useState<AnnotationDraft | null>(null);
+  const [sentenceTranslation, setSentenceTranslation] = useState<SentenceTranslation | null>(null);
   const [editingAnnotation, setEditingAnnotation] = useState<string | null>(null);
   const [selectedAnnotation, setSelectedAnnotation] = useState<string | null>(null);
   const [annotationEditText, setAnnotationEditText] = useState('');
@@ -120,6 +127,10 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   const saveNoteOnUnmountRef = useRef<(text: string, revision: number) => void>(() => undefined);
   const flushNoteBeforeUpdateRef = useRef<() => Promise<void>>(async () => undefined);
   const noteSaveTimerRef = useRef<number | null>(null);
+  const selectionContextMenuRef = useRef<HTMLDivElement>(null);
+  const sentenceTranslationRef = useRef<HTMLDivElement>(null);
+  const sentenceTranslationRequestRef = useRef(0);
+  const sentenceTranslationDragRef = useRef<{ pointerId: number; x: number; y: number; left: number; top: number } | null>(null);
   const pendingAnnotationJumpRef = useRef<{ pdfKind: PdfKind; page: number } | null>(null);
   const previousPdfKindRef = useRef<PdfKind>(pdfKind);
   const loadedPdfKindRef = useRef<PdfKind | null>(null);
@@ -347,6 +358,13 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
 
   useEffect(() => {
     let canceled = false;
+    setSelection(null);
+    setSelectionContextMenu(null);
+    setHighlightPaletteOpen(false);
+    setAnnotationDraft(null);
+    sentenceTranslationRequestRef.current += 1;
+    setSentenceTranslation(null);
+    window.getSelection()?.removeAllRanges();
     noteLoadedRef.current = false;
     setNotesLoaded(false);
     setNotesFailure('');
@@ -389,6 +407,28 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   }, [paperId]);
 
   useEffect(() => {
+    if (!selectionContextMenu && !sentenceTranslation) return;
+    const closeMenuOutside = (event: PointerEvent) => {
+      if (selectionContextMenu && !selectionContextMenuRef.current?.contains(event.target as Node)) setSelectionContextMenu(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setSelectionContextMenu(null);
+      if (sentenceTranslation) {
+        sentenceTranslationRequestRef.current += 1;
+        sentenceTranslationDragRef.current = null;
+        setSentenceTranslation(null);
+      }
+    };
+    document.addEventListener('pointerdown', closeMenuOutside);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeMenuOutside);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [selectionContextMenu, sentenceTranslation?.requestId]);
+
+  useEffect(() => {
     if (!notesLoaded || noteRevisionRef.current <= noteSavedRevisionRef.current) return;
     const text = noteText;
     const revision = noteRevisionRef.current;
@@ -421,6 +461,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
     if (!pendingAnnotationJumpRef.current) pendingAnnotationJumpRef.current = { pdfKind, page: visiblePageRef.current };
     initialPageScrollPendingRef.current = true;
     setSelection(null);
+    setSelectionContextMenu(null);
     setHighlightPaletteOpen(false);
     setAnnotationDraft(null);
   }, [pdfKind]);
@@ -428,6 +469,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   useEffect(() => {
     if (active) return;
     setSelection(null);
+    setSelectionContextMenu(null);
     setHighlightPaletteOpen(false);
     setAnnotationDraft(null);
     if (anchorSettleTimerRef.current !== null) window.clearTimeout(anchorSettleTimerRef.current);
@@ -510,6 +552,14 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   useEffect(() => {
     if (!active) return;
     const handleWindowResize = () => {
+      setSelectionContextMenu(null);
+      const translationWindow = sentenceTranslationRef.current;
+      if (translationWindow) {
+        const bounds = translationWindow.getBoundingClientRect();
+        const left = bounded(bounds.left, 8, window.innerWidth - bounds.width - 8);
+        const top = bounded(bounds.top, 8, window.innerHeight - bounds.height - 8);
+        setSentenceTranslation((current) => current ? { ...current, left, top } : current);
+      }
       if (resizingRef.current) return;
       captureReaderAnchor();
       if (anchorSettleTimerRef.current !== null) window.clearTimeout(anchorSettleTimerRef.current);
@@ -672,7 +722,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
     window.setTimeout(() => (window as Window & { find?: (text: string) => boolean }).find?.call(window, searchText.trim()), 800);
   }
 
-  async function persistAnnotation(target: ReaderSelection, kind: 'highlight' | 'comment', color: PdfAnnotation['color'], comment = '') {
+  async function persistAnnotation(target: ReaderSelection, kind: 'highlight' | 'comment' | 'underline', color: PdfAnnotation['color'], comment = '') {
     const created = await api<PdfAnnotation>(`/papers/${paperId}/annotations`, 'POST', {
       pdf_kind: target.pdf_kind,
       page_no: target.page_no,
@@ -690,19 +740,25 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
 
   function clearPdfSelection() {
     setSelection(null);
+    setSelectionContextMenu(null);
     setHighlightPaletteOpen(false);
     window.getSelection()?.removeAllRanges();
   }
 
-  function capturePdfSelection(value: PdfSelection | null, notice?: string) {
+  function capturePdfSelection(value: PdfSelection | null, notice?: string, contextMenuPoint?: { left: number; top: number }) {
     if (!activeRef.current) return;
     if (!value) {
       setSelection(null);
+      setSelectionContextMenu(null);
       setHighlightPaletteOpen(false);
       if (notice) setSelectionNotice(notice);
       return;
     }
     setSelection({ ...value, pdf_kind: pdfKind });
+    setSelectionContextMenu(contextMenuPoint ? {
+      left: bounded(contextMenuPoint.left, 8, window.innerWidth - 176),
+      top: bounded(contextMenuPoint.top, 8, window.innerHeight - 220),
+    } : null);
     setHighlightPaletteOpen(false);
     setSelectionNotice('');
     setAnnotationFailure('');
@@ -718,12 +774,89 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
     }
   }
 
+  async function addUnderline() {
+    if (!selection) return;
+    try {
+      await persistAnnotation(selection, 'underline', 'yellow');
+      clearPdfSelection();
+    } catch (error) {
+      setAnnotationFailure(errorMessage(error));
+    }
+  }
+
   function beginAnnotationDraft() {
     if (!selection) return;
     setAnnotationDraft({ selection, comment: '' });
     setSelection(null);
+    setSelectionContextMenu(null);
     setHighlightPaletteOpen(false);
     setAnnotationFailure('');
+  }
+
+  async function translateSelectedSentence() {
+    if (!selection) return;
+    const target = selection;
+    const targetPaperId = paperId;
+    const requestId = ++sentenceTranslationRequestRef.current;
+    const width = 328;
+    const height = 320;
+    let top = target.anchor.bottom + 12;
+    if (top + height > window.innerHeight - 8) top = target.anchor.top - height - 12;
+    setSentenceTranslation({
+      requestId, paperId: targetPaperId, text: target.selected_text, translation: '', failure: '', status: 'loading',
+      left: bounded(target.anchor.left, 8, window.innerWidth - width - 8),
+      top: bounded(top, 8, window.innerHeight - height - 8),
+    });
+    setSelectionContextMenu(null);
+    setHighlightPaletteOpen(false);
+    try {
+      const result = await api<{ translation: string }>(`/papers/${targetPaperId}/translate-selection`, 'POST', { text: target.selected_text });
+      if (sentenceTranslationRequestRef.current !== requestId) return;
+      setSentenceTranslation((current) => current?.requestId === requestId && current.paperId === targetPaperId
+        ? { ...current, translation: result.translation, status: 'complete' }
+        : current);
+    } catch (error) {
+      if (sentenceTranslationRequestRef.current !== requestId) return;
+      setSentenceTranslation((current) => current?.requestId === requestId && current.paperId === targetPaperId
+        ? { ...current, failure: errorMessage(error), status: 'error' }
+        : current);
+    }
+  }
+
+  function closeSentenceTranslation() {
+    sentenceTranslationRequestRef.current += 1;
+    sentenceTranslationDragRef.current = null;
+    setSentenceTranslation(null);
+  }
+
+  function startSentenceTranslationDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || (event.target as HTMLElement).closest('button')) return;
+    if (!sentenceTranslation) return;
+    sentenceTranslationDragRef.current = {
+      pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+      left: sentenceTranslation.left, top: sentenceTranslation.top,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+
+  function moveSentenceTranslation(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = sentenceTranslationDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const bounds = sentenceTranslationRef.current?.getBoundingClientRect();
+    const maxLeft = window.innerWidth - (bounds?.width || 328) - 8;
+    const maxTop = window.innerHeight - (bounds?.height || 240) - 8;
+    setSentenceTranslation((current) => current ? {
+      ...current,
+      left: bounded(drag.left + event.clientX - drag.x, 8, maxLeft),
+      top: bounded(drag.top + event.clientY - drag.y, 8, maxTop),
+    } : current);
+  }
+
+  function endSentenceTranslationDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (sentenceTranslationDragRef.current?.pointerId !== event.pointerId) return;
+    sentenceTranslationDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   }
 
   async function saveAnnotationDraft() {
@@ -833,7 +966,11 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
             </div>
             <div className="pdf-scroll" ref={setPdfScrollElement} data-testid="pdf-scroll" data-pdf-kind={pdfDocument ? loadedPdfKindRef.current : undefined} aria-label="PDF 页面滚动区" onScroll={(event) => {
               if (!activeRef.current) return;
-              if (selection) setSelection(null);
+              if (selection) {
+                setSelection(null);
+                setSelectionContextMenu(null);
+                setHighlightPaletteOpen(false);
+              }
               scrollPositionRef.current = event.currentTarget.scrollTop;
               if (isAtPdfScrollEnd() && paper) updatePageFromScroll(paper.page_count);
             }}>
@@ -893,10 +1030,10 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
                 <span>{notesFailure && <span className="reader-note-error" role="alert">{notesFailure}</span>}</span>
                 <button type="button" className="primary-button compact-button" disabled={!notesLoaded || noteSaveStatus === '保存中…' || noteSaveStatus === '已保存'} onClick={() => void persistPaperNotes(noteDraftRef.current, noteRevisionRef.current)}>保存笔记</button>
               </div>
-              <div className="reader-annotations-heading"><h3>高亮与批注</h3><span>{annotations.length}</span></div>
+              <div className="reader-annotations-heading"><h3>高亮、下划线与批注</h3><span>{annotations.length}</span></div>
               {annotationFailure && <div className="reader-note-error" role="alert">{annotationFailure}</div>}
               <div className="reader-annotations-list" data-testid="reader-annotations-list">
-                {annotations.length === 0 && <p className="reader-annotations-empty">选中 PDF 文字即可添加高亮或批注。</p>}
+                {annotations.length === 0 && <p className="reader-annotations-empty">选中 PDF 文字后右键，可添加高亮、下划线或批注。</p>}
                 {annotations.map((annotation) => <article
                   className={`reader-annotation-card${selectedAnnotation === annotation.id ? ' selected' : ''}`}
                   key={annotation.id} data-testid={`reader-annotation-${annotation.id}`} data-annotation-id={annotation.id}
@@ -917,7 +1054,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
                     {annotation.comment && <p className="reader-annotation-comment">{annotation.comment}</p>}
                     <div className="reader-annotation-actions">
                       <button type="button" className="secondary-button compact-button" onClick={() => beginEditingAnnotation(annotation)}>{annotation.kind === 'comment' ? '编辑批注' : '编辑备注'}</button>
-                      <button type="button" className="secondary-button compact-button" onClick={() => void deleteAnnotation(annotation)}>{annotation.kind === 'highlight' ? '删除高亮' : '删除批注'}</button>
+                      <button type="button" className="secondary-button compact-button" onClick={() => void deleteAnnotation(annotation)}>{annotation.kind === 'highlight' ? '删除高亮' : annotation.kind === 'underline' ? '删除下划线' : '删除批注'}</button>
                     </div>
                   </>}
                 </article>)}
@@ -926,20 +1063,43 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
           </div>
         </div>
       )}
-      {selection && active && <div
-        className="pdf-selection-toolbar"
-        data-testid="reader-selection-toolbar"
-        style={{ left: Math.max(8, Math.min(window.innerWidth - 320, selection.anchor.left)), top: Math.max(8, selection.anchor.top - 46) }}
+      {selection && selectionContextMenu && active && <div
+        ref={selectionContextMenuRef}
+        className="pdf-selection-toolbar pdf-selection-context-menu"
+        data-testid="reader-selection-context-menu"
+        style={{ left: selectionContextMenu.left, top: selectionContextMenu.top }}
+        onContextMenu={(event) => event.preventDefault()}
       >
         <button type="button" aria-label="高亮" aria-expanded={highlightPaletteOpen} onMouseDown={(event) => event.preventDefault()} onClick={() => setHighlightPaletteOpen((open) => !open)}>高亮</button>
+        <button type="button" aria-label="下划线" onMouseDown={(event) => event.preventDefault()} onClick={() => void addUnderline()}>下划线</button>
         <button type="button" aria-label="批注" onMouseDown={(event) => event.preventDefault()} onClick={beginAnnotationDraft}>批注</button>
-        <button type="button" aria-label="取消文字选择" onMouseDown={(event) => event.preventDefault()} onClick={clearPdfSelection}>×</button>
+        <button type="button" aria-label="翻译句子" onMouseDown={(event) => event.preventDefault()} onClick={() => void translateSelectedSentence()}>翻译句子</button>
+        <button type="button" aria-label="取消文字选择" onMouseDown={(event) => event.preventDefault()} onClick={clearPdfSelection}>取消选择</button>
         {highlightPaletteOpen && <div className="pdf-highlight-palette" role="group" aria-label="高亮颜色">
           <button type="button" className="annotation-color-yellow" aria-label="黄色高亮" onMouseDown={(event) => event.preventDefault()} onClick={() => void addHighlight('yellow')} />
           <button type="button" className="annotation-color-green" aria-label="绿色高亮" onMouseDown={(event) => event.preventDefault()} onClick={() => void addHighlight('green')} />
           <button type="button" className="annotation-color-blue" aria-label="蓝色高亮" onMouseDown={(event) => event.preventDefault()} onClick={() => void addHighlight('blue')} />
           <button type="button" className="annotation-color-pink" aria-label="粉色高亮" onMouseDown={(event) => event.preventDefault()} onClick={() => void addHighlight('pink')} />
         </div>}
+      </div>}
+      {sentenceTranslation && sentenceTranslation.paperId === paperId && active && <div
+        ref={sentenceTranslationRef}
+        className="pdf-translation-window"
+        data-testid="reader-sentence-translation"
+        role="dialog"
+        aria-label="句子翻译"
+        style={{ left: sentenceTranslation.left, top: sentenceTranslation.top, maxHeight: Math.max(0, Math.min(320, window.innerHeight - sentenceTranslation.top - 8)) }}
+      >
+        <div className="pdf-translation-window-heading" onPointerDown={startSentenceTranslationDrag} onPointerMove={moveSentenceTranslation} onPointerUp={endSentenceTranslationDrag} onPointerCancel={endSentenceTranslationDrag}>
+          <span>句子翻译</span>
+          <button type="button" aria-label="关闭翻译" onPointerDown={(event) => event.stopPropagation()} onClick={closeSentenceTranslation}>×</button>
+        </div>
+        <div className="pdf-translation-window-content">
+          <div className="pdf-translation-window-source">{sentenceTranslation.text}</div>
+          {sentenceTranslation.status === 'loading' && <div role="status">正在翻译…</div>}
+          {sentenceTranslation.failure && <div className="reader-note-error" role="alert">{sentenceTranslation.failure}</div>}
+          {sentenceTranslation.translation && <div className="pdf-translation-window-result">{sentenceTranslation.translation}</div>}
+        </div>
       </div>}
       {annotationDraft && active && <div
         className="pdf-annotation-draft"

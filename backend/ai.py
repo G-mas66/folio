@@ -15,6 +15,7 @@ from typing import Any, AsyncIterator
 from .db import connect, data_root
 
 PROTOCOLS = {"openai_chat_completions", "openai_responses", "custom_chat_completions"}
+API_USER_AGENT = "Folio/1.0"
 
 
 @dataclass
@@ -127,6 +128,12 @@ def endpoint_for_protocol(base_url: str, protocol: str) -> str:
     else:
         path = path.rstrip("/") + endpoint
     return urlunsplit((parts.scheme, parts.netloc, path or endpoint, parts.query, parts.fragment))
+
+
+def _authentication_error(status: int) -> AIError:
+    if status == 401:
+        return AIError("authentication", "AI 服务返回 HTTP 401（认证未通过）。请检查 API URL、认证方式、凭据及服务端网关/防火墙规则。")
+    return AIError("authentication", "AI 服务返回 HTTP 403（请求被拒绝）。请检查服务端网关/防火墙策略、凭据权限和所选模型的访问权限。")
 
 
 def _responses_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
@@ -276,6 +283,8 @@ def _responses_http_error(status: int, body: bytes, *, tools: list[dict[str, Any
     details = payload.get("error", payload) if isinstance(payload, dict) else {}
     if not isinstance(details, dict):
         details = {}
+    if status in {401, 403}:
+        return _authentication_error(status)
     code = details.get("code") or details.get("type")
     if status == 413 or (status in {400, 422} and code in {"context_length_exceeded", "input_too_long", "max_tokens"}):
         return AIError("context_length", "AI 服务拒绝了完整原文请求，输入超出或超过模型容量；本次没有截断或分块，请检查所选模型和服务的输入上限。")
@@ -343,7 +352,7 @@ def chat_completion(
         request = urllib.request.Request(
             endpoint,
             data=json.dumps(request_body, ensure_ascii=False).encode("utf-8"),
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": API_USER_AGENT},
             method="POST",
         )
         try:
@@ -367,7 +376,7 @@ def chat_completion(
     request = urllib.request.Request(
         endpoint,
         data=body,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": API_USER_AGENT},
         method="POST",
     )
     try:
@@ -394,19 +403,18 @@ def chat_completion(
                 "context_length",
                 "AI 服务拒绝了完整原文请求，输入超出或超过模型容量；本次没有截断或分块，请检查所选模型和服务的输入上限。",
             ) from None
+        if status in {401, 403}:
+            raise _authentication_error(status) from None
         if tools and status in {400, 422}:
             raise AIError(
                 "tools_unsupported",
                 f"AI 服务返回 HTTP {status}；可能不支持工具调用，也可能模型或请求参数有误。请检查服务商对 tools 的支持及模型配置。",
             ) from None
         category = {
-            401: "authentication",
-            403: "authentication",
             404: "model_or_address",
             429: "rate_limit",
         }.get(status, "service_error")
         message = {
-            "authentication": "API Key 无效或没有权限，请检查凭据。",
             "model_or_address": "模型或服务地址不可用，请检查配置。",
             "rate_limit": "服务暂时限流或额度不足，请稍后重试。",
             "service_error": f"AI 服务返回 HTTP {status}。",
@@ -506,11 +514,12 @@ async def stream_chat_completion(
                 context_error = False
         if context_error:
             return AIError("context_length", "AI 服务拒绝了完整原文请求，输入超出或超过模型容量；本次没有截断或分块，请检查所选模型和服务的输入上限。")
+        if status in {401, 403}:
+            return _authentication_error(status)
         if tools and status in {400, 422}:
             return AIError("tools_unsupported", f"AI 服务返回 HTTP {status}；可能不支持工具调用，也可能模型或请求参数有误。请检查服务商对 tools 的支持及模型配置。")
-        category = {401: "authentication", 403: "authentication", 404: "model_or_address", 429: "rate_limit"}.get(status, "service_error")
+        category = {404: "model_or_address", 429: "rate_limit"}.get(status, "service_error")
         message = {
-            "authentication": "API Key 无效或没有权限，请检查凭据。",
             "model_or_address": "模型或服务地址不可用，请检查配置。",
             "rate_limit": "服务暂时限流或额度不足，请稍后重试。",
             "service_error": f"AI 服务返回 HTTP {status}。",
@@ -518,7 +527,7 @@ async def stream_chat_completion(
         return AIError(category, message)
 
     request_body_bytes = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept": "text/event-stream"}
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept": "text/event-stream", "User-Agent": API_USER_AGENT}
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     calls: dict[int, dict[str, Any]] = {}
@@ -710,6 +719,7 @@ async def _stream_responses_completion(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
+        "User-Agent": API_USER_AGENT,
     }
     output_items: dict[int, dict[str, Any]] = {}
     calls: dict[int, dict[str, Any]] = {}
