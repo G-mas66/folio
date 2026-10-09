@@ -41,4 +41,37 @@ function selectMacUpdate(releases, currentVersion, architecture) {
   return null;
 }
 
-module.exports = { selectMacUpdate };
+const htmlEntities = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
+  copy: '©', reg: '®', ndash: '–', mdash: '—', hellip: '…', bull: '•',
+  lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”',
+};
+
+function htmlToText(value) {
+  return value
+    .replace(/<br\s*\/?\s*>/gi, '\n')
+    .replace(/<li\b[^>]*>/gi, '- ')
+    .replace(/<\/(?:p|li|h[1-6]|div|ul|ol|blockquote|pre)\s*>/gi, '\n')
+    .replace(/<\/?[a-z][^>]*>/gi, '')
+    .replace(/&(#x[\da-f]+|#\d+|[a-z][\da-z]+);/gi, (entity, name) => {
+      const key = name.toLowerCase();
+      if (key.startsWith('#')) {
+        const hex = key.startsWith('#x');
+        const codePoint = Number.parseInt(key.slice(hex ? 2 : 1), hex ? 16 : 10);
+        return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : entity;
+      }
+      return htmlEntities[key] ?? entity;
+    })
+    .replace(/[ \t]*\n[ \t]*/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function releaseNotesText(value) {
+  if (typeof value === 'string') return htmlToText(value).slice(0, 12000);
+  if (!Array.isArray(value)) return '';
+  const notes = value.map((item) => [item.version, item.note].filter(Boolean).join('\n')).join('\n\n');
+  return htmlToText(notes).slice(0, 12000);
+}
+
+module.exports = { releaseNotesText, selectMacUpdate };

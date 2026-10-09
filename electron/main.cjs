@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const net = require('node:net');
 const path = require('node:path');
 const { copyAndVerifyStorage, resolveLocationConfig, validateStorageTarget } = require('./storage-location.cjs');
-const { selectMacUpdate } = require('./update-service.cjs');
+const { releaseNotesText, selectMacUpdate } = require('./update-service.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
 const legacyWindowsRoot = 'D:\\个人工作台';
@@ -77,12 +77,6 @@ function publishUpdateState(next) {
     mainWindow.webContents.send('workbench:update-state', updateState);
   }
   return updateState;
-}
-
-function releaseNotesText(value) {
-  if (typeof value === 'string') return value.slice(0, 12000);
-  if (!Array.isArray(value)) return '';
-  return value.map((item) => [item.version, item.note].filter(Boolean).join('\n')).join('\n\n').slice(0, 12000);
 }
 
 function configureWindowsUpdater() {
