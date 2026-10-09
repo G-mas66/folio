@@ -1,10 +1,13 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, net: electronNet, shell } = require('electron');
 const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const net = require('node:net');
 const path = require('node:path');
+const { parseUpdateInfo } = require('electron-updater/out/providers/Provider');
 const { copyAndVerifyStorage, resolveLocationConfig, validateStorageTarget } = require('./storage-location.cjs');
+const { finalizeInstalledUpdateCache, restoreInstallerCache } = require('./update-cache.cjs');
+const { downloadUpdateWithFallback, isDownloadFallbackActive } = require('./update-download.cjs');
 const { releaseNotesText, selectMacUpdate } = require('./update-service.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
@@ -56,6 +59,8 @@ let backendBase;
 let mainWindow;
 let autoUpdater;
 let CancellationToken;
+let legacyUpdaterCacheDir;
+let updateCacheMaintenancePromise = Promise.resolve();
 let downloadCancellationToken;
 let downloadCancelled = false;
 let updateInstallInProgress = false;
@@ -79,10 +84,47 @@ function publishUpdateState(next) {
   return updateState;
 }
 
+async function readCurrentInstallerInfo() {
+  const version = app.getVersion();
+  if (!/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(version)) return null;
+  const channel = /^\d+\.\d+\.\d+-(alpha|beta|rc)(?:[.-]|$)/.exec(version)?.[1];
+  const channelFile = channel ? `${channel}.yml` : 'latest.yml';
+  const fileName = `Folio-${version}-Windows-x64-Setup.exe`;
+  const manifestUrl = `https://github.com/G-mas66/folio/releases/download/v${encodeURIComponent(version)}/${channelFile}`;
+  const response = await electronNet.fetch(manifestUrl, {
+    headers: { Accept: 'application/octet-stream', 'User-Agent': 'Folio updater' },
+    signal: AbortSignal.timeout(12000),
+  });
+  if (!response.ok) throw new Error('当前版本更新清单不可用。');
+  const info = parseUpdateInfo(await response.text(), channelFile, new URL(manifestUrl));
+  const installer = info.files?.find(file => file.url === fileName);
+  if (info.version !== version || !installer) throw new Error('当前版本更新清单与安装包不匹配。');
+  return { version, fileName, size: installer.size, sha512: installer.sha512 };
+}
+
+function startUpdateCacheMaintenance() {
+  if (!app.isPackaged || process.platform !== 'win32') return;
+  updateCacheMaintenancePromise = (async () => {
+    const installerInfo = await readCurrentInstallerInfo();
+    if (!installerInfo) return;
+    const options = {
+      dataRoot,
+      currentVersion: app.getVersion(),
+      installerInfo,
+      legacyCacheDir: legacyUpdaterCacheDir,
+    };
+    await finalizeInstalledUpdateCache(options);
+    await restoreInstallerCache(options);
+  })().catch(() => {});
+}
+
 function configureWindowsUpdater() {
   if (!app.isPackaged || process.platform !== 'win32') return;
   try {
     ({ autoUpdater, CancellationToken } = require('electron-updater'));
+    const originalCacheRoot = autoUpdater.app.baseCachePath;
+    legacyUpdaterCacheDir = autoUpdater.downloadedUpdateHelper?.cacheDir
+      || path.join(originalCacheRoot, 'paper-workbench-updater');
     Object.defineProperty(autoUpdater.app, 'baseCachePath', { configurable: true, get: () => updateCacheRoot });
     if (autoUpdater.app.baseCachePath !== updateCacheRoot) throw new Error('更新缓存目录无效。');
     autoUpdater.autoDownload = false;
@@ -112,6 +154,7 @@ function configureWindowsUpdater() {
       publishUpdateState({ status: 'available', version: info.version, percent: undefined, transferred: undefined, total: undefined, message: '下载已取消，可以重新下载。' });
     });
     autoUpdater.on('error', () => {
+      if (isDownloadFallbackActive(autoUpdater)) return;
       const downloading = updateState.status === 'downloading';
       publishUpdateState({ status: downloading ? 'available' : 'error', message: downloading ? '下载失败，可以重试。' : '检查更新失败，请检查网络后重试。' });
     });
@@ -158,7 +201,8 @@ async function downloadUpdateInternal() {
   downloadCancellationToken = new CancellationToken();
   publishUpdateState({ status: 'downloading', percent: 0, transferred: 0, total: 0, message: '' });
   try {
-    await autoUpdater.downloadUpdate(downloadCancellationToken);
+    await updateCacheMaintenancePromise;
+    await downloadUpdateWithFallback(autoUpdater, downloadCancellationToken);
     return updateState;
   } catch {
     if (updateState.status === 'downloading') {
@@ -700,6 +744,7 @@ if (!gotSingleInstanceLock) {
   app.whenReady().then(async () => {
   if (process.platform === 'win32') Menu.setApplicationMenu(null);
   configureWindowsUpdater();
+  startUpdateCacheMaintenance();
   try {
     if (locationStartupError) throw locationStartupError;
     await startBackend();
