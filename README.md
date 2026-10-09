@@ -6,7 +6,7 @@
 
 一个桌面文献阅读工作台。英文 PDF 导入后先完成全文翻译，中文文献直接阅读原始 PDF；在同一窗口中结合 AI 问答、笔记和批注理解文献。
 
-**当前版本：0.14.0-beta.2 · Windows x64 / macOS arm64、x64 · Electron + React + Python**
+**当前版本：0.14.0-beta.3 · Windows x64 / macOS arm64、x64 · Electron + React + Python**
 
 [功能](#功能) · [界面预览](#界面预览) · [使用](#使用) · [AI 配置](#ai-配置) · [源码构建](#源码构建) · [数据与隐私](#数据与隐私) · [当前限制](#当前限制)
 
@@ -15,11 +15,11 @@
 | 功能 | 说明 |
 | --- | --- |
 | 导入与归类 | 选择或拖入 PDF；按中文标题重命名库内副本；相同文件去重；文件夹使用持久颜色标签 |
-| 阅读外观 | 浅色、深色或跟随系统；文献缩略图与 PDF 保持原始颜色 |
+| 阅读外观 | 浅色、深色或跟随系统，约 0.4 秒柔和过渡；独立护眼模式可叠加深色，让界面与 PDF 显示偏暖，不修改 PDF 文件 |
 | 全文翻译 | 英文文献使用 PDF2zh-Next / BabelDOC 和免费翻译服务，生成中文 PDF 与左右双语 PDF；检测为中文的正文跳过翻译 |
 | 原版阅读 | 连续滚动、高清绘制、缩放、页码跳转和原文查找；切换原文、中文、双语 PDF 保持当前页 |
 | 文献标签 | 多篇文献在顶部标签间切换；关闭标签保留文献，阅读页码和聊天按文献隔离 |
-| 三栏布局 | 导航、正文、助手可拖动调整比例；导航和助手可独立隐藏，布局会保存 |
+| 三栏布局 | 导航、正文、助手可拖动调整比例；拖动时预览栏宽，松手后重排 PDF 并保持阅读位置；导航和助手可独立隐藏，布局会保存 |
 | AI 文献助手 | 可选择 Chat Completions 或 Responses 协议；读取模型列表后选择；按需读取正文或发送全文总结 |
 | 独立会话 | 同一篇文献可新建、切换和删除多个 AI 会话；各自保存记录，切换不中断生成 |
 | 流式与联网 | 实时显示回答和服务返回的思考；可停止生成；向上阅读暂停自动滚动；免 Key 搜索、Markdown 和 LaTeX 公式 |
@@ -32,15 +32,19 @@
 
 ## 界面预览
 
-以下三张截图记录 0.14.0-beta.1 的界面，beta.2 保持相同布局，使用合成测试文献；设置截图中的 API Key 输入框为空。
+文献库与阅读截图记录 0.14.0-beta.3 的界面，使用合成测试文献；设置截图中的 API Key 输入框为空。
 
 **浅色主题文献库与分类**
 
 ![Folio 浅色主题文献库与合成文献缩略图](docs/screenshots/library-light.png)
 
-**深色主题双语阅读与 AI 助手**
+**深色主题阅读与 AI 助手**
 
 ![Folio 深色主题下的合成论文阅读与 AI 助手](docs/screenshots/reader-dark.png)
+
+**深色主题叠加护眼模式**
+
+![Folio 护眼模式下的暖色 PDF 和阅读界面](docs/screenshots/reader-eye-comfort.png)
 
 **深色主题设置与更新入口**
 
@@ -63,11 +67,11 @@
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | [Folio-0.14.0-beta.2-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.2/Folio-0.14.0-beta.2-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
-| Mac · Apple Silicon | [Folio-0.14.0-beta.2-macOS-arm64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.2/Folio-0.14.0-beta.2-macOS-arm64.zip) | 解压，将 `.app` 拖入「应用程序」 |
-| Mac · Intel | [Folio-0.14.0-beta.2-macOS-x64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.2/Folio-0.14.0-beta.2-macOS-x64.zip) | 解压，将 `.app` 拖入「应用程序」 |
+| Windows x64 | [Folio-0.14.0-beta.3-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/Folio-0.14.0-beta.3-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
+| Mac · Apple Silicon | [Folio-0.14.0-beta.3-macOS-arm64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/Folio-0.14.0-beta.3-macOS-arm64.zip) | 解压，将 `.app` 拖入「应用程序」 |
+| Mac · Intel | [Folio-0.14.0-beta.3-macOS-x64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/Folio-0.14.0-beta.3-macOS-x64.zip) | 解压，将 `.app` 拖入「应用程序」 |
 
-发布页附有各平台验收报告及 [SHA256SUMS.txt](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.2/SHA256SUMS.txt)，可用于核对下载文件。
+发布页附有各平台验收报告及 [SHA256SUMS.txt](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/SHA256SUMS.txt)，可用于核对下载文件。
 
 现有 0.13.0 需要手动安装本版一次，之后 Windows 启动时会检查更新，也可在「设置 → 软件更新」手动检查。下载可以取消或重试，完成后由你点击「重启并安装」；退出应用不会自动安装。macOS 使用当前芯片架构的手动下载与替换方式。
 
@@ -76,12 +80,12 @@ macOS 为测试版，采用 ad-hoc 签名，没有 Apple Developer ID 签名或�
 自行构建后的 Windows 安装包路径：
 
 ```text
-dist/installer-0.14.0-beta.2/Folio-0.14.0-beta.2-Windows-x64-Setup.exe
+dist/installer-0.14.0-beta.3/Folio-0.14.0-beta.3-Windows-x64-Setup.exe
 ```
 
 界面品牌使用 Folio；Windows 可执行文件名和默认安装目录仍保留旧名称，以便覆盖现有安装并继续使用原来的用户数据与凭据身份。
 
-也可使用 `dist/installer-0.14.0-beta.2/win-unpacked/阅川 Folio.exe`；需要保留整个 `win-unpacked` 文件夹。打包程序包含本地服务、Python 运行时、PDF 引擎、字体和布局模型，使用时不用手动启动 Python 或另装 Python。
+也可使用 `dist/installer-0.14.0-beta.3/win-unpacked/阅川 Folio.exe`；需要保留整个 `win-unpacked` 文件夹。打包程序包含本地服务、Python 运行时、PDF 引擎、字体和布局模型，使用时不用手动启动 Python 或另装 Python。
 
 1. 在文献库创建分类文件夹，然后导入 PDF。程序保存库内副本，最初选择的文件保持不变。
 2. 英文文献等待中文和双语 PDF 生成；中文文献直接阅读。英文翻译可暂停、继续或重试，不需要逐段点击翻译。
@@ -165,11 +169,11 @@ npm ci
 npm run dist
 ```
 
-`npm run dist` 依次构建界面、本地后端与 PDF 引擎，再生成 NSIS 安装包。PDF 引擎构建会准备 `.venv-pdf-engine`，使用 PDF2zh-Next **2.9.0**、BabelDOC **0.6.2** 和 PyInstaller **6.16.0**。0.14.0-beta.2 的安装目录为 `dist/installer-0.14.0-beta.2/`。
+`npm run dist` 依次构建界面、本地后端与 PDF 引擎，再生成 NSIS 安装包。PDF 引擎构建会准备 `.venv-pdf-engine`，使用 PDF2zh-Next **2.9.0**、BabelDOC **0.6.2** 和 PyInstaller **6.16.0**。0.14.0-beta.3 的安装目录为 `dist/installer-0.14.0-beta.3/`。
 
 ### macOS 测试版
 
-0.14.0-beta.2 macOS 测试版支持 Apple Silicon arm64 和 Intel x64。GitHub Actions 的「macOS Test Builds」工作流只接受手动运行，使用标准 `macos-15` 与 `macos-15-intel` runner 原生构建，并运行后端契约测试和打包应用 smoke。默认仅在 Actions 日志中保留测试报告，不上传大型 Actions artifact；勾选 `create_draft_release` 会在重新构建并验证后，把 zip 安装包和逐架构 smoke 报告放到草稿预发布中。
+0.14.0-beta.3 macOS 测试版支持 Apple Silicon arm64 和 Intel x64。GitHub Actions 的「macOS Test Builds」工作流只接受手动运行，使用标准 `macos-15` 与 `macos-15-intel` runner 原生构建，并运行后端契约测试和打包应用 smoke。默认仅在 Actions 日志中保留测试报告，不上传大型 Actions artifact；勾选 `create_draft_release` 会在重新构建并验证后，把 zip 安装包和逐架构 smoke 报告放到草稿预发布中。
 
 macOS 本地构建需要对应架构的 Mac、Xcode Command Line Tools、Node.js 22 和 Python 3.12：
 
@@ -178,7 +182,7 @@ npm ci
 MAC_ARCH=arm64 npm run dist:macos
 ```
 
-Intel Mac 将 `arm64` 改为 `x64`。产物位于 `dist/macos-test-0.14.0-beta.2-<架构>/`。应用自带原生后端、PDF 翻译引擎、字体和布局模型，不需要用户安装 Python。测试版使用临时 ad-hoc 签名，没有 Developer ID 签名或公证；首次打开可能出现 Gatekeeper 提示，因此只作为测试包分发。macOS 更新不会自动替换应用，需要下载当前架构的 zip 并手动安装。
+Intel Mac 将 `arm64` 改为 `x64`。产物位于 `dist/macos-test-0.14.0-beta.3-<架构>/`。应用自带原生后端、PDF 翻译引擎、字体和布局模型，不需要用户安装 Python。测试版使用临时 ad-hoc 签名，没有 Developer ID 签名或公证；首次打开可能出现 Gatekeeper 提示，因此只作为测试包分发。macOS 更新不会自动替换应用，需要下载当前架构的 zip 并手动安装。
 
 ### 开发运行
 

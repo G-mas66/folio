@@ -31,6 +31,11 @@ const delay = time => new Promise(resolve => setTimeout(resolve, time));
     assert.equal(await application.evaluate(({ app }) => app.getPath('userData')), path.join(dataRoot, 'electron-userData'));
     let main = await application.firstWindow();
     main.on('pageerror', error => errors.push(error.message));
+    await application.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      window.show();
+      window.focus();
+    });
     await main.getByRole('button', { name: '设置', exact: true }).waitFor();
     assert.equal((await main.locator('.brand-wordmark').textContent()).trim(), 'Folio');
     await main.waitForFunction(() => {
@@ -105,6 +110,8 @@ const delay = time => new Promise(resolve => setTimeout(resolve, time));
       return { outline: width('.reader-outline'), paper: width('.reading-column'), chat: width('.chat-panel'), total: width('.reader-layout') };
     });
     const drag = async (id, distance) => {
+      await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].focus());
+      await reader.waitForFunction(() => document.hasFocus());
       const box = await reader.getByTestId(id).boundingBox();
       assert.ok(box, `Missing splitter ${id}`);
       await reader.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
@@ -119,6 +126,7 @@ const delay = time => new Promise(resolve => setTimeout(resolve, time));
     const initial = await widths();
     await drag('chat-resizer', -350);
     const widerChat = await widths();
+    fs.writeFileSync(path.join(output, 'drag-widths.json'), JSON.stringify({ initial, widerChat }, null, 2));
     assert.ok(widerChat.chat > initial.chat + 300);
     assert.ok(widerChat.paper < initial.paper - 300);
     assert.ok(Math.abs(widerChat.outline - initial.outline) < 3);

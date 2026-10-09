@@ -239,7 +239,7 @@ const server = http.createServer(async (request, response) => {
     await page.getByTestId('library-tab').click();
     await page.locator('.paper-card').filter({ hasText: '中文文献导入验收' }).getByRole('button', { name: '阅读', exact: true }).click();
     await page.waitForFunction(id => document.querySelector(`[data-testid="reader-tab-panel-${id}"] canvas`)?.width > 0, chinese.id);
-    await page.getByText('中文原文 · 无需翻译', { exact: true }).waitFor();
+    await page.locator('.reader-binding').getByText('中文原文', { exact: true }).waitFor();
     await send('读取中文原文验收');
     await activeChat().getByRole('button', { name: /停止/ }).waitFor({ state: 'hidden', timeout: 15000 });
     await activeChat().getByText('独立回答：读取中文原文验收', { exact: true }).waitFor();

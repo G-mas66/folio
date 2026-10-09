@@ -1,4 +1,4 @@
-import { FormEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { FormEvent, PointerEvent as ReactPointerEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -6,6 +6,7 @@ import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { api, ChatMessage, ChatStreamEvent, ChatStreamHandle, errorMessage, Paper, PdfAnnotation, PdfSelection, Segment, Source } from './api';
 import { loadPdfDocument, pageAspectRatios, PdfPage, PdfKind, SharedPdfDocument } from './PdfPage';
+import './reader-reference.css';
 
 type Page = { page_no: number; extraction_status: string; text_chars: number };
 type AnalysisRun = {
@@ -18,7 +19,7 @@ type AnnotationDraft = { selection: ReaderSelection; comment: string };
 type NoteSaveStatus = '未保存' | '保存中…' | '已保存' | '保存失败';
 
 const readerLayoutKey = 'paper-workbench.reader-layout.v1';
-const defaultReaderLayout: ReaderLayoutState = { outlineWidth: 184, chatWidth: 340, outlineVisible: true, chatVisible: true };
+const defaultReaderLayout: ReaderLayoutState = { outlineWidth: 240, chatWidth: 470, outlineVisible: true, chatVisible: true };
 
 function readReaderLayout(): ReaderLayoutState {
   try {
@@ -58,7 +59,7 @@ function saveReaderLayout(layout: ReaderLayoutState) {
   try { localStorage.setItem(readerLayoutKey, JSON.stringify(layout)); } catch { /* local preferences are optional */ }
 }
 
-export function Reader({ paperId, active }: { paperId: string; active: boolean }) {
+export function Reader({ paperId, active, libraryNavigation }: { paperId: string; active: boolean; libraryNavigation: ReactNode }) {
   const [paper, setPaper] = useState<Paper | null>(null);
   const [pages, setPages] = useState<Page[]>([]);
   const [segments, setSegments] = useState<Segment[]>([]);
@@ -95,6 +96,8 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
   const [readerLayoutElement, setReaderLayoutElement] = useState<HTMLDivElement | null>(null);
   const [readerLayoutWidth, setReaderLayoutWidth] = useState(0);
   const readerLayoutRef = useRef(readerLayout);
+  const resizeStartLayoutRef = useRef<ReaderLayoutState | null>(null);
+  const pendingReaderLayoutRef = useRef<ReaderLayoutState | null>(null);
   const activeRef = useRef(active);
   const activeEpochRef = useRef(0);
   const lastActivePropRef = useRef(active);
@@ -193,6 +196,19 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
     setReaderLayout(next);
   }
 
+  function previewReaderLayout(next: ReaderLayoutState) {
+    const outline = readerLayoutElement?.querySelector<HTMLElement>('.reader-outline');
+    const chat = readerLayoutElement?.querySelector<HTMLElement>('.chat-column');
+    if (outline) {
+      outline.style.width = `${next.outlineVisible ? next.outlineWidth : 0}px`;
+      outline.style.flexBasis = `${next.outlineVisible ? next.outlineWidth : 0}px`;
+    }
+    if (chat) {
+      chat.style.width = `${next.chatVisible ? next.chatWidth : 0}px`;
+      chat.style.flexBasis = `${next.chatVisible ? next.chatWidth : 0}px`;
+    }
+  }
+
   function commitReaderLayout() {
     saveReaderLayout(readerLayoutRef.current);
   }
@@ -206,6 +222,15 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
     resizeAnchorRef.current = { page, offset };
   }
 
+  function startReaderResize() {
+    if (anchorSettleTimerRef.current !== null) window.clearTimeout(anchorSettleTimerRef.current);
+    anchorSettleTimerRef.current = null;
+    resizingRef.current = false;
+    resizeAnchorRef.current = null;
+    captureReaderAnchor();
+    resizeStartLayoutRef.current = readerLayoutRef.current;
+  }
+
   function adjustReaderAnchor() {
     const anchor = resizeAnchorRef.current;
     if (!anchor || anchor.offset === null || !pdfScrollElement) return;
@@ -217,20 +242,43 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
 
   function restoreReaderAnchor(persist = true) {
     if (!active) return;
+    const pending = pendingReaderLayoutRef.current;
+    if (pending) {
+      const fitted = fitReaderLayout(pending, readerLayoutElement?.clientWidth || readerLayoutWidth);
+      previewReaderLayout(fitted);
+      applyReaderLayout(fitted);
+      pendingReaderLayoutRef.current = null;
+      resizeStartLayoutRef.current = null;
+    }
     if (readerLayoutElement) {
       const fitted = fitReaderLayout(readerLayoutRef.current, readerLayoutElement.clientWidth);
       if (fitted.outlineWidth !== readerLayoutRef.current.outlineWidth || fitted.chatWidth !== readerLayoutRef.current.chatWidth) applyReaderLayout(fitted);
     }
+    if (pdfScrollElement) setPdfScrollWidth(Math.max(0, pdfScrollElement.clientWidth - 40));
     if (persist) commitReaderLayout();
     window.requestAnimationFrame(adjustReaderAnchor);
     if (anchorSettleTimerRef.current !== null) window.clearTimeout(anchorSettleTimerRef.current);
     anchorSettleTimerRef.current = window.setTimeout(() => {
+      if (readerLayoutElement) {
+        const fitted = fitReaderLayout(readerLayoutRef.current, readerLayoutElement.clientWidth);
+        if (fitted.outlineWidth !== readerLayoutRef.current.outlineWidth || fitted.chatWidth !== readerLayoutRef.current.chatWidth) {
+          previewReaderLayout(fitted);
+          applyReaderLayout(fitted);
+          if (persist) commitReaderLayout();
+        }
+      }
+      if (pdfScrollElement) {
+        const nextWidth = Math.max(0, pdfScrollElement.clientWidth - 40);
+        setPdfScrollWidth((current) => current === nextWidth ? current : nextWidth);
+      }
       adjustReaderAnchor();
       resizingRef.current = false;
       resizeAnchorRef.current = null;
+      resizeStartLayoutRef.current = null;
+      pendingReaderLayoutRef.current = null;
       anchorSettleTimerRef.current = null;
       if (isAtPdfScrollEnd() && paper) updatePageFromScroll(paper.page_count);
-    }, 120);
+    }, 320);
   }
 
   function isAtPdfScrollEnd() {
@@ -241,7 +289,7 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
   }
 
   function resizeReaderPanel(panel: 'outline' | 'chat', width: number) {
-    const current = readerLayoutRef.current;
+    const current = resizeStartLayoutRef.current || readerLayoutRef.current;
     const separators = Number(current.outlineVisible) + Number(current.chatVisible);
     const sideBudget = Math.max(0, readerLayoutWidth - 320 - separators * 10);
     let outlineWidth = current.outlineWidth;
@@ -254,7 +302,8 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
       if (current.outlineVisible && outlineWidth + chatWidth > sideBudget) outlineWidth = Math.max(140, sideBudget - chatWidth);
     }
     const next = fitReaderLayout({ ...current, outlineWidth, chatWidth }, readerLayoutWidth);
-    applyReaderLayout(next);
+    pendingReaderLayoutRef.current = next;
+    previewReaderLayout(next);
   }
 
   function toggleReaderPanel(panel: 'outline' | 'chat') {
@@ -385,6 +434,9 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
     anchorSettleTimerRef.current = null;
     resizingRef.current = false;
     resizeAnchorRef.current = null;
+    resizeStartLayoutRef.current = null;
+    pendingReaderLayoutRef.current = null;
+    previewReaderLayout(readerLayoutRef.current);
   }, [active]);
 
   useEffect(() => {
@@ -435,7 +487,10 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
 
   useEffect(() => {
     if (!active || !pdfScrollElement) return;
-    const updateWidth = () => setPdfScrollWidth(Math.max(0, pdfScrollElement.clientWidth - 40));
+    const updateWidth = () => {
+      if (resizingRef.current) return;
+      setPdfScrollWidth(Math.max(0, pdfScrollElement.clientWidth - 40));
+    };
     const observer = new ResizeObserver(updateWidth);
     observer.observe(pdfScrollElement);
     updateWidth();
@@ -455,7 +510,8 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
   useEffect(() => {
     if (!active) return;
     const handleWindowResize = () => {
-      if (!resizingRef.current) captureReaderAnchor();
+      if (resizingRef.current) return;
+      captureReaderAnchor();
       if (anchorSettleTimerRef.current !== null) window.clearTimeout(anchorSettleTimerRef.current);
       anchorSettleTimerRef.current = window.setTimeout(() => restoreReaderAnchor(), 100);
     };
@@ -566,6 +622,7 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
   }, [active, pdfDocument, pdfKind, pageNumber]);
 
   useEffect(() => () => {
+    if (anchorSettleTimerRef.current !== null) window.clearTimeout(anchorSettleTimerRef.current);
     if (progressTimerRef.current !== null) window.clearTimeout(progressTimerRef.current);
   }, []);
 
@@ -726,21 +783,6 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
 
   return (
     <div className="reader-shell">
-      <header className="reader-topbar">
-        <div className="reader-title-wrap">
-          <div className="reader-title">{paper?.chinese_title || paper?.english_title || '正在加载文献…'}</div>
-        </div>
-        <div className="reader-top-actions">
-          {paper?.source_language === 'zh' ? <span className="reader-binding">中文原文 · 无需翻译</span> : <>
-          <button className={mode === 'bilingual' ? 'mode-button active' : 'mode-button'} onClick={() => setMode('bilingual')}>双语对照</button>
-          <button className={mode === 'mono' ? 'mode-button active' : 'mode-button'} onClick={() => setMode('mono')}>中文 PDF</button>
-          <button className={mode === 'original' ? 'mode-button active' : 'mode-button'} onClick={() => setMode('original')}>原文 PDF</button>
-          </>}
-          <button className="layout-toggle" type="button" aria-label="打开当前 PDF 文件位置" onClick={() => void window.workbench.revealPaperFile(paperId, pdfKind).catch((error) => setFailure(errorMessage(error)))}>文件位置</button>
-          <button className="layout-toggle" type="button" data-testid="toggle-outline" aria-label={readerLayout.outlineVisible ? '隐藏导航' : '显示导航'} aria-pressed={!readerLayout.outlineVisible} onClick={() => toggleReaderPanel('outline')}>{readerLayout.outlineVisible ? '隐藏导航' : '显示导航'}</button>
-          <button className="layout-toggle" type="button" data-testid="toggle-chat" aria-label={readerLayout.chatVisible ? '隐藏 AI 助手' : '显示 AI 助手'} aria-pressed={!readerLayout.chatVisible} onClick={() => toggleReaderPanel('chat')}>{readerLayout.chatVisible ? '隐藏 AI 助手' : '显示 AI 助手'}</button>
-        </div>
-      </header>
       {failure && <div className="reader-error" role="alert">{failure}</div>}
       {!paper?.can_read ? (
         <div className="reader-blocked"><span className="eyebrow">尚未开放阅读</span><h1>{paper ? '中文 PDF 仍在生成' : '正在准备阅读窗口'}</h1><p>{paper?.error || '中文 PDF 与双语 PDF 均生成并通过检查后，才会开放阅读。'}</p></div>
@@ -751,7 +793,9 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
             style={{ width: readerLayout.outlineVisible ? readerLayout.outlineWidth : 0, flexBasis: readerLayout.outlineVisible ? readerLayout.outlineWidth : 0 }}
             aria-hidden={!readerLayout.outlineVisible}
           >
-            <div className="outline-heading"><span className="eyebrow">导航</span><span>{paper.page_count} 页</span></div>
+            <div className="reader-library-navigation">{libraryNavigation}</div>
+            <div className="outline-heading"><span className="eyebrow">本篇目录</span><span>{paper.page_count} 页</span></div>
+            {mode !== 'mono' && <form className="pdf-search reader-outline-search" onSubmit={findText}><input aria-label={paper.source_language === 'zh' ? '搜索原文' : '搜索英文原文'} value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder={paper.source_language === 'zh' ? '搜索原文' : '搜索英文原文'} /><button className="secondary-button compact-button">查找</button></form>}
             <div className="page-index-list">
               {pages.map((page) => {
                 const first = segments.find((segment) => segment.start_page === page.page_no);
@@ -764,18 +808,26 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
           {readerLayout.outlineVisible && <LayoutSeparator
             testId="outline-resizer" label="调整导航宽度" value={readerLayout.outlineWidth} min={140}
             max={Math.max(140, readerLayoutWidth - 320 - 10 - Number(readerLayout.chatVisible) * 10 - (readerLayout.chatVisible ? 280 : 0))}
-            onStart={captureReaderAnchor} onResize={(width) => resizeReaderPanel('outline', width)} onEnd={restoreReaderAnchor}
+            onStart={startReaderResize} onResize={(width) => resizeReaderPanel('outline', width)} onEnd={restoreReaderAnchor}
           />}
           <main className="reading-column">
             <div className="reading-toolbar">
+              <button className="reader-toolbar-icon" type="button" data-testid="toggle-outline" aria-label={readerLayout.outlineVisible ? '隐藏导航' : '显示导航'} aria-pressed={!readerLayout.outlineVisible} onClick={() => toggleReaderPanel('outline')}>{readerLayout.outlineVisible ? '☰' : '›'}</button>
+              {paper.source_language === 'zh' ? <span className="reader-binding">中文原文</span> : <div className="reader-mode-switch" role="group" aria-label="PDF 阅读模式">
+                <button type="button" className={mode === 'original' ? 'mode-button active' : 'mode-button'} aria-label="原文 PDF" aria-pressed={mode === 'original'} onClick={() => setMode('original')}>原文</button>
+                <button type="button" className={mode === 'mono' ? 'mode-button active' : 'mode-button'} aria-label="中文 PDF" aria-pressed={mode === 'mono'} onClick={() => setMode('mono')}>中文</button>
+                <button type="button" className={mode === 'bilingual' ? 'mode-button active' : 'mode-button'} aria-label="双语对照" aria-pressed={mode === 'bilingual'} onClick={() => setMode('bilingual')}>双语</button>
+              </div>}
+              <span className="reading-toolbar-spacer" />
               <div className="page-stepper">
                 <button className="icon-button" aria-label="上一页" onClick={() => goToPage(pageNumber - 1)} disabled={pageNumber <= 1}>‹</button>
                 <input aria-label="当前页码" type="number" min={1} max={paper.page_count} value={pageNumber} onChange={(event) => goToPage(Number(event.target.value))} />
                 <span>/ {paper.page_count}</span>
                 <button className="icon-button" aria-label="下一页" onClick={() => goToPage(pageNumber + 1)} disabled={pageNumber >= paper.page_count}>›</button>
               </div>
-              {mode !== 'mono' && <form className="pdf-search" onSubmit={findText}><input aria-label={paper.source_language === 'zh' ? '搜索原文' : '搜索英文原文'} value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder={paper.source_language === 'zh' ? '搜索原文' : '搜索英文原文'} /><button className="secondary-button compact-button">查找</button></form>}
               <div className="zoom-controls"><button className="secondary-button compact-button" aria-label="缩小 PDF" onClick={() => setPdfScale((scale) => Math.max(0.5, Math.round((scale - 0.1) * 100) / 100))}>−</button><span>{Math.round(pdfScale * 100)}%</span><button className="secondary-button compact-button" aria-label="放大 PDF" onClick={() => setPdfScale((scale) => Math.min(2.5, Math.round((scale + 0.1) * 100) / 100))}>＋</button></div>
+              <button className="reader-toolbar-icon" type="button" aria-label="打开当前 PDF 文件位置" title="文件位置" onClick={() => void window.workbench.revealPaperFile(paperId, pdfKind).catch((error) => setFailure(errorMessage(error)))}>↗</button>
+              <button className="reader-toolbar-icon" type="button" data-testid="toggle-chat" aria-label={readerLayout.chatVisible ? '隐藏 AI 助手' : '显示 AI 助手'} aria-pressed={!readerLayout.chatVisible} onClick={() => toggleReaderPanel('chat')}>{readerLayout.chatVisible ? '◫' : '◧'}</button>
               {searchNotice && <span className="search-result">{searchNotice}</span>}
               {selectionNotice && <span className="selection-notice" role="status">{selectionNotice}</span>}
             </div>
@@ -808,15 +860,16 @@ export function Reader({ paperId, active }: { paperId: string; active: boolean }
           {readerLayout.chatVisible && <LayoutSeparator
             testId="chat-resizer" label="调整 AI 助手宽度" value={readerLayout.chatWidth} min={280} reverse
             max={Math.max(280, readerLayoutWidth - 320 - Number(readerLayout.outlineVisible) * 10 - (readerLayout.outlineVisible ? 140 : 0) - 10)}
-            onStart={captureReaderAnchor} onResize={(width) => resizeReaderPanel('chat', width)} onEnd={restoreReaderAnchor}
+            onStart={startReaderResize} onResize={(width) => resizeReaderPanel('chat', width)} onEnd={restoreReaderAnchor}
           />}
           <div
             className={`chat-column ${readerLayout.chatVisible ? '' : 'reader-column-hidden'}`}
             style={{ width: readerLayout.chatVisible ? readerLayout.chatWidth : 0, flexBasis: readerLayout.chatVisible ? readerLayout.chatWidth : 0 }}
             aria-hidden={!readerLayout.chatVisible}
           >
+            <div className="reader-assistant-heading"><h2>文献助手</h2></div>
             <div className="reader-side-tabs" role="tablist" aria-label="阅读侧栏">
-              <button id={`reader-side-tab-chat-${paperId}`} type="button" role="tab" data-testid="reader-side-tab-chat" aria-controls={`reader-side-panel-chat-${paperId}`} aria-selected={rightPanel === 'chat'} className={rightPanel === 'chat' ? 'active' : ''} onClick={() => setRightPanel('chat')}>AI 助手</button>
+              <button id={`reader-side-tab-chat-${paperId}`} type="button" role="tab" data-testid="reader-side-tab-chat" aria-label="问答（AI 助手）" aria-controls={`reader-side-panel-chat-${paperId}`} aria-selected={rightPanel === 'chat'} className={rightPanel === 'chat' ? 'active' : ''} onClick={() => setRightPanel('chat')}>问答</button>
               <button id={`reader-side-tab-notes-${paperId}`} type="button" role="tab" data-testid="reader-side-tab-notes" aria-controls={`reader-side-panel-notes-${paperId}`} aria-selected={rightPanel === 'notes'} className={rightPanel === 'notes' ? 'active' : ''} onClick={() => setRightPanel('notes')}>笔记</button>
             </div>
             <div id={`reader-side-panel-chat-${paperId}`} className="reader-side-content" role="tabpanel" aria-labelledby={`reader-side-tab-chat-${paperId}`} hidden={rightPanel !== 'chat'}>
@@ -912,13 +965,58 @@ function LayoutSeparator({
   onStart: () => void; onResize: (value: number) => void; onEnd: () => void;
 }) {
   const drag = useRef<{ x: number; value: number; pointerId: number } | null>(null);
+  const separator = useRef<HTMLDivElement>(null);
+  const pendingWidth = useRef<number | null>(null);
+  const resizeFrame = useRef<number | null>(null);
+  const finishRef = useRef<() => void>(() => undefined);
+
+  function applyResize(width: number) {
+    onResize(width);
+    separator.current?.setAttribute('aria-valuenow', String(Math.round(width)));
+  }
+
+  function flushResize() {
+    if (resizeFrame.current !== null) window.cancelAnimationFrame(resizeFrame.current);
+    resizeFrame.current = null;
+    const width = pendingWidth.current;
+    pendingWidth.current = null;
+    if (width !== null) applyResize(width);
+  }
+
+  function queueResize(width: number) {
+    pendingWidth.current = width;
+    if (resizeFrame.current !== null) return;
+    resizeFrame.current = window.requestAnimationFrame(() => {
+      resizeFrame.current = null;
+      const next = pendingWidth.current;
+      pendingWidth.current = null;
+      if (next !== null) applyResize(next);
+    });
+  }
+
+  useEffect(() => () => {
+    if (resizeFrame.current !== null) window.cancelAnimationFrame(resizeFrame.current);
+  }, []);
+
   function finish(event?: ReactPointerEvent<HTMLDivElement>) {
     if (!drag.current) return;
-    if (event?.currentTarget.hasPointerCapture(drag.current.pointerId)) event.currentTarget.releasePointerCapture(drag.current.pointerId);
+    flushResize();
+    const pointerId = drag.current.pointerId;
+    const target = event?.currentTarget || separator.current;
     drag.current = null;
+    if (target?.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
     onEnd();
   }
+
+  finishRef.current = () => finish();
+
+  useEffect(() => {
+    const finishOnBlur = () => finishRef.current();
+    window.addEventListener('blur', finishOnBlur);
+    return () => window.removeEventListener('blur', finishOnBlur);
+  }, []);
   return <div
+    ref={separator}
     className="reader-resizer"
     role="separator"
     aria-orientation="vertical"
@@ -938,7 +1036,7 @@ function LayoutSeparator({
     onPointerMove={(event) => {
       if (!drag.current) return;
       const direction = reverse ? -1 : 1;
-      onResize(bounded(drag.current.value + (event.clientX - drag.current.x) * direction, min, max));
+      queueResize(bounded(drag.current.value + (event.clientX - drag.current.x) * direction, min, max));
     }}
     onPointerUp={(event) => finish(event)}
     onPointerCancel={(event) => finish(event)}
@@ -947,11 +1045,11 @@ function LayoutSeparator({
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
       event.preventDefault();
       onStart();
-      if (event.key === 'Home') onResize(min);
-      else if (event.key === 'End') onResize(max);
+      if (event.key === 'Home') applyResize(min);
+      else if (event.key === 'End') applyResize(max);
       else {
         const delta = (event.key === 'ArrowRight' ? 1 : -1) * (reverse ? -1 : 1) * (event.shiftKey ? 40 : 12);
-        onResize(bounded(value + delta, min, max));
+        applyResize(bounded(value + delta, min, max));
       }
       onEnd();
     }}

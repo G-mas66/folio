@@ -1,0 +1,74 @@
+:root[data-eye-comfort="on"][data-theme="light"] {
+  color: #302e28;
+  background: #f0ebdf;
+  --ink: #302e28;
+  --muted: #716a5e;
+  --line: #e1d8c7;
+  --paper: #fffaf0;
+  --wash: #f1eadb;
+  --chrome: #f6f0e2;
+  --sidebar: #eee8db;
+  --surface-muted: #f0eadc;
+  --surface-selected: #e8dfcc;
+  --field: #fffdf7;
+  --ink-soft: #5a544a;
+  --ink-secondary: #6d675d;
+  --border-soft: #dad1c0;
+}
+
+:root[data-eye-comfort="on"][data-theme="dark"] {
+  color: #ece5d8;
+  background: #1f1d1a;
+  --ink: #ece5d8;
+  --muted: #b8ad9e;
+  --line: #48433b;
+  --paper: #24211e;
+  --accent: #93c8a9;
+  --accent-hover: #a5d5b9;
+  --wash: #302b25;
+  --danger: #edaa9d;
+  --chrome: #2b2722;
+  --sidebar: #26231f;
+  --surface-muted: #302c26;
+  --surface-selected: #34342d;
+  --field: #2c2823;
+  --ink-soft: #cec4b5;
+  --ink-secondary: #b7ad9e;
+  --border-soft: #49433a;
+}
+
+:root[data-eye-comfort="on"] body {
+  background: var(--sidebar);
+}
+
+.eye-comfort-toggle[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--surface-selected);
+  border-color: var(--border-soft);
+}
+
+.pdf-page-stage::after {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  background: rgb(228 191 119 / 28%);
+  mix-blend-mode: multiply;
+  opacity: 0;
+  pointer-events: none;
+  content: "";
+  transition: opacity 400ms cubic-bezier(.4, 0, .2, 1);
+}
+
+:root[data-eye-comfort="on"] .pdf-page-stage::after {
+  opacity: 1;
+}
+
+:root[data-eye-comfort="on"] .pdf-annotation-layer {
+  z-index: 3;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pdf-page-stage::after {
+    transition-duration: 0ms;
+  }
+}

@@ -11,7 +11,9 @@ const statusText: Record<string, string> = {
 };
 
 const readerTabsKey = 'paper-workbench.reader-tabs.v1';
+const recentPaperIdsKey = 'folio.recent-papers.v1';
 const themePreferenceKey = 'folio.theme.v1';
+const eyeComfortKey = 'folio.eye-comfort.v1';
 type ThemePreference = 'system' | 'light' | 'dark';
 
 function readThemePreference(): ThemePreference {
@@ -27,6 +29,10 @@ function resolveTheme(preference: ThemePreference): 'light' | 'dark' {
   return preference === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : preference === 'dark' ? 'dark' : 'light';
 }
 
+function readEyeComfort(): boolean {
+  try { return localStorage.getItem(eyeComfortKey) === 'on'; } catch { return false; }
+}
+
 function readReaderTabs(): { paperIds: string[]; active: string } {
   try {
     const saved = JSON.parse(localStorage.getItem(readerTabsKey) || 'null');
@@ -37,6 +43,15 @@ function readReaderTabs(): { paperIds: string[]; active: string } {
   }
 }
 
+function readRecentPaperIds(): string[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(recentPaperIdsKey) || 'null');
+    return Array.isArray(saved) ? saved.filter((id: unknown) => typeof id === 'string' && /^[a-f0-9]{32}$/.test(id)) : [];
+  } catch {
+    return [];
+  }
+}
+
 export function App() {
   return <Workbench />;
 }
@@ -44,13 +59,18 @@ export function App() {
 function Workbench() {
   const [themePreference, setThemePreference] = useState<ThemePreference>(readThemePreference);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => resolveTheme(readThemePreference()));
+  const [eyeComfort, setEyeComfort] = useState(readEyeComfort);
   const [activePanel, setActivePanel] = useState('library');
+  const librarySearchRef = useRef<HTMLInputElement>(null);
+  const focusLibrarySearchRef = useRef(false);
   const [readerTabs, setReaderTabs] = useState<string[]>([]);
   const readerTabsRef = useRef(readerTabs);
   readerTabsRef.current = readerTabs;
   const [readerPapers, setReaderPapers] = useState<Record<string, Paper>>({});
   const [tabsLoaded, setTabsLoaded] = useState(false);
+  const [recentPaperIds, setRecentPaperIds] = useState<string[]>(readRecentPaperIds);
   const [papers, setPapers] = useState<Paper[]>([]);
+  const [totalPaperCount, setTotalPaperCount] = useState<number | null>(null);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [folderFilter, setFolderFilter] = useState('all');
   const [search, setSearch] = useState('');
@@ -94,6 +114,20 @@ function Workbench() {
     media.addEventListener('change', apply);
     return () => media.removeEventListener('change', apply);
   }, [themePreference]);
+
+  useLayoutEffect(() => {
+    const value = eyeComfort ? 'on' : 'off';
+    document.documentElement.dataset.eyeComfort = value;
+    try { localStorage.setItem(eyeComfortKey, value); } catch { /* eye comfort preference is optional */ }
+  }, [eyeComfort]);
+
+  useLayoutEffect(() => {
+    if (activePanel !== 'library' || !focusLibrarySearchRef.current) return;
+    focusLibrarySearchRef.current = false;
+    const input = librarySearchRef.current;
+    input?.focus();
+    input?.setSelectionRange(input.value.length, input.value.length);
+  }, [activePanel]);
 
   useEffect(() => {
     try { localStorage.setItem(themePreferenceKey, themePreference); } catch { /* theme preference is optional */ }
@@ -160,15 +194,23 @@ function Workbench() {
     try { localStorage.setItem(readerTabsKey, JSON.stringify({ paperIds: readerTabs, active: activePanel })); } catch { /* local preferences are optional */ }
   }, [tabsLoaded, readerTabs, activePanel]);
 
+  useEffect(() => {
+    try { localStorage.setItem(recentPaperIdsKey, JSON.stringify(recentPaperIds)); } catch { /* local preferences are optional */ }
+  }, [recentPaperIds]);
+
   const refresh = useCallback(async () => {
     try {
-      const query = new URLSearchParams({ folder_id: folderFilter });
+      const query = new URLSearchParams({ folder_id: folderFilter === 'recent' ? 'all' : folderFilter });
       if (search) query.set('q', search);
       const [nextPapers, nextFolders] = await Promise.all([
         api<Paper[]>(`/papers?${query.toString()}`),
         api<Folder[]>('/folders'),
       ]);
-      setPapers(nextPapers);
+      const visiblePapers = folderFilter === 'recent'
+        ? nextPapers.filter((paper) => recentPaperIds.includes(paper.id)).sort((a, b) => recentPaperIds.indexOf(a.id) - recentPaperIds.indexOf(b.id))
+        : nextPapers;
+      setPapers(visiblePapers);
+      if (folderFilter === 'all' && !search) setTotalPaperCount(nextPapers.length);
       setFolders(nextFolders);
       setReaderPapers((current) => {
         const next = { ...current };
@@ -178,7 +220,7 @@ function Workbench() {
     } catch (e) {
       setError(errorMessage(e));
     }
-  }, [folderFilter, search]);
+  }, [folderFilter, recentPaperIds, search]);
 
   useEffect(() => {
     void refresh();
@@ -192,10 +234,11 @@ function Workbench() {
     setNotice('正在导入并检查 PDF…');
     setError('');
     try {
-      const folder_id = folderFilter !== 'all' && folderFilter !== 'unfiled' ? folderFilter : null;
+      const folder_id = folderFilter !== 'all' && folderFilter !== 'unfiled' && folderFilter !== 'recent' ? folderFilter : null;
       const result = await api<{ results: { duplicate: boolean; paper: Paper }[] }>('/papers/import', 'POST', { paths, folder_id });
       const added = result.results.filter((item) => !item.duplicate).length;
       const duplicates = result.results.length - added;
+      setTotalPaperCount((current) => current === null ? null : current + added);
       setNotice(`导入完成：新增 ${added} 篇${duplicates ? `，${duplicates} 篇内容相同的文献已合并` : ''}。`);
       await refresh();
     } catch (e) {
@@ -248,6 +291,7 @@ function Workbench() {
 
   function openReader(paper: Paper) {
     if (!paper.can_read) return;
+    setRecentPaperIds((current) => [paper.id, ...current.filter((id) => id !== paper.id)]);
     setReaderPapers((current) => ({ ...current, [paper.id]: paper }));
     if (!readerTabsRef.current.includes(paper.id)) {
       const nextTabs = [...readerTabsRef.current, paper.id];
@@ -283,6 +327,8 @@ function Workbench() {
     setError('');
     try {
       await api(`/papers/${paper.id}`, 'DELETE');
+      setTotalPaperCount((current) => current === null ? null : Math.max(0, current - 1));
+      setRecentPaperIds((current) => current.filter((id) => id !== paper.id));
       if (readerTabs.includes(paper.id)) await closeReaderTab(paper.id);
       try { localStorage.removeItem(`paper-workbench.note-draft.${paper.id}`); } catch { /* the paper is already deleted */ }
       setNotice('已从工作台删除该文献，原始导入文件未更改。');
@@ -358,6 +404,34 @@ function Workbench() {
     void action.catch((updateError) => setError(errorMessage(updateError)));
   }
 
+  const unfiledCount = totalPaperCount === null ? null : Math.max(0, totalPaperCount - folders.reduce((sum, folder) => sum + folder.paper_count, 0));
+  function updateLibrarySearch(value: string) {
+    setSearch(value);
+    if (activePanel !== 'library') {
+      focusLibrarySearchRef.current = true;
+      setActivePanel('library');
+    }
+  }
+  const libraryNavigation = <LibraryNavigation
+    folderFilter={folderFilter}
+    folders={folders}
+    search={search}
+    unfiledCount={unfiledCount}
+    onSearch={updateLibrarySearch}
+    onSelectFilter={(value) => { setFolderFilter(value); setActivePanel('library'); }}
+    onCreateFolder={() => { setActivePanel('library'); beginFolderDialog('create'); }}
+  />;
+  const readerLibraryNavigation = <LibraryNavigation
+    folderFilter={folderFilter}
+    folders={folders}
+    search={search}
+    unfiledCount={unfiledCount}
+    onSearch={updateLibrarySearch}
+    onSelectFilter={(value) => { setFolderFilter(value); setActivePanel('library'); }}
+    onCreateFolder={() => { setActivePanel('library'); beginFolderDialog('create'); }}
+    testIdPrefix="reader-"
+  />;
+
   return (
     <div className="app-shell" onDragEnter={(event) => {
       if (activePanel !== 'library' || !event.dataTransfer.types.includes('Files')) return;
@@ -379,10 +453,12 @@ function Workbench() {
       } catch (error) { setError(errorMessage(error)); }
     }}>
       <header className="topbar">
-        <div className="brand-mark" aria-hidden="true"><img src="./folio-mark.svg" alt="" /></div>
-        <div className="brand-wordmark">Folio</div>
+        <div className="topbar-brand">
+          <div className="brand-mark" aria-hidden="true"><img src="./folio-mark.svg" alt="" /></div>
+          <div className="brand-wordmark">Folio</div>
+        </div>
         <nav className="app-tab-strip" role="tablist" aria-label="工作台标签">
-          <button className={`app-tab library-tab ${activePanel === 'library' ? 'selected' : ''}`} type="button" role="tab" aria-selected={activePanel === 'library'} aria-controls="library-tab-panel" data-testid="library-tab" onClick={() => setActivePanel('library')}>文献库</button>
+          <button className={`app-tab library-tab ${activePanel === 'library' ? 'selected' : ''}`} type="button" role="tab" aria-selected={activePanel === 'library'} aria-controls="library-tab-panel" data-testid="library-tab" onClick={() => setActivePanel('library')}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 5.5c3.4-1.1 6.1-.7 8.5 1.1v13c-2.4-1.8-5.1-2.2-8.5-1.1v-13Zm17 0c-3.4-1.1-6.1-.7-8.5 1.1v13c2.4-1.8 5.1-2.2 8.5-1.1v-13Z" /></svg><span>文献库</span></button>
           {readerTabs.map((paperId) => {
             const paper = readerPapers[paperId];
             if (!paper) return null;
@@ -393,8 +469,12 @@ function Workbench() {
             </div>;
           })}
         </nav>
+        <button className="topbar-new-tab" type="button" aria-label="新建标签页" title="打开文献库标签" onClick={() => setActivePanel('library')}>+</button>
         <button className="topbar-icon-button theme-toggle" type="button" data-testid="theme-toggle" aria-label={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'} title={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'} onClick={() => setThemePreference(theme === 'dark' ? 'light' : 'dark')}>
           <svg aria-hidden="true" viewBox="0 0 24 24">{theme === 'dark' ? <path d="M20.4 15.7A8.6 8.6 0 0 1 8.3 3.6 8.7 8.7 0 1 0 20.4 15.7Z" /> : <><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42" /></>}</svg>
+        </button>
+        <button className="topbar-icon-button eye-comfort-toggle" type="button" data-testid="eye-comfort-toggle" aria-pressed={eyeComfort} aria-label={eyeComfort ? '关闭护眼模式' : '开启护眼模式'} title={eyeComfort ? '关闭护眼模式' : '开启护眼模式'} onClick={() => setEyeComfort((value) => !value)}>
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M2.5 12s3.2-6 9.5-6 9.5 6 9.5 6-3.2 6-9.5 6-9.5-6-9.5-6Z" /><circle cx="12" cy="12" r="3" /></svg>
         </button>
         <button className={`topbar-icon-button settings-tab ${activePanel === 'settings' ? 'selected' : ''}`} type="button" data-testid="settings-tab" aria-label="设置" title="设置" onClick={() => setActivePanel('settings')}>
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9.7 3.8.5-1.3h3.6l.5 1.3a8.7 8.7 0 0 1 1.7 1l1.3-.4 1.8 3.1-1 1a8.3 8.3 0 0 1 0 2l1 1-1.8 3.1-1.3-.4a8.7 8.7 0 0 1-1.7 1l-.5 1.3h-3.6l-.5-1.3a8.7 8.7 0 0 1-1.7-1l-1.3.4-1.8-3.1 1-1a8.3 8.3 0 0 1 0-2l-1-1 1.8-3.1 1.3.4a8.7 8.7 0 0 1 1.7-1Z" transform="translate(0 2)" /><circle cx="12" cy="12" r="3" /></svg>
@@ -412,16 +492,11 @@ function Workbench() {
         <section className="app-panel library-app-panel" id="library-tab-panel" role="tabpanel" hidden={activePanel !== 'library'}>
         <div className="library-workspace">
           <aside className="library-sidebar" data-testid="library-sidebar" aria-label="文献分类">
-            <div className="sidebar-section-label">分类</div>
-            <div className="folder-nav" aria-label="文件夹分类">
-              <button className={folderFilter === 'all' ? 'folder-nav-button selected' : 'folder-nav-button'} data-testid="folder-nav-all" onClick={() => setFolderFilter('all')}>全部文献</button>
-              <button className={folderFilter === 'unfiled' ? 'folder-nav-button selected' : 'folder-nav-button'} data-testid="folder-nav-unfiled" onClick={() => setFolderFilter('unfiled')}>未分类</button>
-              {folders.map((folder) => <button key={folder.id} aria-label={folder.name} className={folderFilter === folder.id ? 'folder-nav-button selected' : 'folder-nav-button'} data-testid={`folder-nav-${folder.id}`} onClick={() => setFolderFilter(folder.id)}><span className="folder-color-mark" data-testid={`folder-color-${folder.id}`} style={{ backgroundColor: folder.color }} aria-hidden="true" />{folder.name}</button>)}
-            </div>
+            {libraryNavigation}
             <div className="folder-actions">
-              <button className="text-button" aria-label="新建文件夹" onClick={() => beginFolderDialog('create')}>＋ 新建文件夹</button>
-              <button className="text-button" type="button" onClick={() => void openLibraryFolder()}>打开文献目录</button>
-              {folderFilter !== 'all' && folderFilter !== 'unfiled' && <>
+              <button className="text-button" aria-label="新建文件夹" onClick={() => beginFolderDialog('create')}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 6.5h7l2 2h8v11h-17v-13Zm8.5 5v6m-3-3h6" /></svg><span>新建文件夹</span></button>
+              <button className="text-button" type="button" onClick={() => void openLibraryFolder()}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 7h6l2 2h9v11h-17v-13Z" /></svg><span>打开文献目录</span></button>
+              {folderFilter !== 'all' && folderFilter !== 'unfiled' && folderFilter !== 'recent' && <>
                 <button className="text-button" aria-label="重命名文件夹" onClick={() => beginFolderDialog('rename')}>重命名</button>
                 <button className="text-button delete-paper-button" aria-label="删除文件夹" onClick={() => void deleteFolder()}>删除文件夹</button>
               </>}
@@ -430,30 +505,30 @@ function Workbench() {
           <main className="library-page">
           <div className="page-heading">
             <div>
-              <div className="eyebrow">本机文献与处理进度</div>
               <h1>文献库</h1>
-              <p>PDF 原文与译文</p>
+              <p><span className="paper-count">{papers.length} 篇文献</span><span aria-hidden="true"> · </span>PDF 原文与译文</p>
             </div>
             <button className="primary-button import-button" onClick={chooseFiles} disabled={busy}>＋ 导入 PDF</button>
           </div>
           <div className="library-toolbar">
-            <div className="search-wrap"><span aria-hidden="true">⌕</span><input aria-label="搜索文献" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索标题或原文件名" /></div>
-            <span className="paper-count">{papers.length} 篇文献</span>
+            <div className="search-wrap library-main-search"><SearchIcon /><input ref={librarySearchRef} aria-label="搜索文献" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索标题或原文件名" /></div>
           </div>
           {notice && <div className="notice success-notice" role="status">{notice}</div>}
           {error && <div className="notice error-notice" role="alert">{error}</div>}
           {papers.length === 0 ? (
-            <div className={dragging ? 'empty-state dragging' : 'empty-state'}>
-              <div className="empty-icon" aria-hidden="true">PDF</div>
-              <h2>{search ? '没有找到匹配的文献' : papers.length === 0 && folderFilter !== 'all' ? '此文件夹还没有文献' : '把论文放进你的工作台'}</h2>
-              <p>{search ? '试试更短的标题关键词。' : '选择一个或多个 PDF，也可以把文件拖到这里。'}</p>
+              <div className={dragging ? 'empty-state dragging' : 'empty-state'}>
+                <div className="empty-icon" aria-hidden="true">PDF</div>
+              <h2>{search ? '没有找到匹配的文献' : folderFilter === 'recent' ? '还没有最近阅读的文献' : folderFilter !== 'all' ? '此文件夹还没有文献' : '把论文放进你的工作台'}</h2>
+              <p>{search ? '试试更短的标题关键词。' : folderFilter === 'recent' ? '打开一篇可阅读的文献后，它会显示在这里。' : '选择一个或多个 PDF，也可以把文件拖到这里。'}</p>
               {!search && folderFilter === 'all' && <button className="secondary-button" onClick={chooseFiles} disabled={busy}>选择 PDF 文件</button>}
             </div>
           ) : (
-            <section className={dragging ? 'paper-list dragging' : 'paper-list'} aria-label="文献列表">
+            <section className={dragging ? 'paper-list dragging' : 'paper-list'} role="table" aria-label="文献列表">
+              <div className="paper-list-header" role="row"><span role="columnheader">文献</span><span role="columnheader">分类</span><span role="columnheader">状态</span><span role="columnheader">操作</span></div>
               {papers.map((paper) => <PaperCard key={paper.id} paper={paper} folders={folders} onOpen={() => openReader(paper)} onAction={(action) => void paperAction(paper, action)} onEdit={() => setEditing(paper)} onDelete={() => void deletePaper(paper)} onReveal={() => void revealFile(paper)} onMove={(folderId) => void movePaper(paper, folderId)} />)}
             </section>
           )}
+          <div className="library-footer"><div><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M4 14v5h16v-5" /></svg><span>拖入 PDF 即可导入</span></div><div><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v11H3V7Z" /></svg><span>所有数据保存在本机</span></div></div>
           {dragging && <div className="drop-overlay" aria-hidden="true"><div>松开即可导入 PDF</div></div>}
           {editing && <TitleDialog paper={editing} onClose={() => setEditing(null)} onSave={(english, chinese) => void saveTitle(editing, english, chinese)} />}
           {folderDialog && <FolderDialog mode={folderDialog} value={folderName} onChange={setFolderName} onClose={() => setFolderDialog(null)} onSave={() => void saveFolder()} />}
@@ -461,10 +536,36 @@ function Workbench() {
         </div>
         </section>
         {tabsLoaded && readerTabs.map((paperId) => <section key={paperId} role="tabpanel" id={`reader-tab-panel-${paperId}`} className="app-panel reader-tab-panel" data-testid={`reader-tab-panel-${paperId}`} data-paper-id={paperId} hidden={activePanel !== paperId}>
-          {readerPapers[paperId] && <Reader paperId={paperId} active={activePanel === paperId} />}
+          {readerPapers[paperId] && <Reader paperId={paperId} active={activePanel === paperId} libraryNavigation={readerLibraryNavigation} />}
         </section>)}
       </div>
       {busy && <div className="busy-indicator" role="status">正在处理</div>}
+    </div>
+  );
+}
+
+function LibraryNavigation({ folderFilter, folders, search, unfiledCount, onSearch, onSelectFilter, onCreateFolder, testIdPrefix = '' }: {
+  folderFilter: string;
+  folders: Folder[];
+  search: string;
+  unfiledCount: number | null;
+  onSearch: (value: string) => void;
+  onSelectFilter: (value: string) => void;
+  onCreateFolder: () => void;
+  testIdPrefix?: string;
+}) {
+  return (
+    <div className="library-navigation">
+      <div className="search-wrap library-sidebar-search"><SearchIcon /><input aria-label="侧栏搜索文献" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="搜索文献" /></div>
+      <nav className="library-primary-nav" aria-label="文献导航">
+        <button className={folderFilter === 'all' ? 'folder-nav-button selected' : 'folder-nav-button'} data-testid={`${testIdPrefix}folder-nav-all`} onClick={() => onSelectFilter('all')}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6.5 3.5h8l4 4v13h-12v-17Zm8 0v4h4m-8 4h4m-4 4h5" /></svg><span>全部文献</span></button>
+        <button className={folderFilter === 'recent' ? 'folder-nav-button selected' : 'folder-nav-button'} data-testid={`${testIdPrefix}folder-nav-recent`} onClick={() => onSelectFilter('recent')}><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg><span>最近阅读</span></button>
+      </nav>
+      <div className="library-category-heading"><div className="sidebar-section-label">分类</div><button className="sidebar-add-folder" type="button" aria-label="新增分类" title="新建文件夹" onClick={onCreateFolder}>+</button></div>
+      <nav className="folder-nav" aria-label="文件夹分类">
+        <button className={folderFilter === 'unfiled' ? 'folder-nav-button selected' : 'folder-nav-button'} data-testid={`${testIdPrefix}folder-nav-unfiled`} onClick={() => onSelectFilter('unfiled')}><span className="folder-color-mark" aria-hidden="true" /><span className="folder-nav-name">未分类</span>{unfiledCount !== null && <span className="folder-nav-count">{unfiledCount}</span>}</button>
+        {folders.map((folder) => <button key={folder.id} aria-label={folder.name} className={folderFilter === folder.id ? 'folder-nav-button selected' : 'folder-nav-button'} data-testid={`${testIdPrefix}folder-nav-${folder.id}`} onClick={() => onSelectFilter(folder.id)}><span className="folder-color-mark" data-testid={`${testIdPrefix}folder-color-${folder.id}`} style={{ backgroundColor: folder.color }} aria-hidden="true" /><span className="folder-nav-name">{folder.name}</span><span className="folder-nav-count">{folder.paper_count}</span></button>)}
+      </nav>
     </div>
   );
 }
@@ -479,27 +580,31 @@ function PaperCard({ paper, folders, onOpen, onAction, onEdit, onDelete, onRevea
   const title = paper.chinese_title || paper.english_title || paper.source_name;
   const folder = folders.find((item) => item.id === paper.folder_id);
   return (
-    <article className="paper-card">
-      <PaperThumbnail paper={paper} />
-      <div className="paper-main">
-        <div className="paper-title-row"><h2 title={title}>{title}</h2><span className={`status-pill status-${paper.status}`}>{statusText[paper.status] || paper.status}</span></div>
-        {paper.english_title && paper.chinese_title && paper.english_title !== paper.chinese_title && <div className="paper-subtitle">{paper.english_title}</div>}
-        <div className="paper-meta">
-          <span>{paper.page_count} 页</span>
-          <span className="paper-folder-label"><i style={{ backgroundColor: folder?.color || '#8a928d' }} aria-hidden="true" />{folder?.name || '未分类'}</span>
-          <span title={paper.source_name}>{paper.source_name}</span>
-          <span>{new Date(paper.created_at).toLocaleDateString('zh-CN')}</span>
+    <article className="paper-card" role="row">
+      <div className="paper-document-column" role="cell">
+        <PaperThumbnail paper={paper} />
+        <div className="paper-main">
+          <div className="paper-title-row"><h2 title={title}>{title}</h2></div>
+          {paper.english_title && paper.chinese_title && paper.english_title !== paper.chinese_title && <div className="paper-subtitle">{paper.english_title}</div>}
+          <div className="paper-meta"><span>{paper.page_count} 页</span><span title={paper.source_name}>{paper.source_name}</span></div>
+        </div>
+      </div>
+      <div className="paper-category-cell" role="cell"><span className="paper-category-dot" style={{ backgroundColor: folder?.color || '#8a928d' }} aria-hidden="true" /><span>{folder?.name || '未分类'}</span></div>
+      <div className="paper-status-cell" role="cell">
+        <div className={`paper-status status-${paper.status}`}>
+          {paper.can_read && <svg className="paper-status-check" aria-hidden="true" viewBox="0 0 20 20"><path d="m4.5 10 3.2 3.2 7.8-7.1" /></svg>}
+          <span>{statusText[paper.status] || paper.status}</span>
         </div>
         {paper.status === 'translating' || paper.status === 'queued' || paper.status === 'checking' ? (
-          <div className="progress-row"><div className="progress-track"><div className="progress-value" style={{ width: `${progress}%` }} /></div><span>{progress}%</span></div>
+          <div className="paper-progress"><div className="progress-track"><div className="progress-value" style={{ width: `${progress}%` }} /></div><span>{progress}%</span></div>
         ) : null}
         {paper.error && <p className="paper-error">{paper.error}</p>}
         {paper.diagnostics.length > 0 && <ul className="diagnostics">{paper.diagnostics.map((item) => <li key={item.page}>第 {item.page} 页：{item.status === 'needs_ocr' ? '有图片但没有可提取文字，需 OCR' : '检测到页面内容，但没有提取到正文文字'}</li>)}</ul>}
       </div>
-      <div className="paper-actions">
-        {paper.can_read && <button className="primary-button compact-button" data-testid={`paper-read-${paper.id}`} onClick={onOpen}>阅读</button>}
+      <div className="paper-actions" role="cell">
+        {paper.can_read && <button className="paper-read-button" data-testid={`paper-read-${paper.id}`} onClick={onOpen}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M14 4h6v6m-9 5 9-9M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6" /></svg><span>阅读</span></button>}
         <details className="paper-more-actions">
-          <summary>更多</summary>
+          <summary aria-label="更多"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.4" /><circle cx="12" cy="12" r="1.4" /><circle cx="12" cy="19" r="1.4" /></svg><span className="visually-hidden">更多</span></summary>
           <div className="paper-more-menu">
             <label>分类<select aria-label="移动文献到文件夹" data-testid={`paper-folder-${paper.id}`} value={paper.folder_id || ''} onChange={(event) => onMove(event.target.value || null)}>
               <option value="">未分类</option>
@@ -564,8 +669,6 @@ function PaperThumbnail({ paper }: { paper: Paper }) {
         if (!context) throw new Error('无法绘制 PDF 首页。');
         canvas.width = Math.ceil(viewport.width * outputScale);
         canvas.height = Math.ceil(viewport.height * outputScale);
-        canvas.style.width = `${viewport.width}px`;
-        canvas.style.height = `${viewport.height}px`;
         renderTask = page.render({ canvas, canvasContext: context, viewport, transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0] });
         await renderTask.promise;
         if (!cancelled) setState('ready');
@@ -592,6 +695,10 @@ function PaperThumbnail({ paper }: { paper: Paper }) {
 
 function titleFor(paper: Paper) {
   return paper.chinese_title || paper.english_title || paper.source_name;
+}
+
+function SearchIcon() {
+  return <svg className="search-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="7.3" /><path d="m16.2 16.2 4.3 4.3" /></svg>;
 }
 
 function FolderDialog({ mode, value, onChange, onClose, onSave }: {

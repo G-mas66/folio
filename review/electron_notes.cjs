@@ -151,7 +151,7 @@ const until = async (check, message) => {
     await current().getByTestId(`annotation-rect-${highlight.id}-0`).waitFor({ state: 'detached' });
     await row().getByRole('button', { name: '跳到此处', exact: true }).click();
     await current().getByTestId(`annotation-rect-${highlight.id}-0`).waitFor();
-    assert.equal(await current().locator('.mode-button.active').textContent(), '原文 PDF');
+    assert.equal(await current().locator('.mode-button.active').getAttribute('aria-label'), '原文 PDF');
     aligned(await rect(highlight.id), highlight.rects[0]);
     // Virtualization destroys distant text layers, but saved marks return correctly.
     await current().getByLabel('当前页码').fill('12');
