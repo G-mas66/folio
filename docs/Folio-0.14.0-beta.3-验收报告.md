@@ -39,3 +39,5 @@ macOS Apple Silicon 与 Intel 均完成原生构建、125 项后端检查、13 �
 [beta.3 发布页](https://github.com/G-mas66/folio/releases/tag/v0.14.0-beta.3) 已公开，三平台包、Windows beta 元数据、blockmap、验收报告与 SHA256SUMS.txt 已上传。Windows 本地 SHA-256 与 GitHub 上传摘要一致；两份 Mac smoke 报告已下载并校验摘要、版本、架构、免费翻译结果及临时 Key 清理记录。
 
 使用独立数据目录启动真实生产程序：beta.2 从公开 GitHub 检测到 beta.3，beta.3 报告已是最新版本。首次公共连接检查因网络错误失败，重试后通过。此项未启动新版整包下载或安装，不应表述为 beta.2 → beta.3 完整安装验收。
+
+匿名读取的 beta.yml 与本地构建元数据逐字节一致；三个公开下载入口返回正确的 EXE/ZIP 格式，GitHub 附件摘要与完整校验清单匹配。公开版本标签指向安装包源码提交，远端 README 与已提交文档一致。本轮没有重复下载整个 beta.3 包或安装到用户环境。
