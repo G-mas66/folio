@@ -46,3 +46,9 @@ Mac 文件校验值来自 GitHub 对 CI 上传附件计算的 SHA-256；本地�
 | Folio-0.14.0-beta.2-Windows-x64-Setup.exe | 504586177 | cec060584f59b34e33d6d3805dc2eea2a32ebc23b008b7d2751a002d4f85a2a6 |
 | Folio-0.14.0-beta.2-macOS-arm64.zip | 696138781 | 5384bfdbabb598bb88879ad462a024e51a0f3a7dcf4cff065c48d30a27712af7 |
 | Folio-0.14.0-beta.2-macOS-x64.zip | 708117952 | f749f802f4d8d9744cd8f5d9fe8c8ccd0141abcca26aa371cfc4dc904b5b415f |
+
+## 发布后公共链路
+
+已公开 beta.2 预发布。匿名读取的 `beta.yml` 与本地构建元数据逐字节一致；三个平台的下载入口返回正确 EXE/ZIP 格式，附件大小与校验清单匹配，公开源码标签指向本次包代码。README 与远端已提交版本一致。
+
+使用 D 盘独立数据与凭据身份启动实际生产程序：beta.1 客户端从公开 GitHub 检测到 beta.2；beta.2 客户端报告当前已是最新版本。测试未调用下载或安装。这是本次公共检测与附件核对结果，完整安装及整包下载仍以 beta.1 的历史验收为依据。
