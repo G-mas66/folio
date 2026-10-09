@@ -2,6 +2,8 @@
 
 验收日期：2026-10-09（北京时间）。
 
+安装包源码提交：`f6cf325cceec34a97e6f569f13ead308f6193c6d`。后续提交只补充发布与验收文档。
+
 ## 本次改动
 
 - 文献库与阅读页按用户参考图调整分类、列表、工具栏和会话布局，保留原书本波浪图标与 Lora 500 字标。
@@ -30,4 +32,10 @@
 
 本次完整下载与安装升级验收不应与历史 beta.0 → beta.1 结果混为一谈。历史升级及数据保留检查见 beta.1、beta.2 验收记录。本轮所有 GUI 数据、模拟凭据及构建产物在 D 盘隔离目录，未更改真实文献库、凭据或现有安装。
 
-macOS Apple Silicon 已完成原生构建、125 项后端检查、13 项存储检查、应用 smoke 和实际免费翻译验收。Intel Mac 的首轮构建与核心应用检查成功，但免费翻译收到 HTTPStatusError 后失败；当前正重试，该架构的新包通过前仍提供 beta.2。Windows 与 Apple Silicon 可先独立发布，Intel 客户端跳过缺少对应架构附件的新版本。macOS 仍为 ad-hoc 签名，没有 Developer ID 签名或公证。
+macOS Apple Silicon 与 Intel 均完成原生构建、125 项后端检查、13 项存储检查、应用 smoke 和实际免费翻译验收，生成并检查两个翻译 PDF，临时 API Key 已清理。Intel 首轮免费翻译收到 HTTPStatusError 后失败；重试成功，未修改生产代码或放宽验收条件。[CI 37895554707](https://github.com/G-mas66/folio/actions/runs/37895554707) 的最终 arm64 job 为 `113712895681`，x64 为 `113712893866`。macOS 仍为 ad-hoc 签名，没有 Developer ID 签名或公证。
+
+## 公开更新检测
+
+[beta.3 发布页](https://github.com/G-mas66/folio/releases/tag/v0.14.0-beta.3) 已公开，三平台包、Windows beta 元数据、blockmap、验收报告与 SHA256SUMS.txt 已上传。Windows 本地 SHA-256 与 GitHub 上传摘要一致；两份 Mac smoke 报告已下载并校验摘要、版本、架构、免费翻译结果及临时 Key 清理记录。
+
+使用独立数据目录启动真实生产程序：beta.2 从公开 GitHub 检测到 beta.3，beta.3 报告已是最新版本。首次公共连接检查因网络错误失败，重试后通过。此项未启动新版整包下载或安装，不应表述为 beta.2 → beta.3 完整安装验收。
