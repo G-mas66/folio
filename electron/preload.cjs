@@ -31,7 +31,7 @@ contextBridge.exposeInMainWorld('workbench', Object.freeze({
   cancelPaperStreams: (paperId) => ipcRenderer.invoke('workbench:cancel-paper-streams', paperId),
   startChatStream,
   openExternal: (url) => ipcRenderer.invoke('workbench:open-external', url),
-  openFeedback: () => ipcRenderer.invoke('workbench:open-feedback'),
+  submitFeedback: (input) => ipcRenderer.invoke('workbench:submit-feedback', input),
   uninstallApp: () => ipcRenderer.invoke('workbench:uninstall-app'),
   getAppInfo: () => ipcRenderer.invoke('workbench:get-app-info'),
   getUpdateState: () => ipcRenderer.invoke('workbench:get-update-state'),

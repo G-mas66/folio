@@ -3,7 +3,11 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const FEEDBACK_URL = 'mailto:1791913726@qq.com';
+const FEEDBACK_URL = 'https://formsubmit.co/ajax/1791913726@qq.com';
+const FEEDBACK_SOURCE_URL = 'https://github.com/G-mas66/folio';
+const FEEDBACK_TIMEOUT_MS = 12_000;
+const FEEDBACK_MESSAGE_LIMIT = 5000;
+const FEEDBACK_CONTACT_LIMIT = 200;
 const UNINSTALLER_NAME = 'Uninstall 阅川 Folio.exe';
 
 function appPlatform(platform) {
@@ -63,8 +67,45 @@ function appInfoFields(options = {}) {
   };
 }
 
-async function openFeedback(shell) {
-  await shell.openExternal(FEEDBACK_URL);
+function normalizeFeedbackInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('反馈内容无效。');
+  const message = typeof input.message === 'string' ? input.message.trim() : '';
+  const contact = input.contact === undefined ? '' : typeof input.contact === 'string' ? input.contact.trim() : null;
+  if (!message) throw new Error('请填写反馈内容。');
+  if (message.length > FEEDBACK_MESSAGE_LIMIT) throw new Error('反馈内容不能超过 5000 个字符。');
+  if (contact === null || contact.length > FEEDBACK_CONTACT_LIMIT) throw new Error('联系方式不能超过 200 个字符。');
+  return { message, contact };
+}
+
+async function submitFeedback(input, { version, fetchImpl = globalThis.fetch, timeoutMs = FEEDBACK_TIMEOUT_MS } = {}) {
+  const { message, contact } = normalizeFeedbackInput(input);
+  if (typeof version !== 'string' || !version) throw new Error('应用版本无效。');
+  if (typeof fetchImpl !== 'function') throw new Error('反馈服务暂时不可用，请稍后重试。');
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const body = { message, app_version: version, _url: FEEDBACK_SOURCE_URL };
+    if (contact) body.contact = contact;
+    const response = await fetchImpl(FEEDBACK_URL, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', Referer: FEEDBACK_SOURCE_URL },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error('反馈提交失败，请检查网络后重试。');
+    const result = await response.json();
+    const providerMessage = typeof result?.message === 'string' ? result.message : '';
+    const requiresActivation = /this form needs activation|activate (?:your|the) form/i.test(providerMessage);
+    if (requiresActivation && [false, 'false'].includes(result?.success)) return { requiresActivation: true };
+    if (![true, 'true'].includes(result?.success)) throw new Error('反馈提交失败，请检查网络后重试。');
+    return { requiresActivation };
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('反馈提交失败，')) throw error;
+    throw new Error('反馈提交失败，请检查网络后重试。');
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function requestUninstall({ owner, dialog, shell, getOptions, ...options }) {
@@ -88,4 +129,4 @@ async function requestUninstall({ owner, dialog, shell, getOptions, ...options }
   return true;
 }
 
-module.exports = { appInfoFields, appPlatform, getUninstallerPath, getUninstallStatus, isPathWithin, openFeedback, requestUninstall };
+module.exports = { appInfoFields, appPlatform, getUninstallerPath, getUninstallStatus, isPathWithin, normalizeFeedbackInput, requestUninstall, submitFeedback };

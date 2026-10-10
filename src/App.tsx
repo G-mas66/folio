@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { api, errorMessage, Folder, Paper, UpdateState } from './api';
 import { loadPdfDocument } from './PdfPage';
 import { Reader } from './Reader';
@@ -83,6 +83,7 @@ function Workbench() {
   const [editing, setEditing] = useState<Paper | null>(null);
   const [folderDialog, setFolderDialog] = useState<'create' | 'rename' | null>(null);
   const [folderName, setFolderName] = useState('');
+  const [feedbackDialog, setFeedbackDialog] = useState(false);
   const [dragging, setDragging] = useState(false);
   const dragDepthRef = useRef(0);
 
@@ -265,9 +266,10 @@ function Workbench() {
     catch (error) { setError(errorMessage(error)); }
   }
 
-  async function openFeedback() {
-    try { await window.workbench.openFeedback(); }
-    catch (error) { setError(errorMessage(error)); }
+  function beginFeedback() {
+    setNotice('');
+    setError('');
+    setFeedbackDialog(true);
   }
 
   async function paperAction(paper: Paper, action: 'stop' | 'continue' | 'retry') {
@@ -502,7 +504,7 @@ function Workbench() {
             <div className="folder-actions">
               <button className="text-button" aria-label="新建文件夹" onClick={() => beginFolderDialog('create')}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 6.5h7l2 2h8v11h-17v-13Zm8.5 5v6m-3-3h6" /></svg><span>新建文件夹</span></button>
               <button className="text-button" type="button" onClick={() => void openLibraryFolder()}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 7h6l2 2h9v11h-17v-13Z" /></svg><span>打开文献目录</span></button>
-              <button className="text-button" type="button" aria-label="意见反馈" onClick={() => void openFeedback()}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5.5h16v12H9l-5 3v-3Z" /><path d="M7 9h10M7 12.5h7" /></svg><span>意见反馈</span></button>
+              <button className="text-button" type="button" aria-label="意见反馈" onClick={beginFeedback}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5.5h16v12H9l-5 3v-3Z" /><path d="M7 9h10M7 12.5h7" /></svg><span>意见反馈</span></button>
               {folderFilter !== 'all' && folderFilter !== 'unfiled' && folderFilter !== 'recent' && <>
                 <button className="text-button" aria-label="重命名文件夹" onClick={() => beginFolderDialog('rename')}>重命名</button>
                 <button className="text-button delete-paper-button" aria-label="删除文件夹" onClick={() => void deleteFolder()}>删除文件夹</button>
@@ -539,6 +541,15 @@ function Workbench() {
           {dragging && <div className="drop-overlay" aria-hidden="true"><div>松开即可导入 PDF</div></div>}
           {editing && <TitleDialog paper={editing} onClose={() => setEditing(null)} onSave={(english, chinese) => void saveTitle(editing, english, chinese)} />}
           {folderDialog && <FolderDialog mode={folderDialog} value={folderName} onChange={setFolderName} onClose={() => setFolderDialog(null)} onSave={() => void saveFolder()} />}
+          {feedbackDialog && <FeedbackDialog
+            onClose={() => setFeedbackDialog(false)}
+            onSubmitted={(requiresActivation) => {
+              setFeedbackDialog(false);
+              setNotice(requiresActivation
+                ? '反馈已暂存，服务正在等待收件端激活。'
+                : '反馈服务已接收，感谢你的建议。');
+            }}
+          />}
         </main>
         </div>
         </section>
@@ -732,6 +743,55 @@ function FolderDialog({ mode, value, onChange, onClose, onSave }: {
         <label htmlFor="folder-name-input">文件夹名称</label>
         <input id="folder-name-input" aria-label="文件夹名称" data-testid="folder-name-input" autoFocus value={value} onChange={(event) => onChange(event.target.value)} maxLength={80} />
         <div className="dialog-actions"><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" data-testid="folder-save" disabled={!value.trim()} onClick={onSave}>保存</button></div>
+      </section>
+    </div>
+  );
+}
+
+function FeedbackDialog({ onClose, onSubmitted }: { onClose: () => void; onSubmitted: (requiresActivation: boolean) => void }) {
+  const [message, setMessage] = useState('');
+  const [contact, setContact] = useState('');
+  const [failure, setFailure] = useState('');
+  const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
+
+  async function send(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (sendingRef.current) return;
+    const trimmedMessage = message.trim();
+    if (!trimmedMessage) {
+      setFailure('请填写反馈内容。');
+      return;
+    }
+    sendingRef.current = true;
+    setSending(true);
+    setFailure('');
+    let requiresActivation: boolean | undefined;
+    try {
+      const result = await window.workbench.submitFeedback({ message: trimmedMessage, contact: contact.trim() });
+      requiresActivation = result.requiresActivation;
+    } catch (error) {
+      setFailure(errorMessage(error));
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
+    }
+    if (requiresActivation !== undefined) onSubmitted(requiresActivation);
+  }
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (!sending && event.target === event.currentTarget) onClose(); }}>
+      <section className="title-dialog" role="dialog" aria-modal="true" aria-labelledby="feedback-dialog-heading">
+        <div className="dialog-heading"><div><div className="eyebrow">意见反馈</div><h2 id="feedback-dialog-heading">告诉我们你的想法</h2></div><button className="icon-button" aria-label="关闭" disabled={sending} onClick={onClose}>×</button></div>
+        <form onSubmit={(event) => void send(event)}>
+          <label htmlFor="feedback-message">反馈内容</label>
+          <textarea id="feedback-message" aria-label="反馈内容" autoFocus required disabled={sending} rows={6} maxLength={5000} value={message} onChange={(event) => setMessage(event.target.value)} placeholder="描述遇到的问题或改进建议…" />
+          <p className="field-help">反馈通过 FormSubmit 发送给开发者，只包含你填写的内容和 Folio 版本。</p>
+          <label htmlFor="feedback-contact">联系方式（选填）</label>
+          <input id="feedback-contact" aria-label="联系方式（选填）" disabled={sending} maxLength={200} value={contact} onChange={(event) => setContact(event.target.value)} placeholder="邮箱、QQ 或其他联系方式" />
+          {failure && <div className="notice error-notice" role="alert">{failure}</div>}
+          <div className="dialog-actions"><button type="button" className="secondary-button" disabled={sending} onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={sending || !message.trim()}>{sending ? '正在发送…' : '提交反馈'}</button></div>
+        </form>
       </section>
     </div>
   );

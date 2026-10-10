@@ -4,7 +4,11 @@ import asyncio
 import ipaddress
 import os
 import re
+import threading
+import time
 from collections.abc import Callable
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
 import httpx
@@ -15,8 +19,35 @@ CONFIG_URL = f"{API_URL}/config"
 DEFAULT_QPS = 10
 DEFAULT_WORKERS = 4
 MAX_WORKERS = 4
+MAX_RATE_LIMIT_RETRIES = 2
+MAX_RATE_LIMIT_RETRY_DELAY = 30
+RATE_LIMIT_WAIT_POLL_INTERVAL = 0.1
 
 _provider_settings: tuple[int, int] | None = None
+_shared_rate_lock = threading.Lock()
+_shared_next_request_at = 0.0
+_shared_cooldown_until = 0.0
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+
+
+def _defer_shared_requests(delay: float) -> None:
+    global _shared_cooldown_until
+    with _shared_rate_lock:
+        _shared_cooldown_until = max(_shared_cooldown_until, time.monotonic() + delay)
 
 
 class FreeTranslationError(Exception):
@@ -52,8 +83,6 @@ class FreeTranslationClient:
         self.max_workers = DEFAULT_WORKERS
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(60, connect=15))
         self._semaphore: asyncio.Semaphore | None = None
-        self._rate_lock = asyncio.Lock()
-        self._next_request_at = 0.0
 
     async def __aenter__(self):
         try:
@@ -96,26 +125,25 @@ class FreeTranslationClient:
             pass
         _provider_settings = (self.qps, self.max_workers)
 
-    async def _wait_for_qps(self) -> None:
-        loop = asyncio.get_running_loop()
-        async with self._rate_lock:
-            now = loop.time()
-            request_at = max(now, self._next_request_at)
-            self._next_request_at = request_at + 1 / self.qps
-        delay = request_at - loop.time()
-        if delay > 0:
-            await asyncio.sleep(delay)
+    async def _wait_for_qps(self, cancelled: Callable[[], bool] | None = None) -> bool:
+        global _shared_next_request_at
+        while True:
+            if cancelled and await asyncio.to_thread(cancelled):
+                return False
+            with _shared_rate_lock:
+                now = time.monotonic()
+                request_at = max(now, _shared_next_request_at, _shared_cooldown_until)
+                delay = request_at - now
+                if delay <= 0:
+                    _shared_next_request_at = now + 1 / self.qps
+                    return True
+            await asyncio.sleep(min(delay, RATE_LIMIT_WAIT_POLL_INTERVAL))
 
     async def translate(self, text: str, *, cancelled: Callable[[], bool] | None = None) -> str | None:
         if not isinstance(text, str) or not text.strip():
             raise FreeTranslationError("empty_source", "没有可翻译的文本。")
         semaphore = self._semaphore or asyncio.Semaphore(self.max_workers)
         async with semaphore:
-            if cancelled and await asyncio.to_thread(cancelled):
-                return None
-            await self._wait_for_qps()
-            if cancelled and await asyncio.to_thread(cancelled):
-                return None
             prompt = (
                 "You are a professional,authentic machine translation engine.\n\n"
                 ";; Treat next line as plain text input and translate it into zh, output translation ONLY. "
@@ -123,14 +151,32 @@ class FreeTranslationClient:
                 "NO explanations. NO notes. Input:\n\n"
                 f"{text}"
             )
-            try:
-                response = await self._client.post(self.url, json={"text": prompt})
-            except httpx.TimeoutException:
-                raise FreeTranslationError("timeout", "免费翻译服务连接超时，本段尚未完成。") from None
-            except httpx.RequestError:
-                raise FreeTranslationError("network", "无法连接免费翻译服务，本段尚未完成。") from None
-            if response.status_code == 429:
-                raise FreeTranslationError("rate_limit", "免费翻译服务暂时限流，本段尚未完成，可稍后重试。")
+            for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+                if not await self._wait_for_qps(cancelled):
+                    return None
+                if cancelled and await asyncio.to_thread(cancelled):
+                    return None
+                try:
+                    response = await self._client.post(self.url, json={"text": prompt})
+                except httpx.TimeoutException:
+                    raise FreeTranslationError("timeout", "免费翻译服务连接超时，本段尚未完成。") from None
+                except httpx.RequestError:
+                    raise FreeTranslationError("network", "无法连接免费翻译服务，本段尚未完成。") from None
+                if response.status_code != 429:
+                    break
+                if cancelled and await asyncio.to_thread(cancelled):
+                    return None
+                retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
+                if retry_after is None:
+                    retry_delay = min(4 * 2 ** attempt, MAX_RATE_LIMIT_RETRY_DELAY)
+                elif retry_after > MAX_RATE_LIMIT_RETRY_DELAY:
+                    _defer_shared_requests(MAX_RATE_LIMIT_RETRY_DELAY)
+                    raise FreeTranslationError("rate_limit", "免费翻译服务暂时限流，本段尚未完成，可稍后重试。")
+                else:
+                    retry_delay = retry_after
+                _defer_shared_requests(retry_delay)
+                if attempt == MAX_RATE_LIMIT_RETRIES:
+                    raise FreeTranslationError("rate_limit", "免费翻译服务暂时限流，本段尚未完成，可稍后重试。")
             if response.status_code >= 400:
                 raise FreeTranslationError("service_error", f"免费翻译服务返回 HTTP {response.status_code}，本段尚未完成。")
             try:

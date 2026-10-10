@@ -10,7 +10,7 @@ const { finalizeInstalledUpdateCache, restoreInstallerCache } = require('./updat
 const { downloadUpdateWithFallback, isDownloadFallbackActive } = require('./update-download.cjs');
 const { classifyUpdateError, createUpdateChecker, updateCheckErrorMessage } = require('./update-check.cjs');
 const { checkForUpdatesWithApiFallback } = require('./update-api.cjs');
-const { appInfoFields, openFeedback, requestUninstall } = require('./app-actions.cjs');
+const { appInfoFields, requestUninstall, submitFeedback } = require('./app-actions.cjs');
 const { releaseNotesText, selectMacUpdate } = require('./update-service.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
@@ -710,9 +710,11 @@ ipcMain.handle('workbench:get-app-info', (event) => {
     ...appInfoFields(currentAppActionOptions()),
   };
 });
-ipcMain.handle('workbench:open-feedback', async (event) => {
+ipcMain.handle('workbench:submit-feedback', (event, input) => {
   if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('无效的反馈请求。');
-  await openFeedback(shell);
+  return submitFeedback(input, {
+    version: app.getVersion(),
+  });
 });
 ipcMain.handle('workbench:uninstall-app', (event) => {
   if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('无效的卸载请求。');

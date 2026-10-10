@@ -7,8 +7,8 @@ const {
   appInfoFields,
   getUninstallerPath,
   isPathWithin,
-  openFeedback,
   requestUninstall,
+  submitFeedback,
 } = require('../electron/app-actions.cjs');
 
 const executablePath = 'D:\\个人工作台\\应用\\Folio\\paper-workbench\\阅川 Folio.exe';
@@ -33,10 +33,83 @@ function uninstallOptions(overrides = {}) {
   };
 }
 
-test('feedback opens only the fixed mailto draft and does not send it', async () => {
-  const opened = [];
-  await openFeedback({ openExternal: async value => { opened.push(value); } });
-  assert.deepEqual(opened, ['mailto:1791913726@qq.com']);
+test('feedback sends only trimmed user input and app version to the fixed provider endpoint', async () => {
+  let request;
+  const result = await submitFeedback({ message: '  App closes after import.  ', contact: '  QQ: folio-user  ', apiKey: 'never send' }, {
+    version: '1.0.4',
+    fetchImpl: async (url, options) => {
+      request = { url, options };
+      return { ok: true, async json() { return { success: true, message: 'accepted' }; } };
+    },
+  });
+  assert.deepEqual(result, { requiresActivation: false });
+  assert.equal(request.url, 'https://formsubmit.co/ajax/1791913726@qq.com');
+  assert.equal(request.options.method, 'POST');
+  assert.deepEqual(request.options.headers, {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    Referer: 'https://github.com/G-mas66/folio',
+  });
+  assert.deepEqual(JSON.parse(request.options.body), {
+    message: 'App closes after import.',
+    contact: 'QQ: folio-user',
+    app_version: '1.0.4',
+    _url: 'https://github.com/G-mas66/folio',
+  });
+  assert.equal(request.options.signal.aborted, false);
+});
+
+test('feedback accepts FormSubmit boolean or string success and reports activation staging', async () => {
+  const activationResponse = {
+    success: 'false',
+    message: "This form needs Activation. We've sent an email containing an 'Activate Form' link.",
+  };
+  const result = await submitFeedback({ message: 'Please add keyboard shortcuts.' }, {
+    version: '1.0.4',
+    fetchImpl: async () => ({ ok: true, async json() { return activationResponse; } }),
+  });
+  assert.deepEqual(result, { requiresActivation: true });
+
+  const accepted = await submitFeedback({ message: 'Thanks.' }, {
+    version: '1.0.4',
+    fetchImpl: async () => ({ ok: true, async json() { return { success: 'true', message: 'received' }; } }),
+  });
+  assert.deepEqual(accepted, { requiresActivation: false });
+});
+
+test('feedback rejects invalid input before contacting the provider', async () => {
+  let requests = 0;
+  const fetchImpl = async () => { requests += 1; return { ok: true, async json() { return { success: true }; } }; };
+  const options = { version: '1.0.4', fetchImpl };
+  for (const input of [null, {}, { message: '  ' }, { message: 'x'.repeat(5001) }, { message: 'valid', contact: 42 }, { message: 'valid', contact: 'x'.repeat(201) }]) {
+    await assert.rejects(submitFeedback(input, options));
+  }
+  assert.equal(requests, 0);
+});
+
+test('feedback does not mistake HTTP, provider, or JSON errors for acceptance', async () => {
+  const responses = [
+    { ok: false, async json() { return { success: true }; } },
+    { ok: true, async json() { return { success: 'false', message: 'rejected' }; } },
+    { ok: true, async json() { throw new Error('not JSON'); } },
+  ];
+  for (const response of responses) {
+    await assert.rejects(submitFeedback({ message: 'Retry me' }, {
+      version: '1.0.4', fetchImpl: async () => response,
+    }), /反馈提交失败，请检查网络后重试/);
+  }
+});
+
+test('feedback aborts a stalled provider request at the timeout', async () => {
+  let receivedSignal;
+  await assert.rejects(submitFeedback({ message: 'Retry after timeout' }, {
+    version: '1.0.4', timeoutMs: 10,
+    fetchImpl: (_url, options) => new Promise((_resolve, reject) => {
+      receivedSignal = options.signal;
+      options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    }),
+  }), /反馈提交失败，请检查网络后重试/);
+  assert.equal(receivedSignal.aborted, true);
 });
 
 test('uninstaller resolution is limited to the known packaged Windows filename', () => {

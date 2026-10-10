@@ -76,6 +76,7 @@ export type PdfSelection = {
 export type ChatStreamInput = {
   paperId: string; sessionId?: string; question?: string; model?: string; webSearch?: boolean; runId?: string;
 };
+export type FeedbackInput = { message: string; contact?: string };
 export type ChatStreamEvent = { requestId: string; type: string; data: Record<string, unknown> };
 export type ChatStreamHandle = { requestId: string; cancel: () => Promise<boolean>; dispose: () => void };
 export type StorageLocationInfo = {
@@ -117,7 +118,7 @@ declare global {
       cancelPaperStreams(paperId: string): Promise<number>;
       startChatStream(input: ChatStreamInput, onEvent: (event: ChatStreamEvent) => void): Promise<ChatStreamHandle>;
       openExternal(url: string): Promise<boolean>;
-      openFeedback(): Promise<void>;
+      submitFeedback(input: FeedbackInput): Promise<{ requiresActivation: boolean }>;
       uninstallApp(): Promise<boolean>;
       getAppInfo(): Promise<StorageLocationInfo>;
       getUpdateState(): Promise<UpdateState>;

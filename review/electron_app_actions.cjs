@@ -39,14 +39,22 @@ let application;
     const page = await application.firstWindow();
     await page.locator('.topbar').waitFor();
     await application.evaluate(({ shell, dialog }) => {
-      const trace = globalThis.__folioNativeActionTrace = { external: [], paths: [], dialogs: 0 };
+      const trace = globalThis.__folioNativeActionTrace = { external: [], paths: [], dialogs: 0, feedback: [] };
       const openExternal = async url => { trace.external.push(url); };
       const openPath = async filePath => { trace.paths.push(filePath); return 'Review blocked external process launch'; };
       const showMessageBox = async () => { trace.dialogs += 1; return { response: 0 }; };
+      const realFetch = globalThis.fetch;
+      const feedbackEndpoint = 'https://formsubmit.co/ajax/1791913726@qq.com';
+      const reviewFetch = async (url, options = {}) => {
+        if (String(url) !== feedbackEndpoint) return realFetch(url, options);
+        trace.feedback.push({ url: String(url), method: options.method, headers: options.headers, body: options.body });
+        return { ok: true, async json() { return { success: 'true', message: 'accepted' }; } };
+      };
       shell.openExternal = openExternal;
       shell.openPath = openPath;
       dialog.showMessageBox = showMessageBox;
-      if (shell.openExternal !== openExternal || shell.openPath !== openPath || dialog.showMessageBox !== showMessageBox) {
+      globalThis.fetch = reviewFetch;
+      if (shell.openExternal !== openExternal || shell.openPath !== openPath || dialog.showMessageBox !== showMessageBox || globalThis.fetch !== reviewFetch) {
         throw new Error('Could not install safe shell/dialog stubs; refusing native action checks.');
       }
     });
@@ -60,9 +68,24 @@ let application;
     checks.push('utilitybar plus removed; theme, eye, settings, folder and import controls remain');
 
     await page.getByRole('button', { name: '意见反馈', exact: true }).click();
-    const externalCalls = await application.evaluate(() => globalThis.__folioNativeActionTrace.external);
-    assert.deepEqual(externalCalls, ['mailto:1791913726@qq.com'], 'Feedback uses the real native IPC handler and opens the fixed mailto draft');
-    checks.push('real feedback IPC reached the fixed mailto through a blocked external-shell stub');
+    await page.getByRole('textbox', { name: '反馈内容' }).fill('Native feedback IPC smoke check');
+    await page.getByRole('button', { name: '提交反馈', exact: true }).click();
+    await page.locator('.success-notice').waitFor();
+    const nativeFeedback = await application.evaluate(() => ({
+      requests: globalThis.__folioNativeActionTrace.feedback,
+      external: globalThis.__folioNativeActionTrace.external,
+    }));
+    assert.equal(nativeFeedback.requests.length, 1);
+    assert.equal(nativeFeedback.requests[0].url, 'https://formsubmit.co/ajax/1791913726@qq.com');
+    assert.equal(nativeFeedback.requests[0].method, 'POST');
+    assert.equal(nativeFeedback.requests[0].headers.Referer, 'https://github.com/G-mas66/folio');
+    assert.deepEqual(JSON.parse(nativeFeedback.requests[0].body), {
+      message: 'Native feedback IPC smoke check',
+      app_version: '1.0.4',
+      _url: 'https://github.com/G-mas66/folio',
+    });
+    assert.deepEqual(nativeFeedback.external, [], 'Feedback must not open an external mail app');
+    checks.push('real feedback IPC submitted only message/version to the fixed FormSubmit endpoint stub');
 
     const nativeAppInfo = await page.evaluate(() => window.workbench.getAppInfo());
     assert.equal(nativeAppInfo.platform, 'windows');
@@ -88,6 +111,7 @@ let application;
     await application.evaluate(({ ipcMain }) => {
       const state = globalThis.__folioUiReview = {
         calls: [],
+        feedbackInput: null,
         info: {
           dataRoot: 'REVIEW_DATA_ROOT',
           uiDataRoot: 'REVIEW_UI_ROOT',
@@ -100,9 +124,13 @@ let application;
         uninstallResult: false,
         uninstallFailure: '',
       };
-      for (const channel of ['workbench:get-app-info', 'workbench:open-feedback', 'workbench:uninstall-app']) ipcMain.removeHandler(channel);
+      for (const channel of ['workbench:get-app-info', 'workbench:submit-feedback', 'workbench:uninstall-app']) ipcMain.removeHandler(channel);
       ipcMain.handle('workbench:get-app-info', () => ({ ...state.info }));
-      ipcMain.handle('workbench:open-feedback', () => { state.calls.push('feedback'); });
+      ipcMain.handle('workbench:submit-feedback', (_event, input) => {
+        state.calls.push('feedback');
+        state.feedbackInput = input;
+        return { requiresActivation: false };
+      });
       ipcMain.handle('workbench:uninstall-app', () => {
         state.calls.push('uninstall');
         if (state.uninstallFailure) throw new Error(state.uninstallFailure);
@@ -112,8 +140,16 @@ let application;
 
     await page.getByTestId('library-tab').click();
     await page.getByRole('button', { name: '意见反馈', exact: true }).click();
-    assert.deepEqual(await application.evaluate(() => globalThis.__folioUiReview.calls), ['feedback']);
-    checks.push('feedback click invokes only the mocked bridge');
+    await page.getByRole('textbox', { name: '反馈内容' }).fill('UI feedback dialog check');
+    await page.getByRole('button', { name: '提交反馈', exact: true }).click();
+    await page.locator('.success-notice').filter({ hasText: '反馈服务已接收，感谢你的建议。' }).waitFor();
+    const uiFeedback = await application.evaluate(() => ({
+      calls: globalThis.__folioUiReview.calls,
+      input: globalThis.__folioUiReview.feedbackInput,
+    }));
+    assert.deepEqual(uiFeedback.calls, ['feedback']);
+    assert.deepEqual(uiFeedback.input, { message: 'UI feedback dialog check', contact: '' });
+    checks.push('feedback dialog submits its text through the mocked bridge and shows the success notice');
 
     await page.getByTestId('settings-tab').click();
     const uninstallSection = page.getByRole('region', { name: '应用卸载' });
