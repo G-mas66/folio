@@ -24,13 +24,16 @@ const chineseHash = digest(seeded.chinese);
 const requests = [];
 const modelRequests = [];
 const upstreamRequests = [];
+const settingsSnapshots = [];
+const browserEvents = [];
+const electronEvents = [];
+const electronStderr = [];
 const state = { long: false, release: false, session: null };
 const delay = time => new Promise(resolve => setTimeout(resolve, time));
 const server = http.createServer(async (request, response) => {
   upstreamRequests.push({ path: request.url, userAgent: request.headers['user-agent'] || '' });
   if (request.method === 'GET') {
     modelRequests.push(request.url);
-    assert.equal(request.url, '/gateway/v1/models?tenant=fixture');
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify({ data: [{ id: 'fixture-chat' }, { id: 'fixture-responses' }] }));
     return;
@@ -87,6 +90,7 @@ const server = http.createServer(async (request, response) => {
 
 (async () => {
   let application;
+  let page;
   const errors = [];
   const started = Date.now();
   try {
@@ -97,10 +101,21 @@ const server = http.createServer(async (request, response) => {
     delete env.WORKBENCH_DEV;
     const options = { cwd: root, env, timeout: 90000, executablePath: process.env.REVIEW_EXECUTABLE || path.join(root, 'node_modules/electron/dist/electron.exe'), args: process.env.REVIEW_EXECUTABLE ? [] : ['.'] };
     application = await _electron.launch(options);
+    const electronProcess = application.process();
+    electronProcess.on('exit', (code, signal) => electronEvents.push({ type: 'exit', code, signal }));
+    electronProcess.on('close', (code, signal) => electronEvents.push({ type: 'close', code, signal }));
+    electronProcess.on('error', error => electronEvents.push({ type: 'error', message: error.message }));
+    electronProcess.stderr?.on('data', chunk => {
+      electronStderr.push(String(chunk).replaceAll('review-only-protocol-key', '[redacted synthetic key]'));
+      if (electronStderr.length > 30) electronStderr.shift();
+    });
     const version = await application.evaluate(({ app }) => app.getVersion());
     assert.equal(version, require('../package.json').version);
-    let page = await application.firstWindow();
+    page = await application.firstWindow();
     page.on('pageerror', error => errors.push(error.message));
+    page.on('console', message => { if (message.type() === 'error') browserEvents.push({ type: 'console', text: message.text() }); });
+    page.on('close', () => browserEvents.push({ type: 'page-close' }));
+    page.on('crash', () => browserEvents.push({ type: 'page-crash' }));
     await page.getByRole('button', { name: '设置', exact: true }).click();
     await page.waitForFunction(() => !document.querySelector('#api-protocol').disabled);
     assert.equal(await page.getByLabel('API 协议').inputValue(), 'openai_chat_completions');
@@ -109,8 +124,19 @@ const server = http.createServer(async (request, response) => {
     await page.getByLabel('AI API Key', { exact: true }).fill('review-only-protocol-key');
     await page.getByRole('button', { name: '保存设置', exact: true }).click();
     await page.getByRole('status').filter({ hasText: 'AI 服务设置已保存' }).waitFor();
-    assert.equal((await page.evaluate(() => window.workbench.request({ path: '/settings' }))).model, '');
+    const savedSettings = await page.evaluate(() => window.workbench.request({ path: '/settings' }));
+    settingsSnapshots.push({ base_url: savedSettings.base_url, protocol: savedSettings.protocol, model: savedSettings.model, model_options: savedSettings.model_options, key_configured: savedSettings.key_configured });
+    assert.equal(savedSettings.base_url, baseUrl);
+    assert.equal(savedSettings.protocol, 'openai_chat_completions');
+    assert.equal(savedSettings.key_configured, true);
+    assert.equal(savedSettings.model, '');
     await page.getByRole('button', { name: '获取模型列表', exact: true }).click();
+    await page.waitForFunction(() => {
+      const model = document.querySelector('#model');
+      return model && !model.disabled && [...model.options].some(option => option.value === 'fixture-chat');
+    }, undefined, { timeout: 15000 });
+    await page.getByRole('status').filter({ hasText: '读取到 2 个模型' }).waitFor();
+    assert.deepEqual(modelRequests, ['/gateway/v1/models?tenant=fixture']);
     await page.getByLabel('默认模型', { exact: true }).selectOption('fixture-chat');
     assert.equal(requests.length, 0, 'Discovering models must not send inference requests');
     await page.getByRole('checkbox', { name: 'fixture-chat', exact: true }).check();
@@ -190,6 +216,89 @@ const server = http.createServer(async (request, response) => {
     const sessions = () => page.evaluate(id => window.workbench.request({ path: `/papers/${id}/chat-sessions` }), seeded.paper_id);
     const initialSessions = await sessions();
     assert.equal(initialSessions.length, 1);
+    await page.getByTestId(`chat-session-${initialSessions[0].id}`).waitFor();
+    const paperBinding = page.locator('.chat-bound-paper');
+    await paperBinding.waitFor();
+    assert.equal(await paperBinding.getAttribute('title'), '连续阅读验收文献');
+    assert.equal((await paperBinding.innerText()).trim(), '当前文献 · 连续阅读验收文献');
+    const chatMode = page.getByRole('tab', { name: '问答（AI 助手）', exact: true });
+    const notesMode = page.getByRole('tab', { name: '笔记', exact: true });
+    assert.equal(await page.locator('.reader-side-tabs').count(), 1, 'Only one assistant mode tablist should be rendered');
+    await notesMode.focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await notesMode.getAttribute('aria-selected'), 'true');
+    await page.locator('[id^="reader-side-panel-notes-"]').waitFor({ state: 'visible' });
+    await page.waitForFunction(() => {
+      const transparent = 'rgba(0, 0, 0, 0)';
+      return getComputedStyle(document.querySelector('[data-testid="reader-side-tab-chat"]')).borderBottomColor === transparent
+        && getComputedStyle(document.querySelector('[data-testid="reader-side-tab-notes"]')).borderBottomColor !== transparent;
+    });
+    const modeUnderlines = await page.evaluate(() => ({
+      chat: getComputedStyle(document.querySelector('[data-testid="reader-side-tab-chat"]')).borderBottomColor,
+      notes: getComputedStyle(document.querySelector('[data-testid="reader-side-tab-notes"]')).borderBottomColor,
+    }));
+    assert.equal(modeUnderlines.chat, 'rgba(0, 0, 0, 0)', 'Q&A must not show the active underline in Notes mode');
+    assert.notEqual(modeUnderlines.notes, 'rgba(0, 0, 0, 0)', 'Notes must be the only mode with an active underline');
+    await page.getByTestId(`chat-session-${initialSessions[0].id}`).click();
+    assert.equal(await chatMode.getAttribute('aria-selected'), 'true');
+    await notesMode.focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await notesMode.getAttribute('aria-selected'), 'true');
+    await page.getByRole('button', { name: '新建 AI 会话', exact: true }).click();
+    await page.waitForFunction(() => document.querySelectorAll('.chat-session-tab').length === 2);
+    const noteModeSessions = await sessions();
+    const noteModeCreated = noteModeSessions.find(session => session.id !== initialSessions[0].id);
+    assert.ok(noteModeCreated);
+    assert.equal(await chatMode.getAttribute('aria-selected'), 'true', 'Creating a session from Notes must switch back to Q&A');
+    page.once('dialog', dialog => dialog.accept());
+    await page.getByRole('button', { name: `删除会话 ${noteModeCreated.title}`, exact: true }).click();
+    await page.getByTestId(`chat-session-${noteModeCreated.id}`).waitFor({ state: 'hidden' });
+    assert.equal((await sessions()).length, 1);
+    await page.locator('.chat-session-content:not([hidden]) .chat-composer').waitFor();
+    const assistantMetrics = () => page.evaluate(() => {
+      const toolbar = document.querySelector('.chat-session-bar');
+      const column = toolbar?.closest('.chat-column');
+      const modeTabs = toolbar?.querySelector('.reader-side-tabs');
+      const sessionTabs = toolbar?.querySelector('.chat-session-tabs');
+      const addSession = toolbar?.querySelector('.chat-session-new');
+      const binding = toolbar?.querySelector('.chat-bound-paper');
+      const composer = document.querySelector('.chat-session-content:not([hidden]) .chat-composer');
+      const centerY = node => {
+        const rect = node.getBoundingClientRect();
+        return (rect.top + rect.bottom) / 2;
+      };
+      const toolbarRect = toolbar.getBoundingClientRect();
+      const addRect = addSession.getBoundingClientRect();
+      const bindingRect = binding.getBoundingClientRect();
+      const composerRect = composer.getBoundingClientRect();
+      const columnRect = column.getBoundingClientRect();
+      return {
+        toolbarWidth: toolbarRect.width,
+        columnWidth: column.clientWidth,
+        addGap: addRect.left - sessionTabs.getBoundingClientRect().right,
+        bindingGap: bindingRect.left - addRect.right,
+        bindingWidth: bindingRect.width,
+        bindingRightGap: toolbarRect.right - bindingRect.right,
+        rowCenters: [centerY(modeTabs), centerY(sessionTabs), centerY(addSession), centerY(binding)],
+        modeTabsFit: modeTabs.scrollWidth <= modeTabs.clientWidth + 1,
+        sessionScrollWidth: sessionTabs.scrollWidth,
+        sessionClientWidth: sessionTabs.clientWidth,
+        composerBottomMargin: composer && getComputedStyle(composer).marginBottom,
+        composerBottomGap: columnRect.bottom - composerRect.bottom,
+      };
+    });
+    const chatResizer = page.getByTestId('chat-resizer');
+    assert.equal(await chatResizer.getAttribute('aria-valuenow'), '470');
+    const assistantLayout = await assistantMetrics();
+    assert.ok(Math.abs(assistantLayout.toolbarWidth - assistantLayout.columnWidth) <= 1, `Assistant toolbar should fill the column: ${JSON.stringify(assistantLayout)}`);
+    assert.ok(assistantLayout.addGap >= 0 && assistantLayout.addGap <= 12, `New-session button should sit beside the session tabs: ${JSON.stringify(assistantLayout)}`);
+    assert.ok(assistantLayout.bindingGap >= 0 && assistantLayout.bindingGap <= 12, `Paper binding should follow the new-session button: ${JSON.stringify(assistantLayout)}`);
+    assert.ok(assistantLayout.bindingWidth >= 140 && assistantLayout.bindingRightGap <= 10, `Paper title should use the remaining toolbar width: ${JSON.stringify(assistantLayout)}`);
+    assert.ok(Math.max(...assistantLayout.rowCenters) - Math.min(...assistantLayout.rowCenters) <= 1, `Toolbar controls should share one aligned row: ${JSON.stringify(assistantLayout)}`);
+    assert.equal(assistantLayout.modeTabsFit, true);
+    assert.equal(assistantLayout.composerBottomMargin, '5px');
+    assert.ok(assistantLayout.composerBottomGap >= 4 && assistantLayout.composerBottomGap <= 7, `Composer should sit about 5px above the chat column bottom: ${JSON.stringify(assistantLayout)}`);
+    await page.screenshot({ path: path.join(output, 'assistant-layout.png') });
     const first = initialSessions[0].id;
     state.long = true;
     state.release = false;
@@ -222,6 +331,90 @@ const server = http.createServer(async (request, response) => {
     await send('第二会话独立内容');
     await activeChat().getByRole('button', { name: '停止生成', exact: true }).waitFor({ state: 'hidden' });
     await activeChat().getByText('独立回答：第二会话独立内容', { exact: true }).waitFor();
+    await chatResizer.focus();
+    await page.keyboard.press('Home');
+    await page.waitForFunction(() => document.querySelector('[data-testid="chat-resizer"]')?.getAttribute('aria-valuenow') === '280');
+    const narrowLayout = await assistantMetrics();
+    assert.ok(Math.abs(narrowLayout.toolbarWidth - narrowLayout.columnWidth) <= 1, `Narrow assistant toolbar should fill the column: ${JSON.stringify(narrowLayout)}`);
+    assert.ok(narrowLayout.sessionScrollWidth > narrowLayout.sessionClientWidth + 1, `Multiple sessions should overflow within their tab strip: ${JSON.stringify(narrowLayout)}`);
+    assert.ok(narrowLayout.addGap >= 0 && narrowLayout.addGap <= 12 && narrowLayout.bindingGap >= 0 && narrowLayout.bindingGap <= 12, `Session creation and paper title should remain adjacent at 280px: ${JSON.stringify(narrowLayout)}`);
+    assert.ok(Math.max(...narrowLayout.rowCenters) - Math.min(...narrowLayout.rowCenters) <= 1, `Narrow toolbar controls should remain on one row: ${JSON.stringify(narrowLayout)}`);
+    assert.ok(narrowLayout.composerBottomGap >= 4 && narrowLayout.composerBottomGap <= 7, `Narrow composer should keep a 5px bottom gap: ${JSON.stringify(narrowLayout)}`);
+    await page.getByTestId(`chat-session-${first}`).click();
+    assert.equal(await page.getByTestId(`chat-session-${first}`).getAttribute('aria-selected'), 'true');
+    await page.getByTestId(`chat-session-${second}`).click();
+    assert.equal(await page.getByTestId(`chat-session-${second}`).getAttribute('aria-selected'), 'true');
+    await page.getByRole('button', { name: '新建 AI 会话', exact: true }).click();
+    await page.waitForFunction(() => document.querySelectorAll('.chat-session-tab').length === 3);
+    const narrowSessions = await sessions();
+    assert.equal(narrowSessions.length, 3);
+    const third = narrowSessions.find(session => session.id !== first && session.id !== second);
+    assert.ok(third);
+    await page.getByTestId(`chat-session-${third.id}`).waitFor();
+    page.once('dialog', dialog => dialog.accept());
+    await page.getByRole('button', { name: `删除会话 ${third.title}`, exact: true }).click();
+    await page.getByTestId(`chat-session-${third.id}`).waitFor({ state: 'hidden' });
+    assert.equal((await sessions()).length, 2);
+    if (await page.locator('html').getAttribute('data-theme') !== 'dark') await page.getByTestId('theme-toggle').click();
+    await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+    const darkInk = await page.evaluate(() => {
+      const probe = document.createElement('span');
+      probe.style.color = 'var(--ink)';
+      document.body.append(probe);
+      const color = getComputedStyle(probe).color;
+      probe.remove();
+      getComputedStyle(document.querySelector('.brand-wordmark')).color;
+      getComputedStyle(document.querySelector('.chat-message.assistant .message-content')).color;
+      return color;
+    });
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    await page.waitForFunction(expected => {
+      const brand = document.querySelector('.brand-wordmark');
+      const message = document.querySelector('.chat-message.assistant .message-content');
+      const toolbar = document.querySelector('.chat-session-bar');
+      return brand && message && toolbar
+        && getComputedStyle(brand).color === expected
+        && getComputedStyle(message).color === expected
+        && getComputedStyle(toolbar).backgroundColor === 'rgb(34, 40, 38)';
+    }, darkInk);
+    await page.screenshot({ path: path.join(output, 'assistant-layout-dark.png') });
+    await notesMode.hover();
+    await page.evaluate(async () => Promise.all(document.getAnimations().map(animation => animation.finished.catch(() => undefined))));
+    const darkHover = await notesMode.evaluate(button => {
+      const tokenProbe = document.createElement('div');
+      tokenProbe.style.cssText = 'position: fixed; color: var(--accent); background: var(--surface-selected)';
+      document.body.append(tokenProbe);
+      const tokens = getComputedStyle(tokenProbe);
+      const styles = getComputedStyle(button);
+      const luminance = color => {
+        const channels = color.match(/[\d.]+/g).slice(0, 3).map(value => Number(value) / 255);
+        const linear = value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+        const [red, green, blue] = channels.map(linear);
+        return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+      };
+      const backgroundColor = styles.backgroundColor;
+      const foregroundColor = styles.color;
+      const tokenBackground = tokens.backgroundColor;
+      const tokenForeground = tokens.color;
+      const [lighter, darker] = [luminance(foregroundColor), luminance(backgroundColor)].sort((a, b) => b - a);
+      tokenProbe.remove();
+      return { backgroundColor, foregroundColor, tokenBackground, tokenForeground, contrastRatio: (lighter + 0.05) / (darker + 0.05) };
+    });
+    assert.equal(darkHover.backgroundColor, darkHover.tokenBackground, 'Dark hover should use the selected-surface theme token');
+    assert.equal(darkHover.foregroundColor, darkHover.tokenForeground, 'Dark hover should use the accent theme token');
+    assert.ok(darkHover.contrastRatio >= 3, `Dark mode icon hover needs at least 3:1 contrast: ${JSON.stringify(darkHover)}`);
+    await page.screenshot({ path: path.join(output, 'assistant-layout-dark-hover.png') });
+    await page.mouse.move(0, 0);
+    if (await page.locator('html').getAttribute('data-theme') !== 'light') await page.getByTestId('theme-toggle').click();
+    await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
+    const narrowBox = await chatResizer.boundingBox();
+    const dragX = narrowBox.x + narrowBox.width / 2;
+    const dragY = narrowBox.y + narrowBox.height / 2;
+    await page.mouse.move(dragX, dragY);
+    await page.mouse.down();
+    await page.mouse.move(dragX - 190, dragY, { steps: 8 });
+    await page.mouse.up();
+    await page.waitForFunction(() => document.querySelector('[data-testid="chat-resizer"]')?.getAttribute('aria-valuenow') === '470');
     await page.getByTestId(`chat-session-${first}`).click();
     await activeChat().getByRole('button', { name: '停止生成', exact: true }).waitFor({ state: 'hidden', timeout: 20000 });
     assert.ok((await activeChat().innerText()).includes('第 60 段'));
@@ -257,6 +450,14 @@ const server = http.createServer(async (request, response) => {
     await page.getByTestId(`paper-tab-${seeded.paper_id}`).click();
     await application.close();
     application = await _electron.launch(options);
+    const reopenedProcess = application.process();
+    reopenedProcess.on('exit', (code, signal) => electronEvents.push({ type: 'exit', code, signal }));
+    reopenedProcess.on('close', (code, signal) => electronEvents.push({ type: 'close', code, signal }));
+    reopenedProcess.on('error', error => electronEvents.push({ type: 'error', message: error.message }));
+    reopenedProcess.stderr?.on('data', chunk => {
+      electronStderr.push(String(chunk).replaceAll('review-only-protocol-key', '[redacted synthetic key]'));
+      if (electronStderr.length > 30) electronStderr.shift();
+    });
     page = await application.firstWindow();
     await page.getByTestId(`chat-session-${second}`).waitFor();
     assert.equal(await page.getByTestId(`chat-session-${second}`).getAttribute('aria-selected'), 'true');
@@ -273,16 +474,19 @@ const server = http.createServer(async (request, response) => {
     assert.ok(upstreamRequests.length > 0);
     assert.ok(upstreamRequests.every(request => request.userAgent === 'Folio/1.0'), JSON.stringify(upstreamRequests));
     assert.deepEqual(errors, []);
-    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version, seconds: (Date.now() - started) / 1000, seeded, chinese, modelRequests, requests: requests.length, upstreamRequests, locations, scroll: { before, after }, first, second, errors }, null, 2));
+    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ result: 'passed', version, seconds: (Date.now() - started) / 1000, seeded, chinese, modelRequests, requests: requests.length, upstreamRequests, locations, assistantLayout: { default470: assistantLayout, narrow280: narrowLayout }, scroll: { before, after }, first, second, errors }, null, 2));
     fs.writeFileSync(path.join(output, 'requests.json'), JSON.stringify(requests, null, 2));
     console.log(JSON.stringify({ result: 'passed', output }));
   } catch (error) {
     fs.writeFileSync(path.join(output, 'failure.txt'), String(error.stack || error));
-    if (application) await (await application.firstWindow()).screenshot({ path: path.join(output, 'failure.png') }).catch(() => undefined);
+    let windowCount = 0;
+    try { windowCount = application?.windows().length || 0; } catch { /* capture diagnostics even after the main process exits */ }
+    fs.writeFileSync(path.join(output, 'failure-context.json'), JSON.stringify({ modelRequests, upstreamRequests, settingsSnapshots, browserEvents, electronEvents, electronStderr, pageClosed: page?.isClosed(), windowCount }, null, 2));
+    try { if (windowCount) await application.windows()[0].screenshot({ path: path.join(output, 'failure.png') }); } catch { /* preserve the original test failure */ }
     throw error;
   } finally {
     state.release = true;
-    if (application) await application.close();
+    if (application) await application.close().catch(() => undefined);
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
     const cleanup = spawnSync(path.join(root, '.venv/Scripts/python.exe'), ['-B', '-c', 'from backend.ai import credential_service; import keyring; service=credential_service(); keyring.delete_password(service,"api-key") if keyring.get_password(service,"api-key") else None'], { cwd: root, env: { ...process.env, WORKBENCH_DATA_DIR: dataRoot, WORKBENCH_CREDENTIAL_ROOT: credentialRoot, WORKBENCH_LOCATION_CONFIG: locationConfig, APPDATA: appData, LOCALAPPDATA: localAppData, USERPROFILE: userProfile }, encoding: 'utf8' });

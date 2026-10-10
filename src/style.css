@@ -256,9 +256,12 @@ h1, h2, p { margin-top: 0; }
 .pdf-pages { position: relative; width: max-content; min-width: 100%; }
 .pdf-page-frame { width: max-content; min-width: 0; margin: 0 auto 14px; }
 .pdf-page-shell { position: relative; display: flex; justify-content: flex-start; width: 100%; height: 100%; padding: 14px; background: #e9e8e2; border-radius: 5px; }
-.pdf-page-stage { position: relative; width: fit-content; margin: 0; background: white; box-shadow: 0 3px 12px #0002; }
+.pdf-page-stage { position: relative; align-self: flex-start; width: fit-content; height: fit-content; margin: 0; background: white; box-shadow: 0 3px 12px #0002; }
 .pdf-page-stage canvas { display: block; }
-.textLayer { position: absolute; inset: 0; overflow: hidden; line-height: 1; text-align: initial; transform-origin: 0 0; z-index: 1; --min-font-size: 1; --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size)); --min-font-size-inv: calc(1 / var(--min-font-size)); }
+.textLayer { position: absolute; inset: 0; overflow: hidden; line-height: 1; text-align: initial; transform-origin: 0 0; z-index: 1; --min-font-size: 1; --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size)); --min-font-size-inv: calc(1 / var(--min-font-size)); --scale-round-x: 1px; --scale-round-y: 1px; }
+.textLayer[data-main-rotation="90"] { transform: rotate(90deg) translateY(-100%); }
+.textLayer[data-main-rotation="180"] { transform: rotate(180deg) translate(-100%, -100%); }
+.textLayer[data-main-rotation="270"] { transform: rotate(270deg) translateX(-100%); }
 .textLayer span, .textLayer br { color: transparent; position: absolute; white-space: pre; transform-origin: 0% 0%; }
 .textLayer > :not(.markedContent), .textLayer .markedContent span:not(.markedContent) { z-index: 1; --font-height: 0; font-size: calc(var(--text-scale-factor) * var(--font-height)); --scale-x: 1; --rotate: 0deg; transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv)); }
 .textLayer ::selection { background: rgba(57, 141, 214, .3); }
@@ -266,11 +269,14 @@ h1, h2, p { margin-top: 0; }
 .pdf-loading { padding: 28px; color: #7e8982; font-size: 14px; text-align: center; }
 .chat-column { min-width: 0; min-height: 0; flex: 0 0 auto; display: flex; flex-direction: column; overflow: hidden; }
 .chat-panel { width: 100%; min-width: 0; height: 100%; }
-.reader-side-tabs { display: flex; flex: 0 0 auto; gap: 4px; padding: 6px 10px 0; border-bottom: 1px solid var(--line); background: #fbfaf7; }
-.reader-side-tabs button { flex: 1; padding: 8px 6px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #66756b; font-size: 15px; cursor: pointer; }
+.reader-side-tabs { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; padding: 0; border: 0; background: transparent; }
+.reader-side-tabs button { display: grid; flex: 0 0 30px; place-items: center; width: 30px; height: 30px; padding: 5px; border: 0; border-bottom: 2px solid transparent; border-radius: 4px 4px 0 0; background: transparent; color: #66756b; cursor: pointer; }
+.reader-side-tabs button svg { width: 17px; height: 17px; }
 .reader-side-tabs button:hover { background: #f1f3ee; color: var(--ink); }
+.reader-side-tabs button:focus-visible { outline: 2px solid #a5bca9; outline-offset: 1px; }
 .reader-side-tabs button.active { border-bottom-color: var(--accent); color: var(--accent); font-weight: 650; }
 .reader-side-content, .reader-notes-panel { min-width: 0; min-height: 0; flex: 1 1 auto; overflow: hidden; }
+.reader-side-content { display: flex; flex-direction: column; }
 .reader-side-content[hidden], .reader-notes-panel[hidden] { display: none !important; }
 .reader-notes-panel { display: flex; flex-direction: column; padding: 12px; background: #fbfaf7; color: var(--ink); }
 .reader-notes-heading { display: flex; flex: 0 0 auto; justify-content: space-between; align-items: baseline; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
@@ -320,20 +326,19 @@ h1, h2, p { margin-top: 0; }
 .web-search-toggle { display: flex !important; align-items: center; gap: 6px; margin: 0 !important; font-size: 14px !important; white-space: nowrap; }
 .web-search-toggle input { margin: 0; accent-color: var(--accent); }
 .chat-panel { min-height: 0; display: flex; flex-direction: column; background: var(--chrome); border-left: 1px solid var(--line); }
-.paper-chats { height: 100%; min-height: 0; display: flex; flex-direction: column; }
-.chat-session-bar { display: flex; align-items: center; gap: 4px; padding: 5px 8px; border-bottom: 1px solid var(--line); background: #f4f5ef; }
-.chat-session-tabs { display: flex; gap: 4px; min-width: 0; flex: 1; overflow-x: auto; }
+.chat-session-bar { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; width: 100%; min-height: 39px; padding: 4px 8px; border-bottom: 1px solid var(--line); background: #f4f5ef; }
+.chat-session-tabs { display: flex; gap: 4px; min-width: 0; max-width: calc(100% - 162px); flex: 0 1 auto; overflow-x: auto; }
 .chat-session-tab { display: flex; flex: 0 0 auto; align-items: center; max-width: 160px; border-radius: 5px; background: transparent; }
-.chat-session-tab.active { background: #e2ece3; }
+.chat-session-tab.active { background: transparent; }
 .chat-session-tab button { min-width: 0; border: 0; padding: 5px 7px; color: #5d7164; background: transparent; font-size: 14px; cursor: pointer; }
-.chat-session-tab [role=tab] { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.chat-session-tab [role=tab] { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; border-bottom: 2px solid transparent; }
+.chat-session-tab [role=tab][aria-selected="true"] { border-bottom-color: var(--accent); color: var(--accent); font-weight: 650; }
 .chat-session-tab .chat-session-close { flex: 0 0 auto; padding: 3px 6px; font-size: 17px; }
 .chat-session-close:disabled { opacity: .35; cursor: default; }
 .chat-session-new { flex: 0 0 auto; border: 0; border-radius: 5px; padding: 3px 6px; color: var(--accent); background: transparent; font-size: 20px; cursor: pointer; }
 .chat-session-content { flex: 1; min-height: 0; }
 .chat-session-content[hidden] { display: none; }
-.chat-heading { display: flex; flex-direction: column; align-items: stretch; gap: 2px; min-width: 0; padding: 4px 12px 3px; }
-.chat-bound-paper { min-width: 0; overflow: hidden; color: #66756b; font-size: 14px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.chat-bound-paper { min-width: 0; max-width: 65%; flex: 1 1 8rem; overflow: hidden; color: #66756b; font-size: 14px; line-height: 1.35; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 .chat-messages { min-height: 0; flex: 1; overflow-y: auto; overflow-anchor: none; padding: 8px 14px 16px; }
 .chat-follow-latest { align-self: center; margin: 0 0 7px; padding: 5px 12px; border: 1px solid #d8e2d9; border-radius: 14px; color: var(--accent); background: #f5f8f3; font-size: 14px; cursor: pointer; }
 .chat-empty { text-align: center; margin: 46px 10px; color: #839087; }
@@ -430,7 +435,6 @@ h1, h2, p { margin-top: 0; }
 :root[data-theme="dark"] .topbar,
 :root[data-theme="dark"] .reader-topbar,
 :root[data-theme="dark"] .chat-panel,
-:root[data-theme="dark"] .reader-side-tabs,
 :root[data-theme="dark"] .reader-notes-panel { background: var(--chrome); border-color: var(--line); }
 :root[data-theme="dark"] .library-sidebar,
 :root[data-theme="dark"] .reader-outline { background: var(--sidebar); border-color: var(--line); }
@@ -469,6 +473,7 @@ h1, h2, p { margin-top: 0; }
 :root[data-theme="dark"] .folder-nav-button.selected,
 :root[data-theme="dark"] .nav-button:hover,
 :root[data-theme="dark"] .mode-button:hover,
+:root[data-theme="dark"] .reader-side-tabs button:hover,
 :root[data-theme="dark"] .layout-toggle:hover { color: var(--accent); background: var(--surface-selected); }
 :root[data-theme="dark"] .folder-nav-button.selected { border-color: #3d5048; }
 :root[data-theme="dark"] .library-sidebar .folder-actions,
@@ -546,7 +551,6 @@ h1, h2, p { margin-top: 0; }
 :root[data-theme="dark"] .pdf-page-shell { background: #303634; }
 :root[data-theme="dark"] .pdf-page-stage { background: #fff; }
 :root[data-theme="dark"] .chat-session-tab button { color: #b6c4bb; }
-:root[data-theme="dark"] .chat-session-tab.active { background: #2a3a31; }
 :root[data-theme="dark"] .chat-session-tab.active button { color: #b6dfc4; }
 :root[data-theme="dark"] .chat-messages,
 :root[data-theme="dark"] .reader-side-content,

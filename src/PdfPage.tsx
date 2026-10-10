@@ -31,6 +31,167 @@ function underlineEdgeFor(textNode: Text): UnderlineEdge {
   }
 }
 
+type TextUnit = { element: HTMLElement; trailingBreak: Node | null; left: number; top: number; right: number; bottom: number };
+
+function textUnitBounds(element: HTMLElement) {
+  const style = getComputedStyle(element);
+  const matrix = style.transform === 'none' ? new DOMMatrix() : new DOMMatrix(style.transform);
+  const origin = style.transformOrigin.split(/\s+/).map((value) => Number.parseFloat(value) || 0);
+  const originX = origin[0] || 0;
+  const originY = origin[1] || 0;
+  const points = [[0, 0], [element.offsetWidth, 0], [0, element.offsetHeight], [element.offsetWidth, element.offsetHeight]].map(([x, y]) => ({
+    x: matrix.a * (x - originX) + matrix.c * (y - originY) + matrix.e + originX + element.offsetLeft,
+    y: matrix.b * (x - originX) + matrix.d * (y - originY) + matrix.f + originY + element.offsetTop,
+  }));
+  return {
+    left: Math.min(...points.map((point) => point.x)),
+    top: Math.min(...points.map((point) => point.y)),
+    right: Math.max(...points.map((point) => point.x)),
+    bottom: Math.max(...points.map((point) => point.y)),
+  };
+}
+
+function orderTextLayerByColumns(textLayer: HTMLDivElement) {
+  const units: TextUnit[] = [];
+  let child = textLayer.firstChild;
+  while (child) {
+    if (!(child instanceof HTMLElement) || child.tagName !== 'SPAN' || child.getAttribute('role') !== 'presentation') return;
+    const element = child;
+    const trailingBreak = element.nextSibling instanceof HTMLElement && element.nextSibling.tagName === 'BR'
+      ? element.nextSibling
+      : null;
+    const bounds = textUnitBounds(element);
+    units.push({
+      element,
+      trailingBreak,
+      ...bounds,
+    });
+    child = trailingBreak ? trailingBreak.nextSibling : element.nextSibling;
+  }
+  if (units.length < 4 || units.length !== textLayer.querySelectorAll('span[role="presentation"]').length) return;
+
+  const findCut = (items: TextUnit[], axis: 'x' | 'y') => {
+    const intervals = items.map((item) => axis === 'x'
+      ? { start: item.left, end: item.right, crossStart: item.top, crossEnd: item.bottom }
+      : { start: item.top, end: item.bottom, crossStart: item.left, crossEnd: item.right })
+      .sort((left, right) => left.start - right.start || left.end - right.end);
+    const suffixMin = new Array<number>(intervals.length);
+    const suffixMax = new Array<number>(intervals.length);
+    const suffixMinThickness = new Array<number>(intervals.length);
+    for (let index = intervals.length - 1; index >= 0; index -= 1) {
+      const current = intervals[index];
+      suffixMin[index] = Math.min(current.crossStart, suffixMin[index + 1] ?? Infinity);
+      suffixMax[index] = Math.max(current.crossEnd, suffixMax[index + 1] ?? -Infinity);
+      suffixMinThickness[index] = Math.min(current.crossEnd - current.crossStart, suffixMinThickness[index + 1] ?? Infinity);
+    }
+    const threshold = axis === 'x' ? Math.max(14, textLayer.clientWidth * 0.025) : Math.max(10, textLayer.clientHeight * 0.012);
+    let prefixEnd = -Infinity;
+    let prefixMin = Infinity;
+    let prefixMax = -Infinity;
+    let prefixMinThickness = Infinity;
+    let best: { start: number; end: number; gap: number } | null = null;
+    for (let index = 1; index < intervals.length; index += 1) {
+      const previous = intervals[index - 1];
+      prefixEnd = Math.max(prefixEnd, previous.end);
+      prefixMin = Math.min(prefixMin, previous.crossStart);
+      prefixMax = Math.max(prefixMax, previous.crossEnd);
+      prefixMinThickness = Math.min(prefixMinThickness, previous.crossEnd - previous.crossStart);
+      const current = intervals[index];
+      const gap = current.start - prefixEnd;
+      const crossOverlap = Math.min(prefixMax, suffixMax[index]) - Math.max(prefixMin, suffixMin[index]);
+      const requiredOverlap = Math.min(prefixMinThickness, suffixMinThickness[index]) * 0.5;
+      const minimumGroupSize = axis === 'x' ? 2 : 1;
+      if (index >= minimumGroupSize && intervals.length - index >= minimumGroupSize && gap >= threshold && crossOverlap >= requiredOverlap && (!best || gap > best.gap)) {
+        best = { start: prefixEnd, end: current.start, gap };
+      }
+    }
+    return best;
+  };
+  let hasColumnCut = false;
+  const order = (items: TextUnit[], depth = 0): TextUnit[] => {
+    if (items.length < 4 || depth > 12) return items;
+    const xCut = findCut(items, 'x');
+    if (xCut) {
+      const before = items.filter((item) => item.right <= xCut.start + 0.5);
+      const after = items.filter((item) => item.left >= xCut.end - 0.5);
+      if (before.length && after.length && before.length + after.length === items.length) {
+        hasColumnCut = true;
+        return [...order(before, depth + 1), ...order(after, depth + 1)];
+      }
+    }
+
+    const wide = items.filter((item) => item.right - item.left >= textLayer.clientWidth * 0.45);
+    const wideSet = new Set(wide);
+    const body = items.filter((item) => !wideSet.has(item));
+    const bodyCut = wide.length && body.length >= 4 ? findCut(body, 'x') : null;
+    if (bodyCut) {
+      const bridge = wide.filter((item) => item.left < bodyCut.end && item.right > bodyCut.start);
+      const threshold = Math.max(10, textLayer.clientHeight * 0.012);
+      if (bridge.length) {
+        const bodyTop = Math.min(...body.map((item) => item.top));
+        const bodyBottom = Math.max(...body.map((item) => item.bottom));
+        const above = bridge.filter((item) => item.bottom + threshold <= bodyTop);
+        const below = bridge.filter((item) => item.top >= bodyBottom + threshold);
+        if (above.length + below.length !== bridge.length) return items;
+        const bridgeSet = new Set([...above, ...below]);
+        const remaining = items.filter((item) => !bridgeSet.has(item));
+        return [...order(above, depth + 1), ...order(remaining, depth + 1), ...order(below, depth + 1)];
+      }
+    }
+
+    const yCut = findCut(items, 'y');
+    if (!yCut) return items;
+    const before = items.filter((item) => item.bottom <= yCut.start + 0.5);
+    const after = items.filter((item) => item.top >= yCut.end - 0.5);
+    if (!before.length || !after.length || before.length + after.length !== items.length) return items;
+    return [...order(before, depth + 1), ...order(after, depth + 1)];
+  };
+  const ordered = order(units);
+  if (!hasColumnCut || ordered.every((item, index) => item === units[index])) return;
+  textLayer.replaceChildren(...ordered.flatMap((item) => item.trailingBreak ? [item.element, item.trailingBreak] : [item.element]));
+}
+
+function mergeSelectionRects(rects: { rect: DOMRect; underline_edge: UnderlineEdge }[]) {
+  const merged: { rect: DOMRect; underline_edge: UnderlineEdge }[] = [];
+  for (const current of rects) {
+    const vertical = current.underline_edge === 'left' || current.underline_edge === 'right';
+    let rect = current.rect;
+    for (let index = 0; index < merged.length;) {
+      const item = merged[index];
+      if (item.underline_edge !== current.underline_edge) {
+        index += 1;
+        continue;
+      }
+      const crossOverlap = vertical
+        ? Math.min(item.rect.right, rect.right) - Math.max(item.rect.left, rect.left)
+        : Math.min(item.rect.bottom, rect.bottom) - Math.max(item.rect.top, rect.top);
+      const crossSize = vertical
+        ? Math.min(item.rect.width, rect.width)
+        : Math.min(item.rect.height, rect.height);
+      if (crossOverlap < crossSize * 0.5) {
+        index += 1;
+        continue;
+      }
+      const alongGap = vertical
+        ? Math.max(item.rect.top - rect.bottom, rect.top - item.rect.bottom, 0)
+        : Math.max(item.rect.left - rect.right, rect.left - item.rect.right, 0);
+      if (alongGap > 1) {
+        index += 1;
+        continue;
+      }
+      const left = Math.min(item.rect.left, rect.left);
+      const top = Math.min(item.rect.top, rect.top);
+      const right = Math.max(item.rect.right, rect.right);
+      const bottom = Math.max(item.rect.bottom, rect.bottom);
+      rect = new DOMRect(left, top, right - left, bottom - top);
+      merged.splice(index, 1);
+      index = 0;
+    }
+    merged.push({ rect, underline_edge: current.underline_edge });
+  }
+  return merged;
+}
+
 function visualLineCount(rects: { rect: DOMRect; underline_edge: UnderlineEdge }[]) {
   const bands: { vertical: boolean; position: number; thickness: number }[] = [];
   for (const { rect, underline_edge } of rects) {
@@ -123,27 +284,31 @@ export function PdfPage({
       if (range.intersectsNode(textNode)) {
         const start = range.startContainer === textNode ? range.startOffset : 0;
         const end = range.endContainer === textNode ? range.endOffset : textNode.length;
-        if (end > start) {
+        if (end > start && textNode.data.slice(start, end).trim()) {
           textRange.setStart(textNode, start);
           textRange.setEnd(textNode, end);
           const underlineEdge = underlineEdgeFor(textNode);
+          const span = textNode.parentElement?.closest<HTMLElement>('span[role="presentation"]');
+          const spanBounds = span?.getBoundingClientRect();
+          const vertical = underlineEdge === 'left' || underlineEdge === 'right';
           for (const rect of Array.from(textRange.getClientRects())) {
-            const left = Math.max(bounds.left, rect.left);
-            const top = Math.max(bounds.top, rect.top);
-            const right = Math.min(bounds.right, rect.right);
-            const bottom = Math.min(bounds.bottom, rect.bottom);
+            const left = Math.max(bounds.left, vertical && spanBounds ? spanBounds.left : rect.left);
+            const top = Math.max(bounds.top, !vertical && spanBounds ? spanBounds.top : rect.top);
+            const right = Math.min(bounds.right, vertical && spanBounds ? spanBounds.right : rect.right);
+            const bottom = Math.min(bounds.bottom, !vertical && spanBounds ? spanBounds.bottom : rect.bottom);
             if (right <= left || bottom <= top) continue;
             const key = [...[left, top, right, bottom].map((value) => Math.round(value * 10) / 10), underlineEdge].join(':');
             if (seenRects.has(key)) continue;
             seenRects.add(key);
-            clientRects.push({ rect, underline_edge: underlineEdge });
+            clientRects.push({ rect: new DOMRect(left, top, right - left, bottom - top), underline_edge: underlineEdge });
           }
         }
       }
       node = walker.nextNode();
     }
-    const domRects = clientRects.map((item) => item.rect);
-    const rects = clientRects.map(({ rect, underline_edge }) => ({
+    const mergedRects = mergeSelectionRects(clientRects);
+    const domRects = mergedRects.map((item) => item.rect);
+    const rects = mergedRects.map(({ rect, underline_edge }) => ({
       x: Math.max(0, Math.min(1, (Math.max(bounds.left, rect.left) - bounds.left) / bounds.width)),
       y: Math.max(0, Math.min(1, (Math.max(bounds.top, rect.top) - bounds.top) / bounds.height)),
       width: Math.max(0, Math.min(1, (Math.min(bounds.right, rect.right) - Math.max(bounds.left, rect.left)) / bounds.width)),
@@ -155,11 +320,11 @@ export function PdfPage({
       return false;
     }
     const selectedText = selection.toString().trim();
-    if (clientRects.length > MAX_SELECTION_RECTS || selectedText.length > MAX_SELECTION_TEXT_LENGTH) {
+    if (mergedRects.length > MAX_SELECTION_RECTS || selectedText.length > MAX_SELECTION_TEXT_LENGTH) {
       onSelection(null, '选区过大，请缩小范围后再标记。');
       return false;
     }
-    if (visualLineCount(clientRects) > MAX_SELECTION_LINES) {
+    if (visualLineCount(mergedRects) > MAX_SELECTION_LINES) {
       onSelection(null, '选区跨越过多行，请缩小范围后再标记。');
       return false;
     }
@@ -244,7 +409,10 @@ export function PdfPage({
         const layer = new pdfjs.TextLayer({ textContentSource: content, container: textLayer, viewport });
         await layer.render();
         if (canceled) textLayer.replaceChildren();
-        else setRendered(true);
+        else {
+          orderTextLayerByColumns(textLayer);
+          setRendered(true);
+        }
       } catch (error) {
         const name = (error as { name?: string }).name;
         if (!canceled && name !== 'RenderingCancelledException') {

@@ -259,36 +259,21 @@
   background: var(--chrome);
 }
 
-.reader-assistant-heading {
-  min-height: 48px;
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  padding: 0 15px;
-  border-bottom: 1px solid var(--line);
-}
-
-.reader-assistant-heading h2 {
-  margin: 0;
-  color: var(--ink);
-  font-size: 15px;
-  font-weight: 650;
-}
-
 .reader-shell .reader-side-tabs {
-  min-height: 39px;
-  gap: 16px;
-  padding: 0 13px;
-  border-bottom-color: var(--line);
-  background: var(--chrome);
+  min-height: 30px;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .reader-shell .reader-side-tabs button {
-  flex: 0 0 auto;
-  min-width: 44px;
-  padding: 8px 2px 7px;
+  flex: 0 0 30px;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  padding: 5px;
   color: var(--ink-secondary);
-  font-size: 14px;
 }
 
 .reader-shell .reader-side-tabs button.active {
@@ -297,19 +282,13 @@
 
 .reader-shell .chat-session-bar {
   min-height: 39px;
-  padding: 5px 8px;
+  padding: 4px 8px;
   border-bottom-color: var(--line);
   background: var(--surface-muted);
 }
 
 .reader-shell .chat-session-tab {
   max-width: 150px;
-  border: 1px solid transparent;
-}
-
-.reader-shell .chat-session-tab.active {
-  border-color: var(--line);
-  background: var(--chrome);
 }
 
 .reader-shell .chat-session-tab button {
@@ -329,10 +308,6 @@
 .reader-shell .chat-session-new:hover {
   color: var(--ink);
   background: var(--chrome);
-}
-
-.reader-shell .chat-heading {
-  padding: 0 14px;
 }
 
 .reader-shell .chat-bound-paper {
@@ -375,7 +350,7 @@
 
 .reader-shell .chat-composer {
   flex: 0 0 auto;
-  margin: 7px 9px 9px;
+  margin: 7px 9px 5px;
   border-color: var(--border-soft);
   border-radius: 8px;
   background: var(--field);

@@ -6,7 +6,7 @@
 
 一个桌面文献阅读工作台。英文 PDF 导入后先完成全文翻译，中文文献直接阅读原始 PDF；在同一窗口中结合 AI 问答、笔记和批注理解文献。
 
-**当前版本：Windows x64 1.0.0 / macOS arm64、x64 0.14.0-beta.3 · Electron + React + Python**
+**当前版本：Windows x64 1.0.1 / macOS arm64、x64 0.14.0-beta.3 · Electron + React + Python**
 
 [功能](#功能) · [界面预览](#界面预览) · [使用](#使用) · [AI 配置](#ai-配置) · [源码构建](#源码构建) · [数据与隐私](#数据与隐私) · [当前限制](#当前限制)
 
@@ -68,35 +68,35 @@
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | [Folio-1.0.0-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v1.0.0/Folio-1.0.0-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
+| Windows x64 | [Folio-1.0.1-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v1.0.1/Folio-1.0.1-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
 | Mac · Apple Silicon | [Folio-0.14.0-beta.3-macOS-arm64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/Folio-0.14.0-beta.3-macOS-arm64.zip) | 解压，将 `.app` 拖入「应用程序」 |
 | Mac · Intel | [Folio-0.14.0-beta.3-macOS-x64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/Folio-0.14.0-beta.3-macOS-x64.zip) | 解压，将 `.app` 拖入「应用程序」 |
 
-发布页附有各平台验收报告及校验清单：[Windows 1.0.0](https://github.com/G-mas66/folio/releases/download/v1.0.0/SHA256SUMS.txt)、[macOS beta.3](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/SHA256SUMS.txt)。
+发布页附有各平台验收报告及校验清单：[Windows 1.0.1](https://github.com/G-mas66/folio/releases/download/v1.0.1/SHA256SUMS.txt)、[macOS beta.3](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/SHA256SUMS.txt)。
 
-Windows 1.0.0 的功能回归、安装升级与发布检查见[验收记录](docs/Folio-1.0.0-验收报告.md)。
+Windows 1.0.1 的功能回归、安装升级与发布检查见[验收记录](docs/Folio-1.0.1-验收报告.md)。
 
 现有 0.13.0 需要手动安装本版一次，之后 Windows 启动时会检查更新，也可在「设置 → 软件更新」手动检查。下载可以取消或重试，完成后由你点击「重启并安装」；退出应用不会自动安装。macOS 使用当前芯片架构的手动下载与替换方式。
 
-Windows 1.0.0 沿用 beta.4 的代理与差分下载：优先经 ghfast.top 下载安装包及 blockmap，失败依次回退 ghproxy.net、GitHub；版本清单与 SHA-512 校验值仍来自官方 GitHub。beta.4 客户端可在软件更新中升级，也可[通过免费代理手动下载 1.0.0](https://ghfast.top/https://github.com/G-mas66/folio/releases/download/v1.0.0/Folio-1.0.0-Windows-x64-Setup.exe)。安装新版并启动后，应用联网获取当前版本的官方清单并校验，删除已安装更新的重复缓存，保留一份当前安装包供下次差分使用。尚未安装的新版包会保留；清单暂时不可用时，下次启动再尝试清理。
+Windows 1.0.1 沿用此前版本的代理与差分下载：优先经 ghfast.top 下载安装包及 blockmap，失败依次回退 ghproxy.net、GitHub；版本清单与 SHA-512 校验值仍来自官方 GitHub。beta.4 和 1.0.0 客户端可在软件更新中升级，也可[通过免费代理手动下载 1.0.1](https://ghfast.top/https://github.com/G-mas66/folio/releases/download/v1.0.1/Folio-1.0.1-Windows-x64-Setup.exe)。安装新版并启动后，应用联网获取当前版本的官方清单并校验，删除已安装更新的重复缓存，保留一份当前安装包供下次差分使用。尚未安装的新版包会保留；清单暂时不可用时，下次启动再尝试清理。
 
 macOS 为测试版，采用 ad-hoc 签名，没有 Apple Developer ID 签名或公证。首次打开可能被 Gatekeeper 阻止，可按照系统「隐私与安全性」提示允许打开；真实用户机器上的首次安装流程尚未验证。
 
 自行构建后的 Windows 安装包路径：
 
 ```text
-dist/installer-1.0.0/Folio-1.0.0-Windows-x64-Setup.exe
+dist/installer-1.0.1/Folio-1.0.1-Windows-x64-Setup.exe
 ```
 
 界面品牌使用 Folio；Windows 可执行文件名和默认安装目录仍保留旧名称，以便覆盖现有安装并继续使用原来的用户数据与凭据身份。
 
-也可使用 `dist/installer-1.0.0/win-unpacked/阅川 Folio.exe`；需要保留整个 `win-unpacked` 文件夹。打包程序包含本地服务、Python 运行时、PDF 引擎、字体和布局模型，使用时不用手动启动 Python 或另装 Python。
+也可使用 `dist/installer-1.0.1/win-unpacked/阅川 Folio.exe`；需要保留整个 `win-unpacked` 文件夹。打包程序包含本地服务、Python 运行时、PDF 引擎、字体和布局模型，使用时不用手动启动 Python 或另装 Python。
 
 1. 在文献库创建分类文件夹，然后导入 PDF。程序保存库内副本，最初选择的文件保持不变。
 2. 英文文献等待中文和双语 PDF 生成；中文文献直接阅读。英文翻译可暂停、继续或重试，不需要逐段点击翻译。
 3. 点击「阅读」，在顶部文献标签中切换。选择原文、中文或双语对照，按需调整三栏宽度。
-4. 选中同一页内的文字后右键，添加高亮、下划线或批注，或在小窗口翻译选中的句子；右侧切换到「笔记」记录阅读心得。
-5. 如需 AI 问答，在「设置」完成接口配置，再在助手中提问或总结。同一篇文献可用助手顶部的 ＋ 新建会话，× 删除会话。
+4. 选中同一页内的文字后右键，添加高亮、下划线或批注，或在小窗口翻译选中的句子；右侧点击「笔记」图标记录阅读心得。
+5. 如需 AI 问答，在「设置」完成接口配置，再在助手中提问或总结。同一篇文献可用助手顶部会话旁的 ＋ 新建会话，× 删除会话；问答与笔记使用图标切换。
 
 文献卡片的「打开文件位置」定位原文副本，阅读窗口的「文件位置」定位当前版本的 PDF。分类属于数据库中的逻辑归类，不是实体文件夹；「打开文献目录」打开当前文献库的 `papers` 目录。
 
@@ -174,7 +174,7 @@ npm ci
 npm run dist
 ```
 
-`npm run dist` 依次构建界面、本地后端与 PDF 引擎，再生成 NSIS 安装包。PDF 引擎构建会准备 `.venv-pdf-engine`，使用 PDF2zh-Next **2.9.0**、BabelDOC **0.6.2** 和 PyInstaller **6.16.0**。1.0.0 Windows 的安装包目录为 `dist/installer-1.0.0/`。
+`npm run dist` 依次构建界面、本地后端与 PDF 引擎，再生成 NSIS 安装包。PDF 引擎构建会准备 `.venv-pdf-engine`，使用 PDF2zh-Next **2.9.0**、BabelDOC **0.6.2** 和 PyInstaller **6.16.0**。1.0.1 Windows 的安装包目录为 `dist/installer-1.0.1/`。
 
 ### macOS 测试版
 
@@ -231,6 +231,8 @@ beta.2 仅修复 Windows 更新说明中的 HTML 标签显示，未改变安装�
 
 Windows beta.4 的免费代理与差分组合、缓存清理、实际隔离安装升级及公开检测均已通过；本次 beta.3 → beta.4 下载量约 13.2 MB，相对整包减少约 97.4%。公开 ghfast 差分内容重建也通过双哈希校验，单次下载、重建与校验为 17.28 秒。详见 [beta.4 Windows 验收记录](docs/Folio-0.14.0-beta.4-验收报告.md)。
 
+Windows 1.0.1 修复双栏选区、中文标记高度与旋转页面坐标，并将助手图标、会话和新建按钮合并为一行。最终生产程序通过三种 PDF 视图、相邻两行标记、旋转/缩放、笔记与 AI 协议 GUI 回归；差分重建与安装升级结果见 [1.0.1 验收记录](docs/Folio-1.0.1-验收报告.md)。
+
 ## 项目结构
 
 ```text
@@ -255,10 +257,11 @@ docs/                      方案、验收记录和界面截图
 
 ## 当前限制
 
-- Windows x64 beta.4 已通过本机打包、隔离安装升级、数据保留、缓存清理及公开更新检测；macOS arm64/x64 继续使用已验收的 beta.3 测试版，目前没有 Apple Developer ID 签名或公证；Linux 未验证。
+- Windows x64 当前为 1.0.1；macOS arm64/x64 继续使用已验收的 beta.3 测试版，目前没有 Apple Developer ID 签名或公证；Linux 未验证。
 - 扫描件和无法提取正文的实质页面会阻止完成，当前没有单独 OCR 步骤。
 - 表格单元格、图片内文字和公式不会被完整翻译；复杂公式、跨页图表和特殊排版应检查输出。
 - 高亮、下划线、批注与句子翻译支持同一页内的可提取文字，不支持跨页选择或扫描图上的文字选择。
+- 旧版已保存的标记坐标不自动按文字搜索迁移；历史标记若仍有偏移，需要删除后重新标记。
 - 全文总结容量由所选模型与服务决定；读取模型列表也取决于服务是否提供相应接口。
 - 免费翻译和免 Key 搜索依赖第三方服务，不保证长期可用或固定速度。
 

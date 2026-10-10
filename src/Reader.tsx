@@ -1004,19 +1004,12 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
             style={{ width: readerLayout.chatVisible ? readerLayout.chatWidth : 0, flexBasis: readerLayout.chatVisible ? readerLayout.chatWidth : 0 }}
             aria-hidden={!readerLayout.chatVisible}
           >
-            <div className="reader-assistant-heading"><h2>文献助手</h2></div>
-            <div className="reader-side-tabs" role="tablist" aria-label="阅读侧栏">
-              <button id={`reader-side-tab-chat-${paperId}`} type="button" role="tab" data-testid="reader-side-tab-chat" aria-label="问答（AI 助手）" aria-controls={`reader-side-panel-chat-${paperId}`} aria-selected={rightPanel === 'chat'} className={rightPanel === 'chat' ? 'active' : ''} onClick={() => setRightPanel('chat')}>问答</button>
-              <button id={`reader-side-tab-notes-${paperId}`} type="button" role="tab" data-testid="reader-side-tab-notes" aria-controls={`reader-side-panel-notes-${paperId}`} aria-selected={rightPanel === 'notes'} className={rightPanel === 'notes' ? 'active' : ''} onClick={() => setRightPanel('notes')}>笔记</button>
-            </div>
-            <div id={`reader-side-panel-chat-${paperId}`} className="reader-side-content" role="tabpanel" aria-labelledby={`reader-side-tab-chat-${paperId}`} hidden={rightPanel !== 'chat'}>
-              <PaperChats
-                paperId={paperId} title={paper.chinese_title || paper.english_title} active={active} visible={rightPanel === 'chat'}
-                onJump={jumpToSource}
-                settings={settings} currentModel={currentModel} modelFailure={modelFailure}
-                onModelChange={chooseModel} onWebSearchChange={updateWebSearch}
-              />
-            </div>
+            <PaperChats
+              paperId={paperId} title={paper.chinese_title || paper.english_title} active={active} visible={rightPanel === 'chat'} rightPanel={rightPanel} onRightPanelChange={setRightPanel}
+              onJump={jumpToSource}
+              settings={settings} currentModel={currentModel} modelFailure={modelFailure}
+              onModelChange={chooseModel} onWebSearchChange={updateWebSearch}
+            />
             <section id={`reader-side-panel-notes-${paperId}`} className="reader-notes-panel" role="tabpanel" aria-labelledby={`reader-side-tab-notes-${paperId}`} hidden={rightPanel !== 'notes'}>
               <div className="reader-notes-heading">
                 <h2>阅读笔记</h2>
@@ -1223,6 +1216,7 @@ type ActiveStream = {
 
 type PaperChatsProps = {
   paperId: string; title: string; active: boolean; visible: boolean;
+  rightPanel: 'chat' | 'notes'; onRightPanelChange: (panel: 'chat' | 'notes') => void;
   onJump: (source: Source) => void;
   settings: ReaderSettings | null; currentModel: string; modelFailure: string;
   onModelChange: (model: string) => Promise<void>;
@@ -1268,6 +1262,7 @@ function PaperChats(props: PaperChatsProps) {
       const created = await api<ChatSession>(`/papers/${props.paperId}/chat-sessions`, 'POST', {});
       setSessions((previous) => [...previous, created]);
       setCurrentSession(created.id);
+      props.onRightPanelChange('chat');
     } catch (error) { setFailure(errorMessage(error)); }
     finally { setChanging(false); }
   }
@@ -1285,25 +1280,36 @@ function PaperChats(props: PaperChatsProps) {
     finally { setChanging(false); }
   }
 
-  return <div className="paper-chats">
+  return <>
     <div className="chat-session-bar">
+      <div className="reader-side-tabs" role="tablist" aria-label="阅读侧栏">
+        <button id={`reader-side-tab-chat-${props.paperId}`} type="button" role="tab" data-testid="reader-side-tab-chat" aria-label="问答（AI 助手）" title="问答（AI 助手）" aria-controls={`reader-side-panel-chat-${props.paperId}`} aria-selected={props.rightPanel === 'chat'} className={props.rightPanel === 'chat' ? 'active' : ''} onClick={() => props.onRightPanelChange('chat')}>
+          <svg aria-hidden="true" viewBox="0 0 20 20" fill="none"><path d="M3.25 4.75A1.75 1.75 0 0 1 5 3h10a1.75 1.75 0 0 1 1.75 1.75v6A1.75 1.75 0 0 1 15 12.5H9l-3.75 3v-3H5a1.75 1.75 0 0 1-1.75-1.75v-6Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/><path d="M6.5 7h7M6.5 9.75h4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+        </button>
+        <button id={`reader-side-tab-notes-${props.paperId}`} type="button" role="tab" data-testid="reader-side-tab-notes" aria-label="笔记" title="笔记" aria-controls={`reader-side-panel-notes-${props.paperId}`} aria-selected={props.rightPanel === 'notes'} className={props.rightPanel === 'notes' ? 'active' : ''} onClick={() => props.onRightPanelChange('notes')}>
+          <svg aria-hidden="true" viewBox="0 0 20 20" fill="none"><path d="M5.25 2.75h6.5l3 3v10A1.5 1.5 0 0 1 13.25 17h-8A1.5 1.5 0 0 1 3.75 15.5v-11A1.75 1.75 0 0 1 5.25 2.75Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/><path d="M11.5 3v3h3M6.5 9h6M6.5 12h6M6.5 15h3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+        </button>
+      </div>
       <div className="chat-session-tabs" role="tablist" aria-label="文献 AI 会话">
         {sessions.map((session) => <div className={`chat-session-tab ${session.id === currentSession ? 'active' : ''}`} key={session.id}>
-          <button type="button" role="tab" aria-selected={session.id === currentSession} data-testid={`chat-session-${session.id}`} title={session.title} onClick={() => setCurrentSession(session.id)}>{session.title}</button>
+          <button type="button" role="tab" aria-selected={session.id === currentSession} data-testid={`chat-session-${session.id}`} title={session.title} onClick={() => { setCurrentSession(session.id); props.onRightPanelChange('chat'); }}>{session.title}</button>
           <button type="button" className="chat-session-close" aria-label={`删除会话 ${session.title}`} title={busySessions[session.id] ? '请先停止此会话的生成' : '删除此会话'} disabled={changing || busySessions[session.id]} onClick={() => void deleteSession(session)}>×</button>
         </div>)}
       </div>
       <button type="button" className="chat-session-new" aria-label="新建 AI 会话" title="新建会话" disabled={changing || !sessions.length} onClick={() => void newSession()}>＋</button>
+      <div className="chat-bound-paper" title={props.title}>当前文献 · {props.title}</div>
     </div>
-    {failure && <div className="chat-error" role="alert">{failure}</div>}
-    {!sessions.length && !failure && <div className="chat-empty">正在读取会话…</div>}
-    {sessions.map((session) => <div className="chat-session-content" data-session-id={session.id} key={session.id} hidden={session.id !== currentSession}>
-      <ChatPanel {...props} sessionId={session.id} visible={props.visible && session.id === currentSession} onBusyChange={markBusy} />
-    </div>)}
-  </div>;
+    <div id={`reader-side-panel-chat-${props.paperId}`} className="reader-side-content" role="tabpanel" aria-labelledby={`reader-side-tab-chat-${props.paperId}`} hidden={props.rightPanel !== 'chat'}>
+      {failure && <div className="chat-error" role="alert">{failure}</div>}
+      {!sessions.length && !failure && <div className="chat-empty">正在读取会话…</div>}
+      {sessions.map((session) => <div className="chat-session-content" data-session-id={session.id} key={session.id} hidden={session.id !== currentSession}>
+        <ChatPanel {...props} sessionId={session.id} visible={props.visible && session.id === currentSession} onBusyChange={markBusy} />
+      </div>)}
+    </div>
+  </>;
 }
 
-function ChatPanel({ paperId, title, active, visible, onJump, settings, currentModel, modelFailure, onModelChange, onWebSearchChange, sessionId, onBusyChange }: PaperChatsProps & {
+function ChatPanel({ paperId, active, visible, onJump, settings, currentModel, modelFailure, onModelChange, onWebSearchChange, sessionId, onBusyChange }: PaperChatsProps & {
   sessionId: string; onBusyChange: (id: string, busy: boolean) => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -1485,9 +1491,6 @@ function ChatPanel({ paperId, title, active, visible, onJump, settings, currentM
 
   return (
     <aside className="chat-panel">
-      <div className="chat-heading">
-        <div className="chat-bound-paper" title={title}>当前文献 · {title}</div>
-      </div>
       <div className="chat-messages" ref={messagesRef} data-testid="chat-messages" aria-live="polite" onWheel={(event) => {
         if (event.deltaY < 0) { followLatestRef.current = false; setFollowingLatest(false); }
       }} onScroll={(event) => {

@@ -105,6 +105,9 @@ const until = async (check, message) => {
       selection.removeAllRanges();
       selection.addRange(range);
       const bounds = page.querySelector('.pdf-page-stage').getBoundingClientRect();
+      const spanBounds = span.closest('span[role="presentation"]')?.getBoundingClientRect() || span.getBoundingClientRect();
+      const spanLeft = Math.max(bounds.left, spanBounds.left);
+      const spanRight = Math.min(bounds.right, spanBounds.right);
       const rects = [...range.getClientRects()].map(rect => ({
         x: (rect.left - bounds.left) / bounds.width,
         y: (rect.top - bounds.top) / bounds.height,
@@ -113,7 +116,7 @@ const until = async (check, message) => {
       }));
       const rect = range.getBoundingClientRect();
       page.querySelector('.textLayer').dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: rect.right, clientY: rect.bottom }));
-      return { text: selection.toString(), rects };
+      return { text: selection.toString(), rects, spanCrossAxis: { x: (spanLeft - bounds.left) / bounds.width, width: (spanRight - spanLeft) / bounds.width } };
     }, { pageNumber, snippet });
     assert.equal(selected.text, snippet, 'The DOM selection must contain only the requested characters');
     assert.equal(await panel(id).getByTestId('reader-selection-context-menu').count(), 0, 'Selecting a text fragment alone must not open the context menu');
@@ -130,11 +133,17 @@ const until = async (check, message) => {
       range.setStart(textNode, offset);
       range.setEnd(textNode, offset + target.snippet.length);
       const rect = range.getBoundingClientRect();
+      const stage = page.querySelector('.pdf-page-stage').getBoundingClientRect();
+      const textSpan = span.closest('span[role="presentation"]') || span;
+      const spanBounds = textSpan.getBoundingClientRect();
+      const spanTop = Math.max(stage.top, spanBounds.top);
+      const spanBottom = Math.min(stage.bottom, spanBounds.bottom);
       return {
         start: { x: rect.left + 1, y: rect.top + rect.height / 2 },
         end: { x: rect.right - 1, y: rect.top + rect.height / 2 },
         spanWidth: span.getBoundingClientRect().width,
-        stageWidth: page.querySelector('.pdf-page-stage').getBoundingClientRect().width,
+        stageWidth: stage.width,
+        spanCrossAxis: { y: (spanTop - stage.top) / stage.height, height: (spanBottom - spanTop) / stage.height },
       };
     }, { pageNumber, snippet });
     await main.mouse.move(target.start.x, target.start.y);
@@ -162,7 +171,7 @@ const until = async (check, message) => {
     assert.ok(selected.rects[0].width < neighborSpanWidth * .8,
       'The dragged character range must stay narrower than its full neighboring text span');
     assert.equal(await panel(id).getByTestId('reader-selection-context-menu').count(), 0, 'A mouse drag alone must not open the context menu');
-    return { ...selected, neighborSpanWidth, selectedToSpanWidth: selected.rects[0].width / neighborSpanWidth };
+    return { ...selected, neighborSpanWidth, selectedToSpanWidth: selected.rects[0].width / neighborSpanWidth, spanCrossAxis: target.spanCrossAxis };
   };
   const waitForTextVisible = async (id, pageNumber, snippet) => until(async () => panel(id).evaluate((element, target) => {
     const page = element.querySelector('.pdf-page-frame[data-page-number="' + target.pageNumber + '"]');
@@ -298,7 +307,7 @@ const until = async (check, message) => {
     assert.match(edgeText, /Downloaded by Folio synthetic review only/, 'The rotated fixture must contain page-edge download text');
     const preciseSelection = await selectSnippet(first.paper_id, 'measured signal', 3);
     assert.equal(preciseSelection.rects.length, 1);
-    assert.ok(preciseSelection.rects[0].width < .2, 'A character-range mark must not expand to the full text span');
+    assert.ok(preciseSelection.rects[0].height < .2, 'A rotated character-range mark must retain its partial along-line extent');
     await openSelectionMenu(first.paper_id);
     await current().getByTestId('reader-selection-context-menu').getByRole('button', { name: '下划线', exact: true }).click();
     await until(async () => (await marks(first.paper_id)).length === 2, 'Underline must reach the database');
@@ -307,7 +316,8 @@ const until = async (check, message) => {
     assert.equal(underline.selected_text, 'measured signal');
     assert.equal(underline.rects.length, preciseSelection.rects.length);
     assert.equal(underline.rects[0].underline_edge, 'left', 'A text line rotated 90 degrees must underline its left edge');
-    for (const key of ['x', 'y', 'width', 'height']) assert.ok(Math.abs(underline.rects[0][key] - preciseSelection.rects[0][key]) < .003, `Partial text geometry must preserve ${key}`);
+    for (const key of ['y', 'height']) assert.ok(Math.abs(underline.rects[0][key] - preciseSelection.rects[0][key]) < .003, `Partial rotated text geometry must preserve along-line ${key}`);
+    for (const key of ['x', 'width']) assert.ok(Math.abs(underline.rects[0][key] - preciseSelection.spanCrossAxis[key]) < .003, `Rotated underline cross-axis must follow the text span ${key}`);
     await current().getByTestId(`annotation-rect-${underline.id}-0`).waitFor();
     aligned(await rect(underline.id), underline.rects[0]);
     const rotatedStroke = await current().getByTestId('annotation-rect-' + underline.id + '-0').evaluate(element => {
@@ -349,7 +359,8 @@ const until = async (check, message) => {
     const normalUnderline = (await marks(first.paper_id)).find(mark => mark.kind === 'underline' && mark.page_no === 1);
     assert.equal(normalUnderline.selected_text, draggedSelection.text, 'The saved underline must preserve the native mouse-drag text range');
     assert.equal(normalUnderline.rects.length, draggedSelection.rects.length);
-    for (const key of ['x', 'y', 'width', 'height']) assert.ok(Math.abs(normalUnderline.rects[0][key] - draggedSelection.rects[0][key]) < .003, `The saved underline must stay within the dragged range (${key})`);
+    for (const key of ['x', 'width']) assert.ok(Math.abs(normalUnderline.rects[0][key] - draggedSelection.rects[0][key]) < .003, `The saved underline must preserve the dragged partial-character ${key}`);
+    for (const key of ['y', 'height']) assert.ok(Math.abs(normalUnderline.rects[0][key] - draggedSelection.spanCrossAxis[key]) < .003, `Horizontal underline cross-axis must follow the text span ${key}`);
     assert.equal(normalUnderline.rects[0].underline_edge, 'bottom', 'Horizontal text must keep the legacy bottom underline edge');
     const normalStroke = await current().getByTestId('annotation-rect-' + normalUnderline.id + '-0').evaluate(element => {
       const style = getComputedStyle(element);
