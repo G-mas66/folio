@@ -272,7 +272,7 @@
   width: 30px;
   min-width: 30px;
   height: 30px;
-  padding: 5px;
+  padding: 4px;
   color: var(--ink-secondary);
 }
 
@@ -298,21 +298,15 @@
 }
 
 .reader-shell .chat-session-new {
-  width: 27px;
-  height: 27px;
+  width: 32px;
+  height: 32px;
   border: 1px solid var(--line);
   color: var(--ink-secondary);
-  font-size: 17px;
 }
 
 .reader-shell .chat-session-new:hover {
   color: var(--ink);
   background: var(--chrome);
-}
-
-.reader-shell .chat-bound-paper {
-  color: var(--ink-secondary);
-  font-size: 14px;
 }
 
 .reader-shell .chat-messages {

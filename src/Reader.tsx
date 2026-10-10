@@ -1005,7 +1005,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
             aria-hidden={!readerLayout.chatVisible}
           >
             <PaperChats
-              paperId={paperId} title={paper.chinese_title || paper.english_title} active={active} visible={rightPanel === 'chat'} rightPanel={rightPanel} onRightPanelChange={setRightPanel}
+              paperId={paperId} active={active} visible={rightPanel === 'chat'} rightPanel={rightPanel} onRightPanelChange={setRightPanel}
               onJump={jumpToSource}
               settings={settings} currentModel={currentModel} modelFailure={modelFailure}
               onModelChange={chooseModel} onWebSearchChange={updateWebSearch}
@@ -1215,7 +1215,7 @@ type ActiveStream = {
 };
 
 type PaperChatsProps = {
-  paperId: string; title: string; active: boolean; visible: boolean;
+  paperId: string; active: boolean; visible: boolean;
   rightPanel: 'chat' | 'notes'; onRightPanelChange: (panel: 'chat' | 'notes') => void;
   onJump: (source: Source) => void;
   settings: ReaderSettings | null; currentModel: string; modelFailure: string;
@@ -1296,8 +1296,7 @@ function PaperChats(props: PaperChatsProps) {
           <button type="button" className="chat-session-close" aria-label={`删除会话 ${session.title}`} title={busySessions[session.id] ? '请先停止此会话的生成' : '删除此会话'} disabled={changing || busySessions[session.id]} onClick={() => void deleteSession(session)}>×</button>
         </div>)}
       </div>
-      <button type="button" className="chat-session-new" aria-label="新建 AI 会话" title="新建会话" disabled={changing || !sessions.length} onClick={() => void newSession()}>＋</button>
-      <div className="chat-bound-paper" title={props.title}>当前文献 · {props.title}</div>
+      <button type="button" className="chat-session-new" aria-label="新建 AI 会话" title="新建会话" disabled={changing || !sessions.length} onClick={() => void newSession()}><svg aria-hidden="true" viewBox="0 0 20 20" fill="none"><path d="M10 4v12M4 10h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/></svg></button>
     </div>
     <div id={`reader-side-panel-chat-${props.paperId}`} className="reader-side-content" role="tabpanel" aria-labelledby={`reader-side-tab-chat-${props.paperId}`} hidden={props.rightPanel !== 'chat'}>
       {failure && <div className="chat-error" role="alert">{failure}</div>}

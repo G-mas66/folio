@@ -8,6 +8,7 @@ const { parseUpdateInfo } = require('electron-updater/out/providers/Provider');
 const { copyAndVerifyStorage, resolveLocationConfig, validateStorageTarget } = require('./storage-location.cjs');
 const { finalizeInstalledUpdateCache, restoreInstallerCache } = require('./update-cache.cjs');
 const { downloadUpdateWithFallback, isDownloadFallbackActive } = require('./update-download.cjs');
+const { classifyUpdateError, createUpdateChecker, updateCheckErrorMessage } = require('./update-check.cjs');
 const { releaseNotesText, selectMacUpdate } = require('./update-service.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
@@ -54,6 +55,9 @@ let backendStopping = false;
 let backendStopPromise;
 let storageMigrationInProgress = false;
 let storageMigrationRestartPending = false;
+let windowsUpdateChecker;
+let windowsUpdateCheckPromise;
+let windowsUpdateCheckActive = false;
 let backendToken;
 let backendBase;
 let mainWindow;
@@ -82,6 +86,24 @@ function publishUpdateState(next) {
     mainWindow.webContents.send('workbench:update-state', updateState);
   }
   return updateState;
+}
+
+function logUpdateCheck(event) {
+  const entry = { time: new Date().toISOString() };
+  if (['attempt', 'proxy', 'check'].includes(event.event)) entry.event = event.event;
+  if (['system', 'direct'].includes(event.route)) entry.route = event.route;
+  if (['started', 'succeeded', 'failed', 'restored', 'restore-failed'].includes(event.result)) entry.result = event.result;
+  if (['proxy', 'connection', 'timeout', 'http', 'service'].includes(event.category)) entry.category = event.category;
+  if (typeof event.code === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(event.code)) entry.code = event.code;
+  if (Number.isInteger(event.status) && event.status >= 100 && event.status <= 599) entry.status = event.status;
+  const filePath = path.join(uiDataRoot, 'update-check.log');
+  try {
+    if (fs.existsSync(filePath) && fs.statSync(filePath).size > 64 * 1024) {
+      const entries = fs.readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean).slice(-100);
+      fs.writeFileSync(filePath, `${entries.join('\n')}\n`, { encoding: 'utf8', mode: 0o600 });
+    }
+    fs.appendFileSync(filePath, `${JSON.stringify(entry)}\n`, { encoding: 'utf8', mode: 0o600 });
+  } catch {}
 }
 
 async function readCurrentInstallerInfo() {
@@ -136,11 +158,22 @@ function configureWindowsUpdater() {
       autoUpdater.allowPrerelease = true;
       autoUpdater.allowDowngrade = false;
     }
-    autoUpdater.on('checking-for-update', () => publishUpdateState({ status: 'checking', message: '' }));
-    autoUpdater.on('update-available', (info) => publishUpdateState({
-      status: 'available', version: info.version, releaseNotes: releaseNotesText(info.releaseNotes), message: '',
-    }));
-    autoUpdater.on('update-not-available', () => publishUpdateState({ status: 'not-available', version: '', releaseNotes: '', message: '' }));
+    windowsUpdateChecker = createUpdateChecker({
+      session: autoUpdater.netSession,
+      checkForUpdates: () => autoUpdater.checkForUpdates(),
+      log: logUpdateCheck,
+    });
+    autoUpdater.on('checking-for-update', () => {
+      if (!windowsUpdateCheckActive) publishUpdateState({ status: 'checking', message: '' });
+    });
+    autoUpdater.on('update-available', (info) => {
+      if (windowsUpdateCheckActive) return;
+      publishUpdateState({ status: 'available', version: info.version, releaseNotes: releaseNotesText(info.releaseNotes), message: '' });
+    });
+    autoUpdater.on('update-not-available', () => {
+      if (windowsUpdateCheckActive) return;
+      publishUpdateState({ status: 'not-available', version: '', releaseNotes: '', message: '' });
+    });
     autoUpdater.on('download-progress', (progress) => publishUpdateState({
       status: 'downloading', percent: progress.percent, bytesPerSecond: progress.bytesPerSecond,
       total: progress.total, transferred: progress.transferred,
@@ -153,10 +186,12 @@ function configureWindowsUpdater() {
       downloadCancellationToken = null;
       publishUpdateState({ status: 'available', version: info.version, percent: undefined, transferred: undefined, total: undefined, message: '下载已取消，可以重新下载。' });
     });
-    autoUpdater.on('error', () => {
+    autoUpdater.on('error', (error) => {
       if (isDownloadFallbackActive(autoUpdater)) return;
+      if (windowsUpdateCheckActive) return;
       const downloading = updateState.status === 'downloading';
-      publishUpdateState({ status: downloading ? 'available' : 'error', message: downloading ? '下载失败，可以重试。' : '检查更新失败，请检查网络后重试。' });
+      const failure = classifyUpdateError(error);
+      publishUpdateState({ status: downloading ? 'available' : 'error', message: downloading ? '下载失败，可以重试。' : updateCheckErrorMessage(failure) });
     });
   } catch {
     publishUpdateState({ status: 'error', message: '此安装包暂时无法检查更新。' });
@@ -167,15 +202,37 @@ async function checkForUpdatesInternal() {
   if (storageMigrationInProgress || updateInstallInProgress) throw new Error('当前操作期间不能检查更新。');
   if (!app.isPackaged) return publishUpdateState({ status: 'error', message: '请使用已安装版本检查更新。' });
   if (process.platform === 'win32') {
-    if (!autoUpdater) return publishUpdateState({ status: 'error', message: '此安装包暂时无法检查更新。' });
-    if (['checking', 'downloading', 'downloaded'].includes(updateState.status)) return updateState;
+    if (!autoUpdater || !windowsUpdateChecker) return publishUpdateState({ status: 'error', message: '此安装包暂时无法检查更新。' });
+    if (windowsUpdateCheckPromise) return windowsUpdateCheckPromise;
+    if (['downloading', 'downloaded'].includes(updateState.status)) return updateState;
+    windowsUpdateCheckActive = true;
     publishUpdateState({ status: 'checking', message: '' });
+    const operation = (async () => {
+      try {
+        const result = await windowsUpdateChecker();
+        const info = result?.updateInfo || result?.versionInfo;
+        if (!info) {
+          logUpdateCheck({ event: 'check', result: 'failed', category: 'service' });
+          return publishUpdateState({ status: 'error', message: updateCheckErrorMessage({ category: 'service' }) });
+        }
+        logUpdateCheck({ event: 'check', result: 'succeeded' });
+        return result.isUpdateAvailable
+          ? publishUpdateState({ status: 'available', version: info.version, releaseNotes: releaseNotesText(info.releaseNotes), message: '' })
+          : publishUpdateState({ status: 'not-available', version: '', releaseNotes: '', message: '' });
+      } catch (error) {
+        const failure = classifyUpdateError(error);
+        logUpdateCheck({ event: 'check', result: 'failed', category: failure.category, code: failure.code, status: failure.status });
+        return publishUpdateState({ status: 'error', message: updateCheckErrorMessage(failure) });
+      } finally {
+        windowsUpdateCheckActive = false;
+      }
+    })();
+    windowsUpdateCheckPromise = operation;
     try {
-      await autoUpdater.checkForUpdates();
-    } catch {
-      if (updateState.status === 'checking') publishUpdateState({ status: 'error', message: '检查更新失败，请检查网络后重试。' });
+      return await operation;
+    } finally {
+      if (windowsUpdateCheckPromise === operation) windowsUpdateCheckPromise = null;
     }
-    return updateState;
   }
   if (process.platform !== 'darwin') return publishUpdateState({ status: 'error', message: '此平台暂不提供更新检查。' });
   publishUpdateState({ status: 'checking', message: '' });

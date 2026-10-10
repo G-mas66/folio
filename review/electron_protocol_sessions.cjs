@@ -217,10 +217,7 @@ const server = http.createServer(async (request, response) => {
     const initialSessions = await sessions();
     assert.equal(initialSessions.length, 1);
     await page.getByTestId(`chat-session-${initialSessions[0].id}`).waitFor();
-    const paperBinding = page.locator('.chat-bound-paper');
-    await paperBinding.waitFor();
-    assert.equal(await paperBinding.getAttribute('title'), '连续阅读验收文献');
-    assert.equal((await paperBinding.innerText()).trim(), '当前文献 · 连续阅读验收文献');
+    assert.equal(await page.locator('.chat-bound-paper').count(), 0, 'Paper title should not occupy the assistant toolbar');
     const chatMode = page.getByRole('tab', { name: '问答（AI 助手）', exact: true });
     const notesMode = page.getByRole('tab', { name: '笔记', exact: true });
     assert.equal(await page.locator('.reader-side-tabs').count(), 1, 'Only one assistant mode tablist should be rendered');
@@ -261,7 +258,6 @@ const server = http.createServer(async (request, response) => {
       const modeTabs = toolbar?.querySelector('.reader-side-tabs');
       const sessionTabs = toolbar?.querySelector('.chat-session-tabs');
       const addSession = toolbar?.querySelector('.chat-session-new');
-      const binding = toolbar?.querySelector('.chat-bound-paper');
       const composer = document.querySelector('.chat-session-content:not([hidden]) .chat-composer');
       const centerY = node => {
         const rect = node.getBoundingClientRect();
@@ -269,18 +265,37 @@ const server = http.createServer(async (request, response) => {
       };
       const toolbarRect = toolbar.getBoundingClientRect();
       const addRect = addSession.getBoundingClientRect();
-      const bindingRect = binding.getBoundingClientRect();
+      const addIcon = addSession.querySelector('svg');
+      const addIconRect = addIcon.getBoundingClientRect();
+      const plusPathBox = addIcon.querySelector('path').getBBox();
+      const viewBox = addIcon.viewBox.baseVal;
+      const modeIconSizes = [...modeTabs.querySelectorAll('svg')].map(svg => {
+        const rect = svg.getBoundingClientRect();
+        return { width: rect.width, height: rect.height };
+      });
       const composerRect = composer.getBoundingClientRect();
       const columnRect = column.getBoundingClientRect();
       return {
         toolbarWidth: toolbarRect.width,
         columnWidth: column.clientWidth,
         addGap: addRect.left - sessionTabs.getBoundingClientRect().right,
-        bindingGap: bindingRect.left - addRect.right,
-        bindingWidth: bindingRect.width,
-        bindingRightGap: toolbarRect.right - bindingRect.right,
-        rowCenters: [centerY(modeTabs), centerY(sessionTabs), centerY(addSession), centerY(binding)],
+        addRightGap: toolbarRect.right - addRect.right,
+        addWidth: addRect.width,
+        addHeight: addRect.height,
+        rowCenters: [centerY(modeTabs), centerY(sessionTabs), centerY(addSession)],
         modeTabsFit: modeTabs.scrollWidth <= modeTabs.clientWidth + 1,
+        modeIconSizes,
+        addDisplay: getComputedStyle(addSession).display,
+        addPlaceItems: getComputedStyle(addSession).placeItems,
+        plusPathCenterDelta: {
+          x: plusPathBox.x + plusPathBox.width / 2 - viewBox.x - viewBox.width / 2,
+          y: plusPathBox.y + plusPathBox.height / 2 - viewBox.y - viewBox.height / 2,
+        },
+        addIconCenterDelta: {
+          x: (addIconRect.left + addIconRect.right - addRect.left - addRect.right) / 2,
+          y: (addIconRect.top + addIconRect.bottom - addRect.top - addRect.bottom) / 2,
+        },
+        toolbarFits: toolbar.scrollWidth <= toolbar.clientWidth + 1,
         sessionScrollWidth: sessionTabs.scrollWidth,
         sessionClientWidth: sessionTabs.clientWidth,
         composerBottomMargin: composer && getComputedStyle(composer).marginBottom,
@@ -292,13 +307,21 @@ const server = http.createServer(async (request, response) => {
     const assistantLayout = await assistantMetrics();
     assert.ok(Math.abs(assistantLayout.toolbarWidth - assistantLayout.columnWidth) <= 1, `Assistant toolbar should fill the column: ${JSON.stringify(assistantLayout)}`);
     assert.ok(assistantLayout.addGap >= 0 && assistantLayout.addGap <= 12, `New-session button should sit beside the session tabs: ${JSON.stringify(assistantLayout)}`);
-    assert.ok(assistantLayout.bindingGap >= 0 && assistantLayout.bindingGap <= 12, `Paper binding should follow the new-session button: ${JSON.stringify(assistantLayout)}`);
-    assert.ok(assistantLayout.bindingWidth >= 140 && assistantLayout.bindingRightGap <= 10, `Paper title should use the remaining toolbar width: ${JSON.stringify(assistantLayout)}`);
+    assert.ok(Math.abs(assistantLayout.addRightGap - 8) <= 1, `New-session button should sit at the toolbar right inset: ${JSON.stringify(assistantLayout)}`);
+    assert.equal(assistantLayout.addWidth, 32);
+    assert.equal(assistantLayout.addHeight, 32);
+    assert.equal(assistantLayout.addDisplay, 'grid');
+    assert.equal(assistantLayout.addPlaceItems, 'center');
+    assert.ok(Math.abs(assistantLayout.addIconCenterDelta.x) <= 0.5 && Math.abs(assistantLayout.addIconCenterDelta.y) <= 0.5, `Plus SVG should be centered in its button: ${JSON.stringify(assistantLayout)}`);
+    assert.ok(Math.abs(assistantLayout.plusPathCenterDelta.x) <= 0.5 && Math.abs(assistantLayout.plusPathCenterDelta.y) <= 0.5, `Plus path should be centered in its viewBox: ${JSON.stringify(assistantLayout)}`);
+    assert.equal(assistantLayout.toolbarFits, true);
     assert.ok(Math.max(...assistantLayout.rowCenters) - Math.min(...assistantLayout.rowCenters) <= 1, `Toolbar controls should share one aligned row: ${JSON.stringify(assistantLayout)}`);
     assert.equal(assistantLayout.modeTabsFit, true);
+    assert.ok(assistantLayout.modeIconSizes.length === 2 && assistantLayout.modeIconSizes.every(size => Math.abs(size.width - 20) <= 0.1 && Math.abs(size.height - 20) <= 0.1), `Q&A and Notes icons should render at 20px: ${JSON.stringify(assistantLayout.modeIconSizes)}`);
     assert.equal(assistantLayout.composerBottomMargin, '5px');
     assert.ok(assistantLayout.composerBottomGap >= 4 && assistantLayout.composerBottomGap <= 7, `Composer should sit about 5px above the chat column bottom: ${JSON.stringify(assistantLayout)}`);
     await page.screenshot({ path: path.join(output, 'assistant-layout.png') });
+    await page.locator('.chat-session-bar').screenshot({ path: path.join(output, 'assistant-toolbar.png') });
     const first = initialSessions[0].id;
     state.long = true;
     state.release = false;
@@ -336,8 +359,10 @@ const server = http.createServer(async (request, response) => {
     await page.waitForFunction(() => document.querySelector('[data-testid="chat-resizer"]')?.getAttribute('aria-valuenow') === '280');
     const narrowLayout = await assistantMetrics();
     assert.ok(Math.abs(narrowLayout.toolbarWidth - narrowLayout.columnWidth) <= 1, `Narrow assistant toolbar should fill the column: ${JSON.stringify(narrowLayout)}`);
-    assert.ok(narrowLayout.sessionScrollWidth > narrowLayout.sessionClientWidth + 1, `Multiple sessions should overflow within their tab strip: ${JSON.stringify(narrowLayout)}`);
-    assert.ok(narrowLayout.addGap >= 0 && narrowLayout.addGap <= 12 && narrowLayout.bindingGap >= 0 && narrowLayout.bindingGap <= 12, `Session creation and paper title should remain adjacent at 280px: ${JSON.stringify(narrowLayout)}`);
+    assert.ok(narrowLayout.addGap >= 0 && narrowLayout.addGap <= 8, `Session tabs should end before the new-session button: ${JSON.stringify(narrowLayout)}`);
+    assert.ok(Math.abs(narrowLayout.addRightGap - 8) <= 1, `New-session button should stay at the right inset in a narrow column: ${JSON.stringify(narrowLayout)}`);
+    assert.ok(Math.abs(narrowLayout.addIconCenterDelta.x) <= 0.5 && Math.abs(narrowLayout.addIconCenterDelta.y) <= 0.5, `Plus SVG should stay centered in a narrow column: ${JSON.stringify(narrowLayout)}`);
+    assert.equal(narrowLayout.toolbarFits, true);
     assert.ok(Math.max(...narrowLayout.rowCenters) - Math.min(...narrowLayout.rowCenters) <= 1, `Narrow toolbar controls should remain on one row: ${JSON.stringify(narrowLayout)}`);
     assert.ok(narrowLayout.composerBottomGap >= 4 && narrowLayout.composerBottomGap <= 7, `Narrow composer should keep a 5px bottom gap: ${JSON.stringify(narrowLayout)}`);
     await page.getByTestId(`chat-session-${first}`).click();
@@ -351,6 +376,11 @@ const server = http.createServer(async (request, response) => {
     const third = narrowSessions.find(session => session.id !== first && session.id !== second);
     assert.ok(third);
     await page.getByTestId(`chat-session-${third.id}`).waitFor();
+    const narrowScrollLayout = await assistantMetrics();
+    assert.ok(narrowScrollLayout.sessionScrollWidth > narrowScrollLayout.sessionClientWidth + 1, `Multiple sessions should scroll inside their tab strip: ${JSON.stringify(narrowScrollLayout)}`);
+    assert.equal(narrowScrollLayout.toolbarFits, true, `Narrow assistant toolbar should not overflow: ${JSON.stringify(narrowScrollLayout)}`);
+    assert.ok(Math.abs(narrowScrollLayout.addRightGap - 8) <= 1, `New-session button should remain at the right inset: ${JSON.stringify(narrowScrollLayout)}`);
+    assert.ok(Math.abs(narrowScrollLayout.addIconCenterDelta.x) <= 0.5 && Math.abs(narrowScrollLayout.addIconCenterDelta.y) <= 0.5, `Plus SVG should remain centered while sessions scroll: ${JSON.stringify(narrowScrollLayout)}`);
     page.once('dialog', dialog => dialog.accept());
     await page.getByRole('button', { name: `删除会话 ${third.title}`, exact: true }).click();
     await page.getByTestId(`chat-session-${third.id}`).waitFor({ state: 'hidden' });
