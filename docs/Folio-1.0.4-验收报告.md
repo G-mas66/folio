@@ -36,3 +36,11 @@ SHA-256：`d8e78a21dbde8e9175655b992250cbc074c8ec639f5daf7526d779eae3316909`。
 六个发布附件：EXE、blockmap、latest.yml、兼容旧 beta 客户端的 beta.yml、SHA256SUMS.txt、smoke-windows-x64.json。清单版本、文件名、长度与 SHA-512 已核对。发布地址为 [v1.0.4](https://github.com/G-mas66/folio/releases/tag/v1.0.4)，公开发布结果在发布后补充。
 
 本轮没有安装升级用户真实客户端或迁移真实文献库，未重跑未改变的 NSIS 安装流程与全文 PDF 引擎。保留正式 1.0.3 基线及新 1.0.4 安装包用于差分；旧客户端需联网检查、下载，并由用户确认重启安装。
+
+## 发布后验证
+
+2026-10-10 已公开发布正式版 v1.0.4（Release ID 408859028）。源码与标签对应 `13ffc7a219967b7382323debeec6729c9f1e4c31`，GitHub latest 指向本版。六个附件官方 SHA-256 与本地一致；匿名获取的 latest.yml、beta.yml 逐字节一致，EXE 前 64 KiB 的公开 HTTP 206 Range 内容与本地相同，标签源码核验通过。
+
+正式 1.0.3 与 1.0.4 Windows 程序分别使用独立数据、凭据和界面目录查询公开通道：1.0.3 返回可更新至 1.0.4，1.0.4 返回无更新，均通过，未启动下载或安装。差分 blockmap 已随正式完整安装包公开；有已验证的旧安装包缓存时使用差分，缓存缺失或差分失败时可回退整包。
+
+现有 `review/electron_app_actions.cjs` 已按新反馈流程适配，正式包 8 项 GUI 检查通过：真实 preload/main 在固定 FormSubmit HTTP 边界拦截提交，不打开邮件应用；卸载入口的可用、取消、失败与非 Windows 隐藏回归通过。未执行真实卸载。
