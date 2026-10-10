@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
+const semver = require('semver');
 const { _electron } = require('playwright');
 const { selectMacUpdate } = require('../electron/update-service.cjs');
 
@@ -166,7 +167,8 @@ async function main() {
   assert.ok(fs.statSync(executable).isFile(), `Packaged executable not found: ${executable}`);
   assert.ok(fs.statSync(backend).isFile() && fs.statSync(engine).isFile(), 'Frozen backend and PDF engine must be packaged.');
 
-  const updateVersion = '0.14.1-beta.1';
+  const updateVersion = semver.inc(report.version, 'patch');
+  assert.ok(updateVersion, `Could not derive an update fixture from ${report.version}.`);
   const updateRelease = {
     tag_name: `v${updateVersion}`,
     draft: false,
@@ -175,16 +177,25 @@ async function main() {
   };
   const selectedUpdate = selectMacUpdate([updateRelease], report.version, arch);
   assert.equal(selectedUpdate?.architecture, arch);
+  assert.equal(selectedUpdate?.version, updateVersion);
   assert.equal(selectedUpdate?.downloadUrl, `https://github.com/G-mas66/folio/releases/download/v${updateVersion}/Folio-${updateVersion}-macOS-${arch}.zip`);
   const wrongArchitectureRelease = { ...updateRelease, assets: updateRelease.assets.filter(asset => !asset.name.endsWith(`-${arch}.zip`)) };
   assert.equal(selectMacUpdate([wrongArchitectureRelease], report.version, arch), null, 'macOS update selection must never fall back to the other architecture.');
   const channelRelease = (version) => ({ tag_name: `v${version}`, draft: false, assets: [{ name: `Folio-${version}-macOS-${arch}.zip`, state: 'uploaded' }] });
-  assert.equal(selectMacUpdate([channelRelease('0.14.1-alpha.1')], report.version, arch), null, 'beta installs must not receive alpha updates.');
-  assert.equal(selectMacUpdate([channelRelease('0.14.1-beta.2')], '0.14.0', arch), null, 'stable installs must not receive beta updates.');
-  assert.equal(selectMacUpdate([channelRelease('0.14.1')], '0.14.0', arch)?.version, '0.14.1', 'stable installs may receive newer stable updates.');
-  assert.equal(selectMacUpdate([channelRelease('0.14.1')], report.version, arch)?.version, '0.14.1', 'beta installs may receive stable updates.');
+  const stableCurrentVersion = semver.coerce(report.version)?.version;
+  assert.ok(stableCurrentVersion, `Could not derive a stable channel fixture from ${report.version}.`);
+  const stableUpdateVersion = semver.inc(stableCurrentVersion, 'patch');
+  const betaCurrentVersion = `${stableCurrentVersion}-beta.1`;
+  const betaUpdateVersion = semver.inc(betaCurrentVersion, 'prerelease');
+  assert.ok(stableUpdateVersion && betaUpdateVersion, 'Could not derive stable and beta channel fixtures.');
+  assert.equal(selectMacUpdate([channelRelease(`${stableUpdateVersion}-alpha.1`)], stableCurrentVersion, arch), null, 'stable installs must not receive alpha updates.');
+  assert.equal(selectMacUpdate([channelRelease(`${stableUpdateVersion}-beta.1`)], stableCurrentVersion, arch), null, 'stable installs must not receive beta updates.');
+  assert.equal(selectMacUpdate([channelRelease(`${stableUpdateVersion}-alpha.1`)], betaCurrentVersion, arch), null, 'beta installs must not receive alpha updates.');
+  assert.equal(selectMacUpdate([channelRelease(betaUpdateVersion)], betaCurrentVersion, arch)?.version, betaUpdateVersion, 'beta installs may receive a newer beta update.');
+  assert.equal(selectMacUpdate([channelRelease(stableUpdateVersion)], stableCurrentVersion, arch)?.version, stableUpdateVersion, 'stable installs may receive newer stable updates.');
+  assert.equal(selectMacUpdate([channelRelease(stableUpdateVersion)], betaCurrentVersion, arch)?.version, stableUpdateVersion, 'beta installs may receive stable updates.');
   report.checks.manual_update_asset = { architecture: arch, version: selectedUpdate.version, exact_asset: path.basename(selectedUpdate.downloadUrl), wrong_architecture_rejected: true };
-  report.checks.update_channel_filter = { beta_rejects_alpha: true, stable_rejects_beta: true, beta_accepts_stable: true, stable_accepts_stable: true };
+  report.checks.update_channel_filter = { beta_rejects_alpha: true, stable_rejects_alpha: true, stable_rejects_beta: true, beta_accepts_beta: true, beta_accepts_stable: true, stable_accepts_stable: true };
 
   const resourceFiles = walkFiles(resources);
   assert.equal(resourceFiles.some(file => file.toLowerCase().endsWith('.exe')), false, 'macOS resources must not contain Windows executables.');
@@ -281,6 +292,46 @@ async function main() {
     assert.equal(path.resolve(appInfo.uiDataRoot), path.join(path.resolve(expectedDataRoot), 'electron-userData'));
     assert.equal(path.resolve(appInfo.locationConfigPath), path.join(appDataRoot, '阅川 Folio', 'config', 'location.json'));
     report.checks.default_paths = appInfo;
+
+    const feedbackMessage = 'macOS packaged feedback IPC smoke check';
+    try {
+      await application.evaluate(({ shell }) => {
+        const state = globalThis.__folioMacFeedbackSmoke = {
+          originalFetch: globalThis.fetch, originalOpenExternal: shell.openExternal,
+          requests: [], external: [],
+        };
+        globalThis.fetch = async (url, options) => {
+          if (url !== 'https://formsubmit.co/ajax/1791913726@qq.com') return state.originalFetch(url, options);
+          state.requests.push({ url, method: options.method, headers: options.headers, body: JSON.parse(options.body) });
+          return { ok: true, json: async () => ({ success: 'true' }) };
+        };
+        shell.openExternal = async url => { state.external.push(url); };
+      });
+      await library.getByRole('button', { name: '意见反馈', exact: true }).click();
+      await library.getByLabel('反馈内容', { exact: true }).fill(feedbackMessage);
+      await library.getByRole('button', { name: '提交反馈', exact: true }).click();
+      await library.getByText('反馈服务已接收，感谢你的建议。', { exact: true }).waitFor();
+      const trace = await application.evaluate(() => ({
+        requests: globalThis.__folioMacFeedbackSmoke.requests,
+        external: globalThis.__folioMacFeedbackSmoke.external,
+      }));
+      assert.equal(trace.requests.length, 1);
+      assert.equal(trace.requests[0].method, 'POST');
+      assert.equal(trace.requests[0].headers.Referer, 'https://github.com/G-mas66/folio');
+      assert.deepEqual(trace.requests[0].body, {
+        message: feedbackMessage, app_version: report.version, _url: 'https://github.com/G-mas66/folio',
+      });
+      assert.deepEqual(trace.external, [], 'Feedback must not open an external mail app.');
+      report.checks.feedback = { request_count: 1, app_version: report.version, external_mail_app_launches: 0 };
+    } finally {
+      await application.evaluate(({ shell }) => {
+        const state = globalThis.__folioMacFeedbackSmoke;
+        if (state) {
+          globalThis.fetch = state.originalFetch;
+          shell.openExternal = state.originalOpenExternal;
+        }
+      });
+    }
 
     await library.getByRole('button', { name: '设置', exact: true }).click();
     await library.getByLabel('API 基础地址').fill(providerUrl);
