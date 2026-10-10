@@ -265,6 +265,11 @@ function Workbench() {
     catch (error) { setError(errorMessage(error)); }
   }
 
+  async function openFeedback() {
+    try { await window.workbench.openFeedback(); }
+    catch (error) { setError(errorMessage(error)); }
+  }
+
   async function paperAction(paper: Paper, action: 'stop' | 'continue' | 'retry') {
     setError('');
     try {
@@ -471,7 +476,6 @@ function Workbench() {
             </div>;
           })}
         </nav>
-        <button className="topbar-new-tab" type="button" aria-label="新建标签页" title="打开文献库标签" onClick={() => setActivePanel('library')}>+</button>
         <button className="topbar-icon-button theme-toggle" type="button" data-testid="theme-toggle" aria-label={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'} title={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'} onClick={() => setThemePreference(theme === 'dark' ? 'light' : 'dark')}>
           <svg aria-hidden="true" viewBox="0 0 24 24">{theme === 'dark' ? <path d="M20.4 15.7A8.6 8.6 0 0 1 8.3 3.6 8.7 8.7 0 1 0 20.4 15.7Z" /> : <><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42" /></>}</svg>
         </button>
@@ -498,6 +502,7 @@ function Workbench() {
             <div className="folder-actions">
               <button className="text-button" aria-label="新建文件夹" onClick={() => beginFolderDialog('create')}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 6.5h7l2 2h8v11h-17v-13Zm8.5 5v6m-3-3h6" /></svg><span>新建文件夹</span></button>
               <button className="text-button" type="button" onClick={() => void openLibraryFolder()}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 7h6l2 2h9v11h-17v-13Z" /></svg><span>打开文献目录</span></button>
+              <button className="text-button" type="button" aria-label="意见反馈" onClick={() => void openFeedback()}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5.5h16v12H9l-5 3v-3Z" /><path d="M7 9h10M7 12.5h7" /></svg><span>意见反馈</span></button>
               {folderFilter !== 'all' && folderFilter !== 'unfiled' && folderFilter !== 'recent' && <>
                 <button className="text-button" aria-label="重命名文件夹" onClick={() => beginFolderDialog('rename')}>重命名</button>
                 <button className="text-button delete-paper-button" aria-label="删除文件夹" onClick={() => void deleteFolder()}>删除文件夹</button>

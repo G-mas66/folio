@@ -9,6 +9,8 @@ const { copyAndVerifyStorage, resolveLocationConfig, validateStorageTarget } = r
 const { finalizeInstalledUpdateCache, restoreInstallerCache } = require('./update-cache.cjs');
 const { downloadUpdateWithFallback, isDownloadFallbackActive } = require('./update-download.cjs');
 const { classifyUpdateError, createUpdateChecker, updateCheckErrorMessage } = require('./update-check.cjs');
+const { checkForUpdatesWithApiFallback } = require('./update-api.cjs');
+const { appInfoFields, openFeedback, requestUninstall } = require('./app-actions.cjs');
 const { releaseNotesText, selectMacUpdate } = require('./update-service.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
@@ -91,7 +93,7 @@ function publishUpdateState(next) {
 function logUpdateCheck(event) {
   const entry = { time: new Date().toISOString() };
   if (['attempt', 'proxy', 'check'].includes(event.event)) entry.event = event.event;
-  if (['system', 'direct'].includes(event.route)) entry.route = event.route;
+  if (['system', 'direct', 'github-api'].includes(event.route)) entry.route = event.route;
   if (['started', 'succeeded', 'failed', 'restored', 'restore-failed'].includes(event.result)) entry.result = event.result;
   if (['proxy', 'connection', 'timeout', 'http', 'service'].includes(event.category)) entry.category = event.category;
   if (typeof event.code === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(event.code)) entry.code = event.code;
@@ -209,7 +211,11 @@ async function checkForUpdatesInternal() {
     publishUpdateState({ status: 'checking', message: '' });
     const operation = (async () => {
       try {
-        const result = await windowsUpdateChecker();
+        const result = await checkForUpdatesWithApiFallback({
+          updater: autoUpdater,
+          checkForUpdates: windowsUpdateChecker,
+          log: logUpdateCheck,
+        });
         const info = result?.updateInfo || result?.versionInfo;
         if (!info) {
           logUpdateCheck({ event: 'check', result: 'failed', category: 'service' });
@@ -686,7 +692,37 @@ ipcMain.handle('workbench:choose-pdfs', async (event) => {
   });
   return result.canceled ? [] : result.filePaths;
 });
-ipcMain.handle('workbench:get-app-info', () => ({ dataRoot, uiDataRoot, credentialRoot, locationConfigPath }));
+function currentAppActionOptions() {
+  return {
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    executablePath: process.execPath,
+    dataRoot,
+    uiDataRoot,
+    credentialRoot,
+    busy: storageMigrationInProgress || updateInstallInProgress || updateState.status === 'downloading',
+  };
+}
+ipcMain.handle('workbench:get-app-info', (event) => {
+  if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('无效的应用信息请求。');
+  return {
+    dataRoot, uiDataRoot, credentialRoot, locationConfigPath,
+    ...appInfoFields(currentAppActionOptions()),
+  };
+});
+ipcMain.handle('workbench:open-feedback', async (event) => {
+  if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('无效的反馈请求。');
+  await openFeedback(shell);
+});
+ipcMain.handle('workbench:uninstall-app', (event) => {
+  if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('无效的卸载请求。');
+  return requestUninstall({
+    owner: mainWindow,
+    dialog,
+    shell,
+    getOptions: currentAppActionOptions,
+  });
+});
 ipcMain.handle('workbench:get-update-state', (event) => {
   if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('无效的更新状态请求。');
   return updateState;

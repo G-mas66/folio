@@ -6,7 +6,7 @@
 
 一个桌面文献阅读工作台。英文 PDF 导入后先完成全文翻译，中文文献直接阅读原始 PDF；在同一窗口中结合 AI 问答、笔记和批注理解文献。
 
-**当前版本：Windows x64 1.0.2 / macOS arm64、x64 0.14.0-beta.3 · Electron + React + Python**
+**当前版本：Windows x64 1.0.3 / macOS arm64、x64 0.14.0-beta.3 · Electron + React + Python**
 
 [功能](#功能) · [界面预览](#界面预览) · [使用](#使用) · [AI 配置](#ai-配置) · [源码构建](#源码构建) · [数据与隐私](#数据与隐私) · [当前限制](#当前限制)
 
@@ -68,29 +68,29 @@
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | [Folio-1.0.2-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v1.0.2/Folio-1.0.2-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
+| Windows x64 | [Folio-1.0.3-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v1.0.3/Folio-1.0.3-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
 | Mac · Apple Silicon | [Folio-0.14.0-beta.3-macOS-arm64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/Folio-0.14.0-beta.3-macOS-arm64.zip) | 解压，将 `.app` 拖入「应用程序」 |
 | Mac · Intel | [Folio-0.14.0-beta.3-macOS-x64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/Folio-0.14.0-beta.3-macOS-x64.zip) | 解压，将 `.app` 拖入「应用程序」 |
 
-发布页附有各平台验收报告及校验清单：[Windows 1.0.2](https://github.com/G-mas66/folio/releases/download/v1.0.2/SHA256SUMS.txt)、[macOS beta.3](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/SHA256SUMS.txt)。
+发布页附有各平台验收报告及校验清单：[Windows 1.0.3](https://github.com/G-mas66/folio/releases/download/v1.0.3/SHA256SUMS.txt)、[macOS beta.3](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/SHA256SUMS.txt)。
 
-Windows 1.0.2 的更新检查修复、安装升级与发布检查见[验收记录](docs/Folio-1.0.2-验收报告.md)；PDF 标记与助手布局的详细回归见 [1.0.1 验收记录](docs/Folio-1.0.1-验收报告.md)。
+Windows 1.0.3 的更新检查、邮件反馈、卸载入口、安装升级与发布检查见[验收记录](docs/Folio-1.0.3-验收报告.md)；PDF 标记与助手布局的详细回归见 [1.0.1 验收记录](docs/Folio-1.0.1-验收报告.md)。
 
 现有 0.13.0 需要手动安装本版一次，之后 Windows 启动时会检查更新，也可在「设置 → 软件更新」手动检查。下载可以取消或重试，完成后由你点击「重启并安装」；退出应用不会自动安装。macOS 使用当前芯片架构的手动下载与替换方式。
 
-Windows 1.0.2 检查更新时优先使用系统网络；连接、代理或超时错误会重试一次直连，结束后恢复系统代理。HTTP 和清单错误显示具体类别，脱敏诊断写入界面数据目录的更新日志。旧客户端若无法检查更新，可手动安装一次新版。安装包继续使用代理与差分下载：优先经 ghfast.top 下载安装包及 blockmap，失败依次回退 ghproxy.net、GitHub；版本清单与 SHA-512 校验值仍来自官方 GitHub。beta.4 和 1.0.0 客户端可在软件更新中升级，也可[通过免费代理手动下载 1.0.2](https://ghfast.top/https://github.com/G-mas66/folio/releases/download/v1.0.2/Folio-1.0.2-Windows-x64-Setup.exe)。安装新版并启动后，应用联网获取当前版本的官方清单并校验，删除已安装更新的重复缓存，保留一份当前安装包供下次差分使用。尚未安装的新版包会保留；清单暂时不可用时，下次启动再尝试清理。
+Windows 1.0.3 检查更新时优先使用系统网络；连接、代理或超时错误会重试一次直连，结束后恢复系统代理。两次均因连接错误失败时，再使用独立的 GitHub 官方 Releases API 获取版本和清单，核对官方摘要与清单版本后沿用原下载流程。所有路径均被阻断时仍会失败。HTTP 和清单错误显示具体类别，脱敏诊断写入界面数据目录的更新日志。旧客户端若无法检查更新，可手动安装一次新版。安装包继续使用代理与差分下载：优先经 ghfast.top 下载安装包及 blockmap，失败依次回退 ghproxy.net、GitHub；版本清单与 SHA-512 校验值仍来自官方 GitHub。beta.4 和 1.0.0 客户端可在软件更新中升级，也可[通过免费代理手动下载 1.0.3](https://ghfast.top/https://github.com/G-mas66/folio/releases/download/v1.0.3/Folio-1.0.3-Windows-x64-Setup.exe)。安装新版并启动后，应用联网获取当前版本的官方清单并校验，删除已安装更新的重复缓存，保留一份当前安装包供下次差分使用。尚未安装的新版包会保留；清单暂时不可用时，下次启动再尝试清理。
 
 macOS 为测试版，采用 ad-hoc 签名，没有 Apple Developer ID 签名或公证。首次打开可能被 Gatekeeper 阻止，可按照系统「隐私与安全性」提示允许打开；真实用户机器上的首次安装流程尚未验证。
 
 自行构建后的 Windows 安装包路径：
 
 ```text
-dist/installer-1.0.2/Folio-1.0.2-Windows-x64-Setup.exe
+dist/installer-1.0.3/Folio-1.0.3-Windows-x64-Setup.exe
 ```
 
 界面品牌使用 Folio；Windows 可执行文件名和默认安装目录仍保留旧名称，以便覆盖现有安装并继续使用原来的用户数据与凭据身份。
 
-也可使用 `dist/installer-1.0.1/win-unpacked/阅川 Folio.exe`；需要保留整个 `win-unpacked` 文件夹。打包程序包含本地服务、Python 运行时、PDF 引擎、字体和布局模型，使用时不用手动启动 Python 或另装 Python。
+也可使用 `dist/installer-1.0.3/win-unpacked/阅川 Folio.exe`；需要保留整个 `win-unpacked` 文件夹。打包程序包含本地服务、Python 运行时、PDF 引擎、字体和布局模型，使用时不用手动启动 Python 或另装 Python。
 
 1. 在文献库创建分类文件夹，然后导入 PDF。程序保存库内副本，最初选择的文件保持不变。
 2. 英文文献等待中文和双语 PDF 生成；中文文献直接阅读。英文翻译可暂停、继续或重试，不需要逐段点击翻译。
@@ -101,6 +101,8 @@ dist/installer-1.0.2/Folio-1.0.2-Windows-x64-Setup.exe
 文献卡片的「打开文件位置」定位原文副本，阅读窗口的「文件位置」定位当前版本的 PDF。分类属于数据库中的逻辑归类，不是实体文件夹；「打开文献目录」打开当前文献库的 `papers` 目录。
 
 删除文献需要确认，会删除库内 PDF、副本、聊天、笔记及批注，并关闭对应标签；原始导入文件保持不变。删除分类文件夹只将文献移到「未分类」，不会删除文献。
+
+左侧「打开文献目录」下方的「意见反馈」打开写给 [1791913726@qq.com](mailto:1791913726@qq.com) 的邮件草稿，由用户自行发送，需要系统配置可用的邮件应用。Windows 安装版可在「设置 → 应用卸载」启动交互卸载程序；保留文献库及凭据，数据目录在安装目录内时需先迁移。
 
 ## AI 配置
 

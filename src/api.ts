@@ -78,7 +78,15 @@ export type ChatStreamInput = {
 };
 export type ChatStreamEvent = { requestId: string; type: string; data: Record<string, unknown> };
 export type ChatStreamHandle = { requestId: string; cancel: () => Promise<boolean>; dispose: () => void };
-export type StorageLocationInfo = { dataRoot: string; uiDataRoot: string; credentialRoot: string; locationConfigPath: string };
+export type StorageLocationInfo = {
+  dataRoot: string;
+  uiDataRoot: string;
+  credentialRoot: string;
+  locationConfigPath: string;
+  platform: 'windows' | 'macos' | 'unsupported';
+  isPackaged: boolean;
+  canUninstall: boolean;
+};
 export type StorageMigrationProgress = { phase: 'stopping' | 'copying' | 'complete'; copiedFiles: number; totalFiles: number; copiedBytes: number; totalBytes: number };
 export type UpdateState = {
   platform: 'windows' | 'macos' | 'unsupported';
@@ -109,6 +117,8 @@ declare global {
       cancelPaperStreams(paperId: string): Promise<number>;
       startChatStream(input: ChatStreamInput, onEvent: (event: ChatStreamEvent) => void): Promise<ChatStreamHandle>;
       openExternal(url: string): Promise<boolean>;
+      openFeedback(): Promise<void>;
+      uninstallApp(): Promise<boolean>;
       getAppInfo(): Promise<StorageLocationInfo>;
       getUpdateState(): Promise<UpdateState>;
       checkForUpdates(): Promise<UpdateState>;

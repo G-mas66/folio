@@ -32,6 +32,8 @@ export function SettingsPanel({ theme, onThemeChange }: { theme: ThemePreference
   const [storageBusy, setStorageBusy] = useState(false);
   const [storageStatus, setStorageStatus] = useState('');
   const [storageFailure, setStorageFailure] = useState('');
+  const [uninstallBusy, setUninstallBusy] = useState(false);
+  const [uninstallFailure, setUninstallFailure] = useState('');
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
   const [updateActionBusy, setUpdateActionBusy] = useState(false);
   const [updateCancelRequested, setUpdateCancelRequested] = useState(false);
@@ -75,6 +77,18 @@ export function SettingsPanel({ theme, onThemeChange }: { theme: ThemePreference
     } catch (error) {
       setUpdateFailure(errorMessage(error));
       setUpdateCancelRequested(false);
+    }
+  }
+
+  async function uninstallApp() {
+    setUninstallBusy(true);
+    setUninstallFailure('');
+    try {
+      await window.workbench.uninstallApp();
+    } catch (error) {
+      setUninstallFailure(errorMessage(error));
+    } finally {
+      setUninstallBusy(false);
     }
   }
 
@@ -226,6 +240,7 @@ export function SettingsPanel({ theme, onThemeChange }: { theme: ThemePreference
   }
 
   const availableModels = [...new Set([settings.model, ...settings.model_options, ...discovered].filter(Boolean))];
+  const showUninstall = storageLocation?.platform === 'windows' && storageLocation.isPackaged === true;
 
   return (
     <section className="settings-panel">
@@ -359,6 +374,15 @@ export function SettingsPanel({ theme, onThemeChange }: { theme: ThemePreference
         </div>}
         {!storageTarget && storageFailure && <div data-testid="storage-migration-error" className="notice error-notice" role="alert">{storageFailure}</div>}
       </section>
+      {showUninstall && <section className="settings-card storage-location-card" aria-labelledby="uninstall-heading">
+        <div>
+          <div className="eyebrow">应用维护</div>
+          <h2 id="uninstall-heading">应用卸载</h2>
+          <p className="field-help">{storageLocation.canUninstall ? '打开卸载程序，文献库保留。' : '当前无法从应用内启动卸载，请检查安装与存储位置。'}</p>
+        </div>
+        <button className="text-button delete-paper-button" type="button" data-testid="uninstall-app" disabled={!storageLocation.canUninstall || uninstallBusy} onClick={() => void uninstallApp()}>{uninstallBusy ? '正在启动卸载程序…' : '卸载应用'}</button>
+        {uninstallFailure && <div className="notice error-notice" role="alert">{uninstallFailure}</div>}
+      </section>}
       <div className="privacy-card">
         <h2>数据与隐私</h2>
         <p>英文文献的免费翻译会发送标题和可提取的正文文字；中文文献跳过翻译。AI 问答与总结会把所需的原文发送到你配置的服务。PDF、阅读进度、聊天、笔记和批注保存在本机。</p>

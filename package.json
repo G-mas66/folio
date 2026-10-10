@@ -1,6 +1,6 @@
 {
   "name": "paper-workbench",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "description": "Folio personal literature reader",
   "main": "electron/main.cjs",
@@ -18,7 +18,7 @@
     "test:backend": "node scripts/run-backend-tests.cjs",
     "test:backend:macos": "node scripts/run-backend-tests.cjs",
     "test:storage": "node review/test_storage_location.cjs",
-    "test:updates": "node review/test_update_check.cjs && node review/update_service.cjs && node review/test_update_download.cjs && node review/test_update_cache.cjs && node review/test_update_download_runtime.cjs",
+    "test:updates": "node review/test_update_check.cjs && node review/update_service.cjs && node review/test_update_api.cjs && node review/test_update_download.cjs && node review/test_update_cache.cjs && node review/test_update_download_runtime.cjs",
     "smoke:macos": "node review/electron_macos_smoke.cjs"
   },
   "dependencies": {
