@@ -6,7 +6,7 @@
 
 一个桌面文献阅读工作台。英文 PDF 导入后先完成全文翻译，中文文献直接阅读原始 PDF；在同一窗口中结合 AI 问答、笔记和批注理解文献。
 
-**当前版本：Windows x64 1.0.4 / macOS arm64、x64 0.14.0-beta.3 · Electron + React + Python**
+**当前版本：1.0.4（Windows x64 / macOS arm64、x64） · Electron + React + Python**
 
 [功能](#功能) · [界面预览](#界面预览) · [使用](#使用) · [AI 配置](#ai-配置) · [源码构建](#源码构建) · [数据与隐私](#数据与隐私) · [当前限制](#当前限制)
 
@@ -69,12 +69,12 @@
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
 | Windows x64 | [Folio-1.0.4-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v1.0.4/Folio-1.0.4-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
-| Mac · Apple Silicon | [Folio-0.14.0-beta.3-macOS-arm64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/Folio-0.14.0-beta.3-macOS-arm64.zip) | 解压，将 `.app` 拖入「应用程序」 |
-| Mac · Intel | [Folio-0.14.0-beta.3-macOS-x64.zip](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/Folio-0.14.0-beta.3-macOS-x64.zip) | 解压，将 `.app` 拖入「应用程序」 |
+| Mac · Apple Silicon | [Folio-1.0.4-macOS-arm64.zip](https://github.com/G-mas66/folio/releases/download/v1.0.4/Folio-1.0.4-macOS-arm64.zip) | 解压，将 `.app` 拖入「应用程序」 |
+| Mac · Intel | [Folio-1.0.4-macOS-x64.zip](https://github.com/G-mas66/folio/releases/download/v1.0.4/Folio-1.0.4-macOS-x64.zip) | 解压，将 `.app` 拖入「应用程序」 |
 
-发布页附有各平台验收报告及校验清单：[Windows 1.0.4](https://github.com/G-mas66/folio/releases/download/v1.0.4/SHA256SUMS.txt)、[macOS beta.3](https://github.com/G-mas66/folio/releases/download/v0.14.0-beta.3/SHA256SUMS.txt)。
+发布页附有各平台验收报告及校验清单：[Windows 1.0.4](https://github.com/G-mas66/folio/releases/download/v1.0.4/SHA256SUMS.txt)、[macOS 1.0.4](https://github.com/G-mas66/folio/releases/download/v1.0.4/SHA256SUMS-macOS.txt)。
 
-Windows 1.0.4 的翻译限流修复、反馈表单与发布检查见[验收记录](docs/Folio-1.0.4-验收报告.md)；PDF 标记与助手布局的详细回归见 [1.0.1 验收记录](docs/Folio-1.0.1-验收报告.md)。
+macOS 1.0.4 的双架构构建、打包应用和公开下载检查见[Mac 验收记录](docs/Folio-1.0.4-macOS-验收报告.md)。Windows 1.0.4 的翻译限流修复、反馈表单与发布检查见[验收记录](docs/Folio-1.0.4-验收报告.md)；PDF 标记与助手布局的详细回归见 [1.0.1 验收记录](docs/Folio-1.0.1-验收报告.md)。
 
 现有 0.13.0 需要手动安装本版一次，之后 Windows 启动时会检查更新，也可在「设置 → 软件更新」手动检查。下载可以取消或重试，完成后由你点击「重启并安装」；退出应用不会自动安装。macOS 使用当前芯片架构的手动下载与替换方式。
 
@@ -178,9 +178,9 @@ npm run dist
 
 `npm run dist` 依次构建界面、本地后端与 PDF 引擎，再生成 NSIS 安装包。PDF 引擎构建会准备 `.venv-pdf-engine`，使用 PDF2zh-Next **2.9.0**、BabelDOC **0.6.2** 和 PyInstaller **6.16.0**。1.0.1 Windows 的安装包目录为 `dist/installer-1.0.1/`。
 
-### macOS 测试版
+### macOS 构建
 
-0.14.0-beta.3 macOS 测试版支持 Apple Silicon arm64 和 Intel x64。GitHub Actions 的「macOS Test Builds」工作流只接受手动运行，使用标准 `macos-15` 与 `macos-15-intel` runner 原生构建，并运行后端契约测试和打包应用 smoke。默认仅在 Actions 日志中保留测试报告，不上传大型 Actions artifact；勾选 `create_draft_release` 会在重新构建并验证后，把 zip 安装包和逐架构 smoke 报告放到草稿预发布中。
+1.0.4 macOS 版支持 Apple Silicon arm64 和 Intel x64。GitHub Actions 的「macOS Test Builds」工作流只接受手动运行，使用标准 `macos-15` 与 `macos-15-intel` runner 原生构建，并运行后端契约测试和打包应用 smoke。默认仅在 Actions 日志中保留测试报告，不上传大型 Actions artifact；勾选 `create_draft_release` 会在重新构建并验证后，把 zip 安装包和逐架构 smoke 报告上传到当前版本发布页；版本尚未发布时创建草稿预发布。
 
 macOS 本地构建需要对应架构的 Mac、Xcode Command Line Tools、Node.js 22 和 Python 3.12：
 
@@ -189,7 +189,7 @@ npm ci
 MAC_ARCH=arm64 npm run dist:macos
 ```
 
-Intel Mac 将 `arm64` 改为 `x64`。产物位于 `dist/macos-test-0.14.0-beta.3-<架构>/`。应用自带原生后端、PDF 翻译引擎、字体和布局模型，不需要用户安装 Python。测试版使用临时 ad-hoc 签名，没有 Developer ID 签名或公证；首次打开可能出现 Gatekeeper 提示，因此只作为测试包分发。macOS 更新不会自动替换应用，需要下载当前架构的 zip 并手动安装。
+Intel Mac 将 `arm64` 改为 `x64`。产物位于 `dist/macos-test-1.0.4-<架构>/`。应用自带原生后端、PDF 翻译引擎、字体和布局模型，不需要用户安装 Python。macOS 包使用临时 ad-hoc 签名，没有 Developer ID 签名或公证；首次打开可能出现 Gatekeeper 提示，因此只作为测试包分发。macOS 更新不会自动替换应用，需要下载当前架构的 zip 并手动安装。
 
 ### 开发运行
 
@@ -259,7 +259,7 @@ docs/                      方案、验收记录和界面截图
 
 ## 当前限制
 
-- Windows x64 当前为 1.0.1；macOS arm64/x64 继续使用已验收的 beta.3 测试版，目前没有 Apple Developer ID 签名或公证；Linux 未验证。
+- Windows x64 与 macOS arm64/x64 当前为 1.0.4；macOS 使用临时 ad-hoc 签名，目前没有 Apple Developer ID 签名或公证；Linux 未验证。
 - 扫描件和无法提取正文的实质页面会阻止完成，当前没有单独 OCR 步骤。
 - 表格单元格、图片内文字和公式不会被完整翻译；复杂公式、跨页图表和特殊排版应检查输出。
 - 高亮、下划线、批注与句子翻译支持同一页内的可提取文字，不支持跨页选择或扫描图上的文字选择。
