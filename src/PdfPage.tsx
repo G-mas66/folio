@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.mjs?url';
 import { PdfAnnotation, PdfAnnotationRect, PdfSelection, SelectionContext } from './api';
+import { normalizePdfText } from './annotationMapping';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -209,10 +210,6 @@ function visualLineCount(rects: { rect: DOMRect; underline_edge: UnderlineEdge }
   return bands.length;
 }
 
-function normalizedText(value: string) {
-  return Array.from(value.normalize('NFKC').toLocaleLowerCase()).filter((character) => !/[\u200b\u200c\u200d\ufeff]/u.test(character)).join('').replace(/\s+/gu, ' ').trim();
-}
-
 function buildNormalizedTextMap(textLayer: HTMLElement) {
   const source: { character: string; node: Text | null; start: number; end: number }[] = [];
   const walker = textLayer.ownerDocument.createTreeWalker(textLayer, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
@@ -300,7 +297,7 @@ function selectionForRange(range: Range, textLayer: HTMLElement, stage: HTMLElem
 }
 
 export function findTextSelections(textLayer: HTMLElement, stage: HTMLElement, pageNumber: number, quote: string): PdfSelection[] {
-  const target = normalizedText(quote);
+  const target = normalizePdfText(quote);
   if (!target) return [];
   const source = buildNormalizedTextMap(textLayer);
   const matches: PdfSelection[] = [];
@@ -326,6 +323,10 @@ export function findTextSelections(textLayer: HTMLElement, stage: HTMLElement, p
   }
   return matches;
 }
+
+export type PdfTextMappingRequest = { annotationId: string; quote: string; kind: 'exact' | 'paragraph' };
+export type PdfTextMappingResult = PdfTextMappingRequest & { matches: PdfSelection[] };
+export type PdfParagraphMarker = { id: string; rect: PdfAnnotationRect; comment: string };
 
 export async function loadPdfDocument(paperId: string, kind: PdfKind): Promise<SharedPdfDocument> {
   const bytes = await window.workbench.request<Uint8Array>({ path: `/papers/${paperId}/pdf?kind=${kind}`, binary: true });
@@ -354,6 +355,7 @@ export async function pageAspectRatios(document: SharedPdfDocument, pageCount: n
 export function PdfPage({
   document, pageNumber, scale, fitWidth = true, containerWidth, scrollRoot, pageAspectRatio,
   annotations, active, onSelection, locateRequest, onLocate, previewSelection,
+  mappingRequests = [], onMapped, paragraphMarkers = [], onAnnotationClick,
 }: {
   document: SharedPdfDocument; pageNumber: number; scale: number; fitWidth?: boolean;
   containerWidth: number; scrollRoot: HTMLElement | null; pageAspectRatio: number;
@@ -362,6 +364,10 @@ export function PdfPage({
   locateRequest?: { id: string; quote: string } | null;
   onLocate?: (id: string, pageNumber: number, matches: PdfSelection[]) => void;
   previewSelection?: SelectionContext | null;
+  mappingRequests?: PdfTextMappingRequest[];
+  onMapped?: (pageNumber: number, results: PdfTextMappingResult[]) => void;
+  paragraphMarkers?: PdfParagraphMarker[];
+  onAnnotationClick?: (id: string) => void;
 }) {
   const frameRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -370,9 +376,11 @@ export function PdfPage({
   const renderTaskRef = useRef<RenderTaskRef | null>(null);
   const renderQueueRef = useRef<Promise<void>>(Promise.resolve());
   const lastLocateIdRef = useRef<string | null>(null);
+  const lastMappingSignatureRef = useRef<string | null>(null);
   const [nearby, setNearby] = useState(false);
   const [failure, setFailure] = useState('');
   const [rendered, setRendered] = useState(false);
+  const [renderVersion, setRenderVersion] = useState(0);
   const placeholderWidth = Math.max(100, containerWidth - 28) * (fitWidth ? scale : 1);
   const placeholderHeight = pageAspectRatio > 0 ? placeholderWidth / pageAspectRatio + 28 : 540;
 
@@ -534,6 +542,7 @@ export function PdfPage({
         else {
           orderTextLayerByColumns(textLayer);
           setRendered(true);
+          setRenderVersion((version) => version + 1);
         }
       } catch (error) {
         const name = (error as { name?: string }).name;
@@ -559,6 +568,27 @@ export function PdfPage({
     lastLocateIdRef.current = locateRequest.id;
     onLocate(locateRequest.id, pageNumber, findTextSelections(textLayer, stage, pageNumber, locateRequest.quote));
   }, [rendered, locateRequest?.id, locateRequest?.quote, onLocate, pageNumber]);
+
+  useEffect(() => {
+    if (!rendered || !onMapped || !mappingRequests.length) return;
+    const signature = `${renderVersion}:${JSON.stringify(mappingRequests)}`;
+    if (lastMappingSignatureRef.current === signature) return;
+    const textLayer = textRef.current;
+    const stage = stageRef.current;
+    if (!textLayer || !stage) return;
+    lastMappingSignatureRef.current = signature;
+    const results = mappingRequests.map((request) => {
+      let matches = findTextSelections(textLayer, stage, pageNumber, request.quote);
+      if (!matches.length && request.kind === 'paragraph') {
+        const shortQuote = request.quote.trim().slice(0, 220).trimEnd();
+        if (shortQuote && shortQuote !== request.quote.trim()) {
+          matches = findTextSelections(textLayer, stage, pageNumber, shortQuote);
+        }
+      }
+      return { ...request, matches };
+    });
+    onMapped(pageNumber, results);
+  }, [rendered, renderVersion, mappingRequests, onMapped, pageNumber]);
 
   return <div
     className="pdf-page-frame"
@@ -589,6 +619,16 @@ export function PdfPage({
             title="待确认的文字位置"
             style={{ left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` }}
           />)}
+          {paragraphMarkers.map((marker) => <button
+            key={marker.id}
+            type="button"
+            className="pdf-paragraph-annotation-marker"
+            data-testid={`paragraph-annotation-marker-${marker.id}`}
+            aria-label={`查看批注：${marker.comment || '段落批注'}`}
+            title={marker.comment || '查看批注'}
+            onClick={(event) => { event.stopPropagation(); onAnnotationClick?.(marker.id); }}
+            style={{ left: `${marker.rect.x * 100}%`, top: `${marker.rect.y * 100}%` }}
+          >注</button>)}
         </div>
         <div className="textLayer" ref={textRef} onMouseUp={() => captureSelection()} onContextMenu={(event) => {
           if (captureSelection({ left: event.clientX, top: event.clientY })) event.preventDefault();

@@ -3,7 +3,7 @@ const http = require('node:http');
 
 async function createAgentFixture() {
   const requests = [];
-  const state = { delayMs: 0, missingQuote: false, repeatedQuote: false, failNext: false };
+  const state = { delayMs: 0, reasoningDelayMs: 0, reasoningSent: 0, missingQuote: false, repeatedQuote: false, failNext: false };
   const server = http.createServer(async (request, response) => {
     if (request.method === 'GET') {
       response.writeHead(200, { 'Content-Type': 'application/json' });
@@ -19,7 +19,9 @@ async function createAgentFixture() {
       return response.writeHead(429).end(JSON.stringify({ error: { message: 'Synthetic rate limit' } }));
     }
     const messages = body.messages || [];
-    const userText = [...messages].reverse().find(message => message.role === 'user')?.content || '';
+    const userContent = [...messages].reverse().find(message => message.role === 'user')?.content || '';
+    const userText = typeof userContent === 'string' ? userContent
+      : Array.isArray(userContent) ? userContent.filter(part => part?.type === 'text').map(part => part.text || '').join('\n') : '';
     const last = messages.at(-1);
     const toolNames = (body.tools || []).map(tool => tool.function.name);
     let calls;
@@ -44,7 +46,11 @@ async function createAgentFixture() {
     if (body.stream) {
       response.writeHead(200, { 'Content-Type': 'text/event-stream' });
       const frame = (delta, finish = null) => response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`);
-      if (reasoning) frame({ reasoning_content: reasoning });
+      if (reasoning) {
+        frame({ reasoning_content: reasoning });
+        state.reasoningSent++;
+        if (state.reasoningDelayMs) await new Promise(resolve => setTimeout(resolve, state.reasoningDelayMs));
+      }
       if (calls) {
         for (let index = 0; index < calls.length; index++) {
           const call = calls[index];

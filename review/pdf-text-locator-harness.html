@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDF text locator harness</title>
+    <style>
+      html, body { margin: 0; min-height: 100%; font: 16px/1.5 Arial, sans-serif; }
+      #stage { position: relative; width: 420px; height: 800px; margin: 20px; border: 1px solid #bbb; }
+      .textLayer { position: absolute; inset: 0; overflow: hidden; line-height: 1.5; }
+      .textLayer span { white-space: pre-wrap; }
+      #long-paragraph { display: block; margin-top: 40px; white-space: nowrap; }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <div id="text-layer" class="textLayer">
+        <span>We use the masked marker</span><br />
+        <span>modeling to learn contextual</span><br />
+        <span>representations of cells.</span><br />
+        <span>The ﬁndings are useful.</span><br />
+        <span>common repeated phrase</span><br />
+        <span>Another line before the common repeated phrase.</span>
+        <span id="long-paragraph"></span>
+      </div>
+    </div>
+    <script type="module" src="./pdf-text-locator-harness.ts"></script>
+  </body>
+</html>

@@ -250,6 +250,20 @@ def _responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 })
         else:
             item = {key: value for key, value in message.items() if key not in {"tool_calls", "_responses_output", "reasoning_content"}}
+            content = item.get("content")
+            if isinstance(content, list):
+                converted_content = []
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "text" and isinstance(part.get("text"), str):
+                        output_type = "output_text" if role == "assistant" else "input_text"
+                        converted_content.append({"type": output_type, "text": part["text"]})
+                    elif part.get("type") == "image_url" and isinstance(part.get("image_url"), dict):
+                        image_url = part["image_url"].get("url")
+                        if isinstance(image_url, str):
+                            converted_content.append({"type": "input_image", "image_url": image_url})
+                item["content"] = converted_content
             result.append(item)
     return result
 
@@ -830,8 +844,6 @@ async def stream_chat_completion(
         yield event
     if in_think:
         raise AIError("incomplete_response", "AI 服务返回的思考内容未正常结束。")
-    if not saw_done:
-        raise AIError("incomplete_response", "AI 流式响应未正常结束。")
     if finish_reason not in {"stop", "tool_calls"}:
         reason_text = {
             "length": "回答达到长度上限，内容未完成。",

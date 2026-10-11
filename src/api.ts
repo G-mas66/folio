@@ -29,7 +29,14 @@ export type Source = { id: string; kind?: 'web'; start_page: number; end_page: n
 export type ChatMessage = {
   id?: number; role: 'user' | 'assistant'; content: string; sources?: Source[];
   reasoning?: string; thinking?: 'default' | 'enabled' | 'disabled'; status?: string; error?: string; created_at?: string;
+  attachments?: ChatAttachment[];
 };
+export type ChatAttachment = {
+  id: string; name: string; mime_type: string; size: number; kind: 'image' | 'file' | 'pdf' | 'text';
+  page_count?: number; preview_url?: string;
+};
+export type PaperNote = { id: string; title: string; text: string; created_at?: string; updated_at: string };
+export type PaperNotes = { text: string; updated_at: string | null; notes: PaperNote[]; active_note_id: string };
 export type Segment = {
   id: number;
   sequence_no: number;
@@ -64,6 +71,8 @@ export type PdfAnnotation = {
   kind: 'highlight' | 'comment' | 'underline';
   created_at: string;
   updated_at: string;
+  view_contexts?: Partial<Record<SelectionContext['pdf_kind'], SelectionContext>>;
+  segment_anchor?: { sequence_no: number; quote: string };
 };
 
 export type PdfSelection = {
@@ -97,6 +106,9 @@ export type AgentAction = {
     text?: string;
     candidates?: AgentActionCandidate[];
     location_status?: 'not_found' | 'matched';
+    note_id?: string;
+    new_note?: boolean;
+    note_title?: string;
   };
   result?: unknown;
 };
@@ -106,6 +118,8 @@ export type ChatStreamInput = {
   selection_context?: SelectionContext;
   thinking?: ReasoningThinking;
   reasoning_effort?: ReasoningEffort;
+  attachment_ids?: string[];
+  selected_note_id?: string;
 };
 export type FeedbackInput = { message: string; contact?: string };
 export type ChatStreamEvent = { requestId: string; type: string; data: Record<string, unknown> };

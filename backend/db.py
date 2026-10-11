@@ -136,8 +136,23 @@ def initialize() -> None:
                 reasoning TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'completed',
                 error TEXT NOT NULL DEFAULT '',
+                attachments_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS chat_attachments (
+                id TEXT PRIMARY KEY,
+                paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+                session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('image', 'file')),
+                page_count INTEGER,
+                page_images_json TEXT NOT NULL DEFAULT '[]',
+                content BLOB NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS chat_attachments_by_session ON chat_attachments(paper_id, session_id, created_at, id);
             CREATE TABLE IF NOT EXISTS analysis_runs (
                 id TEXT PRIMARY KEY,
                 paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
@@ -175,6 +190,19 @@ def initialize() -> None:
                 text TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS paper_note_tabs (
+                id TEXT PRIMARY KEY,
+                paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                text TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS paper_note_tabs_by_paper ON paper_note_tabs(paper_id, created_at, id);
+            CREATE TABLE IF NOT EXISTS paper_note_state (
+                paper_id TEXT PRIMARY KEY REFERENCES papers(id) ON DELETE CASCADE,
+                active_note_id TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS paper_annotations (
                 id TEXT PRIMARY KEY,
                 paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
@@ -182,6 +210,8 @@ def initialize() -> None:
                 page_no INTEGER NOT NULL,
                 rects_json TEXT NOT NULL,
                 selected_text TEXT NOT NULL DEFAULT '',
+                view_contexts_json TEXT NOT NULL DEFAULT '{}',
+                segment_anchor_json TEXT NOT NULL DEFAULT '',
                 comment TEXT NOT NULL DEFAULT '',
                 color TEXT NOT NULL,
                 kind TEXT NOT NULL,
@@ -246,6 +276,10 @@ def initialize() -> None:
             ("chat_messages", "reasoning", "TEXT NOT NULL DEFAULT ''"),
             ("chat_messages", "status", "TEXT NOT NULL DEFAULT 'completed'"),
             ("chat_messages", "error", "TEXT NOT NULL DEFAULT ''"),
+            ("chat_messages", "attachments_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("chat_attachments", "page_images_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("paper_annotations", "view_contexts_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("paper_annotations", "segment_anchor_json", "TEXT NOT NULL DEFAULT ''"),
         ):
             columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
             if name not in columns:
@@ -275,6 +309,29 @@ def initialize() -> None:
                 )
             db.execute("UPDATE chat_messages SET session_id = ? WHERE paper_id = ? AND session_id IS NULL", (session["id"], paper["id"]))
             db.execute("UPDATE analysis_runs SET session_id = ? WHERE paper_id = ? AND session_id IS NULL", (session["id"], paper["id"]))
+            notes = db.execute(
+                "SELECT id FROM paper_note_tabs WHERE paper_id = ? ORDER BY created_at, id", (paper["id"],)
+            ).fetchall()
+            if not notes:
+                legacy_note = db.execute(
+                    "SELECT text, updated_at FROM paper_notes WHERE paper_id = ?", (paper["id"],)
+                ).fetchone()
+                note_id = uuid.uuid4().hex
+                created_at = (legacy_note["updated_at"] if legacy_note else None) or paper["created_at"] or ""
+                db.execute(
+                    "INSERT INTO paper_note_tabs(id, paper_id, title, text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (note_id, paper["id"], "笔记 1", legacy_note["text"] if legacy_note else "", created_at, created_at),
+                )
+                notes = [{"id": note_id}]
+            state = db.execute(
+                "SELECT active_note_id FROM paper_note_state WHERE paper_id = ?", (paper["id"],)
+            ).fetchone()
+            if not state or state["active_note_id"] not in {row["id"] for row in notes}:
+                db.execute(
+                    "INSERT INTO paper_note_state(paper_id, active_note_id) VALUES (?, ?) "
+                    "ON CONFLICT(paper_id) DO UPDATE SET active_note_id = excluded.active_note_id",
+                    (paper["id"], notes[0]["id"]),
+                )
         db.execute("CREATE INDEX IF NOT EXISTS chat_messages_by_session ON chat_messages(paper_id, session_id, id)")
         db.execute("CREATE INDEX IF NOT EXISTS analysis_runs_by_session ON analysis_runs(paper_id, session_id, created_at)")
         db.execute("UPDATE chat_messages SET status = 'interrupted', error = '应用关闭时回答未完成；部分内容已保留。' WHERE status = 'streaming'")

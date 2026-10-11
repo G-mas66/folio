@@ -457,7 +457,7 @@ async function requestApi(input) {
   if (!input || typeof input.path !== 'string' || !input.path.startsWith('/') || input.path.startsWith('//')) {
     throw new Error('无效的本机服务请求。');
   }
-  const noteFlushDuringInstall = updateInstallInProgress && input.method === 'PUT' && /^\/papers\/[a-f0-9]{32}\/notes$/.test(input.path);
+  const noteFlushDuringInstall = updateInstallInProgress && input.method === 'PUT' && /^\/papers\/[a-f0-9]{32}\/notes(?:\/[a-f0-9]{32})?$/.test(input.path);
   const translationCheckDuringInstall = updateInstallInProgress && input.method !== 'PUT' && input.path === '/papers?folder_id=all';
   if (updateInstallInProgress && !noteFlushDuringInstall && !translationCheckDuringInstall) throw new Error('应用正在准备安装更新，请稍候。');
   const response = await fetch(`${backendBase}${input.path}`, {
@@ -562,6 +562,7 @@ async function consumeChatStream(stream, pathName, body) {
       sendChatEvent(stream, 'error', {
         category: typeof detail === 'object' ? detail.category || 'service_error' : 'service_error',
         message: typeof detail === 'string' ? detail : detail?.message || 'AI 请求失败。',
+        request_rejected: response.status >= 400 && response.status < 500,
       });
       return;
     }
@@ -615,6 +616,8 @@ function startChatStream(event, input) {
       selection_context: input.selection_context,
       thinking: input.thinking,
       reasoning_effort: input.reasoning_effort,
+      attachment_ids: input.attachment_ids,
+      selected_note_id: input.selected_note_id,
     };
   }
   const stream = {

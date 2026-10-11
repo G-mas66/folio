@@ -4,9 +4,15 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { AgentAction, AgentActionCandidate, api, ChatMessage, ChatStreamEvent, ChatStreamHandle, errorMessage, Paper, PdfAnnotation, PdfSelection, ReasoningEffort, ReasoningThinking, Segment, SelectionContext, Source } from './api';
-import { loadPdfDocument, pageAspectRatios, PdfPage, PdfKind, SharedPdfDocument } from './PdfPage';
+import { AgentAction, AgentActionCandidate, api, ChatAttachment, ChatMessage, ChatStreamEvent, ChatStreamHandle, errorMessage, Paper, PaperNote, PaperNotes, PdfAnnotation, PdfSelection, ReasoningEffort, ReasoningThinking, Segment, SelectionContext, Source } from './api';
+import { loadPdfDocument, pageAspectRatios, PdfPage, PdfKind, SharedPdfDocument, type PdfTextMappingRequest, type PdfTextMappingResult } from './PdfPage';
 import './reader-reference.css';
+import { ChatComposer, ChatAttachmentList, type ChatAttachmentView } from './ChatComposer';
+import { ChatTurnNavigation } from './ChatTurnNavigation';
+import './chat-upgrade.css';
+import { ReaderNotesPanel } from './ReaderNotesPanel';
+import { annotationMappingCandidates, normalizePdfText } from './annotationMapping';
+import { renderPdfAttachment } from './PdfAttachment';
 
 type Page = { page_no: number; extraction_status: string; text_chars: number };
 type AnalysisRun = {
@@ -24,7 +30,7 @@ type AiAnnotationDraft = {
 type ReasoningPreferences = { thinking: ReasoningThinking; effort: ReasoningEffort };
 type ActionLocationPreview = { sessionId: string; actionId: string; selection: SelectionContext; manualReselect: boolean };
 type LocationSearch = { id: string; sessionId: string; actionId: string; candidates: AgentActionCandidate[]; index: number; matches: SelectionContext[] };
-type AgentActionConfirmInput = { selection_context?: SelectionContext; manual_reselect?: true; comment?: string; text?: string };
+type AgentActionConfirmInput = { selection_context?: SelectionContext; manual_reselect?: true; comment?: string; text?: string; note_id?: string; new_note?: boolean; note_title?: string };
 type SelectionAssociationRequest = { selection: ReaderSelection; sessionId: string };
 type SelectionContextMenu = { left: number; top: number };
 type SentenceTranslation = {
@@ -49,7 +55,7 @@ function readReasoningPreferences(): Record<string, ReasoningPreferences> {
   try {
     const saved = JSON.parse(localStorage.getItem(reasoningPreferencesKey) || '{}') as Record<string, Partial<ReasoningPreferences>>;
     return Object.fromEntries(Object.entries(saved).map(([model, value]) => [model, {
-      thinking: ['default', 'enabled', 'disabled'].includes(value.thinking || '') ? value.thinking as ReasoningThinking : 'default',
+      thinking: 'default',
       effort: ['default', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value.effort || '') ? value.effort as ReasoningEffort : 'default',
     }]));
   } catch { return {}; }
@@ -115,11 +121,25 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   const [segments, setSegments] = useState<Segment[]>([]);
   const [rightPanel, setRightPanel] = useState<'chat' | 'notes'>('chat');
   const [noteText, setNoteText] = useState('');
+  const [paperNotes, setPaperNotes] = useState<PaperNote[]>([]);
+  const [activeNoteId, setActiveNoteId] = useState('');
+  const activeNoteIdRef = useRef('');
+  const noteServerTextRef = useRef(new Map<string, string>());
+  const [noteSwitchPending, setNoteSwitchPending] = useState(false);
+  const noteSwitchPendingRef = useRef(false);
   const [noteSaveStatus, setNoteSaveStatusState] = useState<NoteSaveStatus>('未保存');
   const [notesLoaded, setNotesLoaded] = useState(false);
   const [notesFailure, setNotesFailure] = useState('');
+  const [noteConflict, setNoteConflict] = useState(false);
+  const noteRecoveryReadyRef = useRef(false);
   const [noteActionPending, setNoteActionPending] = useState(false);
   const [annotations, setAnnotations] = useState<PdfAnnotation[]>([]);
+  const [mappedAnnotations, setMappedAnnotations] = useState<Record<string, { context: SelectionContext; kind: 'exact' | 'paragraph' }>>({});
+  const [mappingRequestsByPage, setMappingRequestsByPage] = useState<Record<number, PdfTextMappingRequest[]>>({});
+  const annotationMappingEpochRef = useRef(0);
+  const [manualAnnotationLinkId, setManualAnnotationLinkId] = useState<string | null>(null);
+  const [manualAnnotationLinkSelection, setManualAnnotationLinkSelection] = useState<SelectionContext | null>(null);
+  const [manualAnnotationLinkSaving, setManualAnnotationLinkSaving] = useState(false);
   const [selection, setSelection] = useState<ReaderSelection | null>(null);
   const [selectionContextMenu, setSelectionContextMenu] = useState<SelectionContextMenu | null>(null);
   const [selectionNotice, setSelectionNotice] = useState('');
@@ -196,6 +216,11 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   const pendingAnnotationJumpRef = useRef<{ pdfKind: PdfKind; page: number } | null>(null);
   const previousPdfKindRef = useRef<PdfKind>(pdfKind);
   const loadedPdfKindRef = useRef<PdfKind | null>(null);
+  const pdfPageCount = pdfDocument?.pdf.numPages || paper?.page_count || 1;
+  useEffect(() => {
+    setManualAnnotationLinkId(null);
+    setManualAnnotationLinkSelection(null);
+  }, [paperId, pdfKind]);
   readerLayoutRef.current = readerLayout;
   if (lastActivePropRef.current !== active) {
     activeEpochRef.current += 1;
@@ -220,6 +245,12 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   }
 
   async function persistPaperNotes(text: string, revision: number, updateUi = true, force = false) {
+    const noteId = activeNoteIdRef.current;
+    if (!noteId) return;
+    if (force && noteConflictRef.current && !noteRecoveryReadyRef.current) {
+      setNotesFailure('请先合并冲突版本，核对内容后再保存。');
+      return;
+    }
     if ((noteActionPendingRef.current || noteConflictRef.current) && !force) {
       noteSaveTimerRef.current = null;
       return;
@@ -229,11 +260,16 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
     if (updateUi) setNoteSaveStatus('保存中…');
     const request = noteSaveQueueRef.current.catch(() => undefined).then(() => {
       if ((noteActionPendingRef.current || noteConflictRef.current) && !force) throw new Error('笔记追加期间产生了较新的草稿；已暂停自动保存。');
-      return api<{ text: string }>(`/papers/${paperId}/notes`, 'PUT', { text });
+      return api<PaperNote>(`/papers/${paperId}/notes/${noteId}`, 'PUT', { text, expected_text: noteServerTextRef.current.get(noteId) ?? '' }).then((saved) => {
+        noteServerTextRef.current.set(noteId, saved.text);
+        return saved;
+      });
     });
     noteSaveQueueRef.current = request.then(() => undefined, () => undefined);
     try {
-      await request;
+      const saved = await request;
+      if (paperIdRef.current !== paperId || activeNoteIdRef.current !== noteId) return;
+      setPaperNotes((previous) => previous.map((note) => note.id === noteId ? saved : note));
       noteSavedRevisionRef.current = Math.max(noteSavedRevisionRef.current, revision);
       if (!updateUi) return;
       if (noteRevisionRef.current !== revision || noteDraftRef.current !== text) {
@@ -241,7 +277,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
         return;
       }
       try {
-        const key = `paper-workbench.note-draft.${paperId}`;
+        const key = `paper-workbench.note-draft.${paperId}.${noteId}`;
         if (localStorage.getItem(key) === text) localStorage.removeItem(key);
       } catch {
         setNoteSaveStatus('保存失败');
@@ -251,11 +287,46 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
       setNoteSaveStatus('已保存');
       setNotesFailure('');
       noteConflictRef.current = false;
+      setNoteConflict(false);
+      noteRecoveryReadyRef.current = false;
     } catch (error) {
+      if (paperIdRef.current === paperId && activeNoteIdRef.current === noteId && errorMessage(error).includes('笔记已在其他位置更新')) {
+        noteConflictRef.current = true;
+        setNoteConflict(true);
+        noteRecoveryReadyRef.current = false;
+      }
       if (updateUi && noteRevisionRef.current === revision) {
         setNoteSaveStatus('保存失败');
         setNotesFailure(errorMessage(error));
       }
+    }
+  }
+
+  async function resolveNoteConflict() {
+    const noteId = activeNoteIdRef.current;
+    if (!noteId || noteSwitchPendingRef.current || noteActionPendingRef.current) return;
+    noteSwitchPendingRef.current = true;
+    setNoteSwitchPending(true);
+    try {
+      await noteSaveQueueRef.current;
+      const latest = await api<PaperNotes>(`/papers/${paperId}/notes`);
+      if (paperIdRef.current !== paperId || activeNoteIdRef.current !== noteId) return;
+      const remote = latest.notes.find((note) => note.id === noteId);
+      if (!remote) throw new Error('目标笔记已删除；本地草稿仍保留，请复制草稿后重新打开阅读器。');
+      const local = noteDraftRef.current;
+      noteServerTextRef.current.set(noteId, remote.text);
+      setPaperNotes(latest.notes);
+      const merged = remote.text === local ? local : `## 服务端版本\n\n${remote.text}\n\n---\n\n## 本地草稿\n\n${local}`;
+      changeNoteText(merged);
+      noteConflictRef.current = true;
+      setNoteConflict(false);
+      noteRecoveryReadyRef.current = true;
+      setNotesFailure('两个版本已保留在草稿中，自动保存已暂停。请编辑核对后点击保存。');
+    } catch (error) {
+      setNotesFailure(errorMessage(error));
+    } finally {
+      noteSwitchPendingRef.current = false;
+      setNoteSwitchPending(false);
     }
   }
 
@@ -274,13 +345,85 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
     noteRevisionRef.current += 1;
     setNoteText(text);
     try {
-      localStorage.setItem(`paper-workbench.note-draft.${paperId}`, text);
+      localStorage.setItem(`paper-workbench.note-draft.${paperId}.${activeNoteIdRef.current}`, text);
       setNoteSaveStatus('未保存');
       setNotesFailure('');
     } catch {
       setNoteSaveStatus('保存失败');
       setNotesFailure('本地草稿暂时无法保存；关闭阅读标签前请先保存笔记。');
     }
+  }
+
+  function loadNoteDraft(note: PaperNote) {
+    let draft: string | null = null;
+    try { draft = localStorage.getItem(`paper-workbench.note-draft.${paperId}.${note.id}`); }
+    catch { setNotesFailure('本地草稿存储不可用，请及时保存笔记。'); }
+    activeNoteIdRef.current = note.id;
+    setActiveNoteId(note.id);
+    noteDraftRef.current = draft ?? note.text;
+    noteRevisionRef.current = draft !== null && draft !== note.text ? 1 : 0;
+    noteSavedRevisionRef.current = 0;
+    noteConflictRef.current = false;
+    setNoteConflict(false);
+    noteRecoveryReadyRef.current = false;
+    noteServerTextRef.current.set(note.id, note.text);
+    setNoteText(noteDraftRef.current);
+    setNoteSaveStatus(noteRevisionRef.current ? '未保存' : '已保存');
+  }
+
+  async function switchNote(noteId: string) {
+    if (noteSwitchPendingRef.current || noteActionPendingRef.current || noteId === activeNoteIdRef.current) return;
+    noteSwitchPendingRef.current = true;
+    setNoteSwitchPending(true);
+    try {
+      await flushNoteBeforeUpdateRef.current();
+      const note = paperNotes.find((item) => item.id === noteId);
+      if (!note) throw new Error('找不到这篇笔记。');
+      await api(`/papers/${paperId}/notes/active`, 'PATCH', { note_id: noteId });
+      loadNoteDraft(note);
+      setNotesFailure('');
+    } catch (error) { setNotesFailure(errorMessage(error)); }
+    finally { noteSwitchPendingRef.current = false; setNoteSwitchPending(false); }
+  }
+
+  async function createNote(title?: string) {
+    if (noteSwitchPendingRef.current || noteActionPendingRef.current) return;
+    noteSwitchPendingRef.current = true;
+    setNoteSwitchPending(true);
+    try {
+      await flushNoteBeforeUpdateRef.current();
+      const note = await api<PaperNote>(`/papers/${paperId}/notes`, 'POST', { title });
+      await api(`/papers/${paperId}/notes/active`, 'PATCH', { note_id: note.id });
+      setPaperNotes((previous) => [...previous, note]);
+      loadNoteDraft(note);
+      setNotesFailure('');
+    } catch (error) { setNotesFailure(errorMessage(error)); }
+    finally { noteSwitchPendingRef.current = false; setNoteSwitchPending(false); }
+  }
+
+  async function renameNote(noteId: string, title: string) {
+    try {
+      const updated = await api<PaperNote>(`/papers/${paperId}/notes/${noteId}`, 'PATCH', { title });
+      setPaperNotes((previous) => previous.map((note) => note.id === noteId ? { ...note, title: updated.title } : note));
+    } catch (error) { setNotesFailure(errorMessage(error)); }
+  }
+
+  async function deleteNote(noteId: string) {
+    if (noteSwitchPendingRef.current || noteActionPendingRef.current) return;
+    noteSwitchPendingRef.current = true;
+    setNoteSwitchPending(true);
+    try {
+      await flushNoteBeforeUpdateRef.current();
+      await api(`/papers/${paperId}/notes/${noteId}`, 'DELETE');
+      const saved = await api<PaperNotes>(`/papers/${paperId}/notes`);
+      setPaperNotes(saved.notes);
+      localStorage.removeItem(`paper-workbench.note-draft.${paperId}.${noteId}`);
+      noteServerTextRef.current.delete(noteId);
+      const selected = saved.notes.find((note) => note.id === saved.active_note_id) || saved.notes[0];
+      if (selected) loadNoteDraft(selected);
+      setNotesFailure('');
+    } catch (error) { setNotesFailure(errorMessage(error)); }
+    finally { noteSwitchPendingRef.current = false; setNoteSwitchPending(false); }
   }
 
   function applyReaderLayout(next: ReaderLayoutState) {
@@ -369,13 +512,13 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
       resizeStartLayoutRef.current = null;
       pendingReaderLayoutRef.current = null;
       anchorSettleTimerRef.current = null;
-      if (isAtPdfScrollEnd() && paper) updatePageFromScroll(paper.page_count);
+      if (isAtPdfScrollEnd() && paper) updatePageFromScroll(pdfPageCount);
     }, 320);
   }
 
   function isAtPdfScrollEnd() {
-    if (!activeRef.current || !paper || !pdfDocument || pageAspects.length < paper.page_count || !pdfScrollElement) return false;
-    const lastFrame = pdfScrollElement.querySelector<HTMLElement>(`.pdf-page-frame[data-page-number="${paper.page_count}"]`);
+    if (!activeRef.current || !paper || !pdfDocument || pageAspects.length < pdfPageCount || !pdfScrollElement) return false;
+    const lastFrame = pdfScrollElement.querySelector<HTMLElement>(`.pdf-page-frame[data-page-number="${pdfPageCount}"]`);
     return Boolean(lastFrame?.offsetHeight && pdfScrollElement.scrollHeight > pdfScrollElement.clientHeight + 1
       && pdfScrollElement.scrollTop + pdfScrollElement.clientHeight >= pdfScrollElement.scrollHeight - 2);
   }
@@ -438,6 +581,71 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   useEffect(() => { if (active) void refresh(); }, [active, refresh]);
 
   useEffect(() => {
+    const epoch = ++annotationMappingEpochRef.current;
+    setMappedAnnotations({});
+    setMappingRequestsByPage({});
+    if (!pdfDocument || loadedPdfKindRef.current !== pdfKind) return;
+    const candidates = annotations.flatMap((annotation) => annotationMappingCandidates(annotation, segments)).filter((candidate) => candidate.targetKind === pdfKind);
+    if (!candidates.length) return;
+    void (async () => {
+      const texts: string[] = [];
+      for (let page = 1; page <= pdfDocument.pdf.numPages; page++) {
+        const content = await (await pdfDocument.pdf.getPage(page)).getTextContent();
+        if (epoch !== annotationMappingEpochRef.current) return;
+        texts.push(normalizePdfText(content.items.map((item) => 'str' in item ? item.str : '').join(' ')).replace(/\s/g, ''));
+      }
+      const requests: Record<number, PdfTextMappingRequest[]> = {};
+      for (const candidate of candidates) {
+        const quote = candidate.kind === 'paragraph' ? candidate.quote.trim().slice(0, 220).trimEnd() : candidate.quote;
+        const needle = normalizePdfText(quote).replace(/\s/g, '');
+        if (!needle) continue;
+        const pages: number[] = [];
+        texts.forEach((text, index) => {
+          let offset = text.indexOf(needle);
+          while (offset >= 0) {
+            pages.push(index + 1);
+            offset = text.indexOf(needle, offset + needle.length);
+          }
+        });
+        if (pages.length !== 1) continue;
+        (requests[pages[0]] ||= []).push({ annotationId: candidate.annotationId, quote, kind: candidate.kind });
+      }
+      if (epoch === annotationMappingEpochRef.current) setMappingRequestsByPage(requests);
+    })().catch(() => { /* original annotations remain available if this PDF cannot be mapped */ });
+    return () => { annotationMappingEpochRef.current += 1; };
+  }, [pdfDocument, pdfKind, annotations, segments]);
+
+  const receiveAnnotationMappings = useCallback((page: number, results: PdfTextMappingResult[]) => {
+    if (loadedPdfKindRef.current !== pdfKind) return;
+    setMappedAnnotations((previous) => {
+      const next = { ...previous };
+      for (const result of results) {
+        if (result.matches.length !== 1) continue;
+        if (next[result.annotationId]?.kind === 'exact' && result.kind !== 'exact') continue;
+        const match = result.matches[0];
+        next[result.annotationId] = { context: { pdf_kind: pdfKind, page_no: page, rects: match.rects, selected_text: match.selected_text }, kind: result.kind };
+      }
+      return JSON.stringify(next) === JSON.stringify(previous) ? previous : next;
+    });
+  }, [pdfKind]);
+
+  function annotationsForPage(page: number) {
+    return annotations.flatMap((annotation) => {
+      if (annotation.pdf_kind === pdfKind) return annotation.page_no === page ? [annotation] : [];
+      const verified = annotation.view_contexts?.[pdfKind];
+      const mapped = mappedAnnotations[annotation.id];
+      const context = verified || (mapped?.kind === 'exact' ? mapped.context : null);
+      return context?.page_no === page ? [{ ...annotation, ...context, pdf_kind: pdfKind }] : [];
+    });
+  }
+
+  function openAnnotationComment(id: string) {
+    setSelectedAnnotation(id);
+    setRightPanel('notes');
+    window.requestAnimationFrame(() => document.querySelector(`[data-testid="reader-annotation-${id}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
+  }
+
+  useEffect(() => {
     let canceled = false;
     setSelectionToAssociate(null);
     aiAnnotationRequestRef.current += 1;
@@ -451,6 +659,8 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
     noteActionPendingRef.current = false;
     noteActionPaperRef.current = null;
     noteConflictRef.current = false;
+    setNoteConflict(false);
+    noteRecoveryReadyRef.current = false;
     setSelection(null);
     setSelectionContextMenu(null);
     setHighlightPaletteOpen(false);
@@ -465,31 +675,32 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
     let storageFailure = false;
     try { localDraft = localStorage.getItem(`paper-workbench.note-draft.${paperId}`); }
     catch { storageFailure = true; }
-    void api<{ text: string; updated_at: string | null }>(`/papers/${paperId}/notes`).then((saved) => {
+    activeNoteIdRef.current = '';
+    setActiveNoteId('');
+    setPaperNotes([]);
+    void api<PaperNotes>(`/papers/${paperId}/notes`).then((saved) => {
       if (canceled) return;
-      const value = localDraft ?? saved.text;
-      noteDraftRef.current = value;
-      noteRevisionRef.current = localDraft !== null && localDraft !== saved.text ? 1 : 0;
-      noteSavedRevisionRef.current = 0;
-      setNoteText(value);
+      setPaperNotes(saved.notes);
+      saved.notes.forEach((note) => noteServerTextRef.current.set(note.id, note.text));
+      const selected = localDraft !== null ? saved.notes[0] : saved.notes.find((note) => note.id === saved.active_note_id) || saved.notes[0];
+      if (!selected) throw new Error('没有可用的阅读笔记。');
+      if (localDraft !== null) {
+        localStorage.setItem(`paper-workbench.note-draft.${paperId}.${selected.id}`, localDraft);
+        localStorage.removeItem(`paper-workbench.note-draft.${paperId}`);
+      }
+      loadNoteDraft(selected);
       noteLoadedRef.current = true;
       setNotesLoaded(true);
-      setNoteSaveStatus(storageFailure ? '保存失败' : noteRevisionRef.current ? '未保存' : '已保存');
-      if (storageFailure) setNotesFailure('本地草稿存储不可用；请使用“保存笔记”保存到本机数据库。');
-      if (localDraft === saved.text && localDraft !== null) {
-        try { localStorage.removeItem(`paper-workbench.note-draft.${paperId}`); } catch { /* saved note is already durable */ }
+      if (storageFailure) {
+        setNoteSaveStatus('保存失败');
+        setNotesFailure('本地草稿存储不可用；请使用保存按钮保存到本机数据库。');
       }
     }).catch((error) => {
       if (canceled) return;
-      const value = localDraft ?? '';
-      noteDraftRef.current = value;
-      noteRevisionRef.current = localDraft !== null ? 1 : 0;
-      noteSavedRevisionRef.current = 0;
-      setNoteText(value);
-      noteLoadedRef.current = true;
-      setNotesLoaded(true);
+      noteLoadedRef.current = false;
+      setNotesLoaded(false);
       setNoteSaveStatus('保存失败');
-      setNotesFailure(`${errorMessage(error)}${storageFailure ? '；本地草稿存储也不可用。' : ''}`);
+      setNotesFailure(errorMessage(error));
     });
     void api<PdfAnnotation[]>(`/papers/${paperId}/annotations`).then((items) => {
       if (!canceled) setAnnotations(sortAnnotations(items));
@@ -585,6 +796,8 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
 
   useEffect(() => {
     if (active) return;
+    setManualAnnotationLinkId(null);
+    setManualAnnotationLinkSelection(null);
     aiAnnotationRequestRef.current += 1;
     setAiAnnotationDraft(null);
     locationSearchRequestRef.current += 1;
@@ -704,7 +917,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
     void (async () => {
       try {
         loaded = await loadPdfDocument(paperId, pdfKind);
-        const aspects = await pageAspectRatios(loaded, paper.page_count);
+        const aspects = await pageAspectRatios(loaded, loaded.pdf.numPages);
         if (canceled) {
           await loaded.destroy();
           return;
@@ -730,9 +943,10 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
     const target = pendingAnnotationJumpRef.current;
     if (!active || !pdfDocument || loadedPdfKindRef.current !== pdfKind || !target || target.pdfKind !== pdfKind) return;
     pendingAnnotationJumpRef.current = null;
-    visiblePageRef.current = target.page;
-    setPageNumber(target.page);
-    scrollPageIntoView(target.page, 'auto');
+    const targetPage = Math.min(Math.max(target.page, 1), pdfDocument.pdf.numPages);
+    visiblePageRef.current = targetPage;
+    setPageNumber(targetPage);
+    scrollPageIntoView(targetPage, 'auto');
     initialPageScrollPendingRef.current = false;
   }, [active, pdfDocument, pdfKind, pdfScrollElement]);
 
@@ -747,7 +961,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
 
   function goToPage(target: number) {
     if (!active) return;
-    const next = Math.min(Math.max(target, 1), paper?.page_count || 1);
+    const next = Math.min(Math.max(target, 1), pdfPageCount);
     visiblePageRef.current = next;
     setPageNumber(next);
     if (progressTimerRef.current !== null) window.clearTimeout(progressTimerRef.current);
@@ -756,8 +970,8 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   }
 
   function updatePageFromScroll(next: number) {
-    if (!activeRef.current || initialPageScrollPendingRef.current || !paper || next < 1 || next > paper.page_count) return;
-    const page = isAtPdfScrollEnd() ? paper.page_count : next;
+    if (!activeRef.current || initialPageScrollPendingRef.current || !paper || next < 1 || next > pdfPageCount) return;
+    const page = isAtPdfScrollEnd() ? pdfPageCount : next;
     if (resizingRef.current || visiblePageRef.current === page) return;
     visiblePageRef.current = page;
     setPageNumber(page);
@@ -789,7 +1003,8 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
 
   useEffect(() => {
     if (!active || !pdfDocument || loadedPdfKindRef.current !== pdfKind || pendingAnnotationJumpRef.current || !initialPageScrollPendingRef.current) return;
-    const restoredPage = pageNumber;
+    const restoredPage = Math.min(Math.max(pageNumber, 1), pdfDocument.pdf.numPages);
+    if (restoredPage !== pageNumber) setPageNumber(restoredPage);
     window.requestAnimationFrame(() => {
       scrollPageIntoView(restoredPage, 'auto');
       initialPageScrollPendingRef.current = false;
@@ -828,8 +1043,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
       void window.workbench.openExternal(source.url);
       return;
     }
-    setMode(paper?.source_language === 'zh' ? 'original' : 'bilingual');
-    goToPage(source.start_page);
+    goToPdfLocation('original', source.start_page);
   }
 
   function findText(event: FormEvent) {
@@ -879,6 +1093,14 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
       setSelectionContextMenu(null);
       setHighlightPaletteOpen(false);
       if (notice) setSelectionNotice(notice);
+      return;
+    }
+    if (manualAnnotationLinkId) {
+      setManualAnnotationLinkSelection(toSelectionContext({ ...value, pdf_kind: pdfKind }));
+      setSelection(null);
+      setSelectionContextMenu(null);
+      setSelectionNotice('已选择关联位置，请确认保存。');
+      window.getSelection()?.removeAllRanges();
       return;
     }
     const manualRetarget = manualRetargetActionRef.current;
@@ -1065,8 +1287,9 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
 
   async function confirmAgentAction(sessionId: string, action: AgentAction, input: AgentActionConfirmInput) {
     const targetPaperId = paperId;
-    let noteSnapshot: { text: string; revision: number } | null = null;
+    let noteSnapshot: { noteId: string; text: string; revision: number } | null = null;
     if (action.kind === 'note') {
+      if (noteSwitchPendingRef.current || noteActionPendingRef.current) throw new Error('笔记正在更新，请完成后再确认。');
       if (paperIdRef.current !== targetPaperId) throw new Error('文献已切换，请在当前文献中重新确认。');
       if (!notesLoaded) throw new Error('笔记仍在载入，请稍后再确认。');
       try { await flushNoteBeforeUpdateRef.current(); }
@@ -1075,7 +1298,13 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
         throw new Error(`${detail ? `${detail}；` : ''}现有笔记未保存，请先保存后再确认追加。`);
       }
       if (paperIdRef.current !== targetPaperId) throw new Error('文献已切换，请在当前文献中重新确认。');
-      noteSnapshot = { text: noteDraftRef.current, revision: noteRevisionRef.current };
+      if (noteSwitchPendingRef.current || noteActionPendingRef.current) throw new Error('笔记正在更新，请完成后再确认。');
+      if (!input.new_note) {
+        const noteId = input.note_id || action.payload.note_id || activeNoteIdRef.current;
+        const note = paperNotes.find((item) => item.id === noteId);
+        if (!note) throw new Error('目标笔记不存在，请重新选择保存位置。');
+        noteSnapshot = { noteId, text: noteId === activeNoteIdRef.current ? noteDraftRef.current : noteServerTextRef.current.get(noteId) ?? note.text, revision: noteRevisionRef.current };
+      }
       noteActionPendingRef.current = true;
       noteActionPaperRef.current = targetPaperId;
       setNoteActionPending(true);
@@ -1086,12 +1315,19 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
         ...(noteSnapshot ? { expected_note_text: noteSnapshot.text } : {}),
       });
       if (paperIdRef.current !== targetPaperId) return result;
-      const payload = result.result as { annotation?: PdfAnnotation; notes?: { text: string; updated_at: string | null } } | undefined;
+      const payload = result.result as { annotation?: PdfAnnotation; notes?: PaperNote } | undefined;
       if (payload?.annotation) {
         setAnnotations((previous) => sortAnnotations([...previous.filter((item) => item.id !== payload.annotation?.id), payload.annotation as PdfAnnotation]));
         setAnnotationFailure('');
       }
-      if (payload?.notes && noteSnapshot) {
+      if (payload?.notes) {
+        const savedNote = payload.notes;
+        noteServerTextRef.current.set(savedNote.id, savedNote.text);
+        setPaperNotes((previous) => previous.some((note) => note.id === savedNote.id) ? previous.map((note) => note.id === savedNote.id ? savedNote : note) : [...previous, savedNote]);
+        if (input.new_note) {
+          loadNoteDraft(savedNote);
+          setRightPanel('notes');
+        } else if (noteSnapshot && savedNote.id === activeNoteIdRef.current && noteSnapshot.noteId === activeNoteIdRef.current) {
         if (noteRevisionRef.current === noteSnapshot.revision && noteDraftRef.current === noteSnapshot.text) {
           if (noteSaveTimerRef.current !== null) window.clearTimeout(noteSaveTimerRef.current);
           noteSaveTimerRef.current = null;
@@ -1101,12 +1337,15 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
           setNoteText(payload.notes.text);
           setNoteSaveStatus('已保存');
           setNotesFailure('');
-          try { localStorage.removeItem(`paper-workbench.note-draft.${paperId}`); }
+          try { localStorage.removeItem(`paper-workbench.note-draft.${paperId}.${savedNote.id}`); }
           catch { setNoteSaveStatus('保存失败'); setNotesFailure('建议笔记已保存到数据库，但本地草稿状态无法同步。'); }
         } else {
           noteConflictRef.current = true;
+          setNoteConflict(true);
+          noteRecoveryReadyRef.current = false;
           setNoteSaveStatus('未保存');
-          setNotesFailure('建议笔记已保存，但期间出现了较新的本地草稿。草稿已保留；请核对两者后手动保存。');
+          setNotesFailure('建议笔记已保存，但期间出现了较新的本地草稿。草稿已保留；请先合并冲突版本，核对后保存。');
+        }
         }
       }
       setActionLocationPreview((current) => current?.sessionId === sessionId && current.actionId === action.id ? null : current);
@@ -1114,14 +1353,26 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
       setActionLocationMessage(null);
       return result;
     } catch (error) {
-      if (paperIdRef.current === targetPaperId && noteSnapshot && (noteRevisionRef.current !== noteSnapshot.revision || noteDraftRef.current !== noteSnapshot.text)) {
+      const serverConflict = errorMessage(error).includes('笔记已在其他位置更新');
+      if (paperIdRef.current === targetPaperId && noteSnapshot && serverConflict && noteSnapshot.noteId !== activeNoteIdRef.current) {
+        const latest = await api<PaperNotes>(`/papers/${targetPaperId}/notes`).catch(() => null);
+        if (latest && paperIdRef.current === targetPaperId) {
+          setPaperNotes(latest.notes);
+          for (const note of latest.notes) {
+            if (note.id !== activeNoteIdRef.current) noteServerTextRef.current.set(note.id, note.text);
+          }
+        }
+      }
+      if (paperIdRef.current === targetPaperId && noteSnapshot?.noteId === activeNoteIdRef.current && (serverConflict || noteRevisionRef.current !== noteSnapshot.revision || noteDraftRef.current !== noteSnapshot.text)) {
         noteConflictRef.current = true;
+        setNoteConflict(true);
+        noteRecoveryReadyRef.current = false;
         setNoteSaveStatus('未保存');
-        setNotesFailure('笔记在确认期间被修改；较新的本地草稿已保留。请核对后手动保存，再重试建议。');
+        setNotesFailure('笔记在确认期间被修改；较新的本地草稿已保留。请先合并冲突版本，核对后保存，再重试建议。');
       }
       throw error;
     } finally {
-      if (noteSnapshot && noteActionPaperRef.current === targetPaperId) {
+      if (action.kind === 'note' && noteActionPaperRef.current === targetPaperId) {
         noteActionPendingRef.current = false;
         noteActionPaperRef.current = null;
         setNoteActionPending(false);
@@ -1289,6 +1540,11 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   function jumpToAnnotation(annotation: PdfAnnotation) {
     setRightPanel('notes');
     setSelectedAnnotation(annotation.id);
+    const currentContext = annotation.view_contexts?.[pdfKind] || mappedAnnotations[annotation.id]?.context;
+    if (annotation.pdf_kind !== pdfKind && currentContext) {
+      goToPage(currentContext.page_no);
+      return;
+    }
     const targetMode = annotation.pdf_kind === 'dual' ? 'bilingual' : annotation.pdf_kind;
     if (annotation.pdf_kind === pdfKind) {
       goToPage(annotation.page_no);
@@ -1296,6 +1552,19 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
     }
     pendingAnnotationJumpRef.current = { pdfKind: annotation.pdf_kind, page: annotation.page_no };
     setMode(targetMode);
+  }
+
+  async function saveManualAnnotationLink() {
+    if (!manualAnnotationLinkId || !manualAnnotationLinkSelection || manualAnnotationLinkSaving) return;
+    setManualAnnotationLinkSaving(true);
+    try {
+      const updated = await api<PdfAnnotation>(`/papers/${paperId}/annotations/${manualAnnotationLinkId}/views`, 'PATCH', { selection_context: manualAnnotationLinkSelection });
+      setAnnotations((previous) => sortAnnotations(previous.map((annotation) => annotation.id === updated.id ? updated : annotation)));
+      setManualAnnotationLinkId(null);
+      setManualAnnotationLinkSelection(null);
+      setSelectionNotice('已关联到当前 PDF 视图。');
+    } catch (error) { setSelectionNotice(errorMessage(error)); }
+    finally { setManualAnnotationLinkSaving(false); }
   }
 
   function beginEditingAnnotation(annotation: PdfAnnotation) {
@@ -1367,15 +1636,19 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
               <span className="reading-toolbar-spacer" />
               <div className="page-stepper">
                 <button className="icon-button" aria-label="上一页" onClick={() => goToPage(pageNumber - 1)} disabled={pageNumber <= 1}>‹</button>
-                <input aria-label="当前页码" type="number" min={1} max={paper.page_count} value={pageNumber} onChange={(event) => goToPage(Number(event.target.value))} />
-                <span>/ {paper.page_count}</span>
-                <button className="icon-button" aria-label="下一页" onClick={() => goToPage(pageNumber + 1)} disabled={pageNumber >= paper.page_count}>›</button>
+                <input aria-label="当前页码" type="number" min={1} max={pdfPageCount} value={pageNumber} onChange={(event) => goToPage(Number(event.target.value))} />
+                <span>/ {pdfPageCount}</span>
+                <button className="icon-button" aria-label="下一页" onClick={() => goToPage(pageNumber + 1)} disabled={pageNumber >= pdfPageCount}>›</button>
               </div>
               <div className="zoom-controls"><button className="secondary-button compact-button" aria-label="缩小 PDF" onClick={() => setPdfScale((scale) => Math.max(0.5, Math.round((scale - 0.1) * 100) / 100))}>−</button><span>{Math.round(pdfScale * 100)}%</span><button className="secondary-button compact-button" aria-label="放大 PDF" onClick={() => setPdfScale((scale) => Math.min(2.5, Math.round((scale + 0.1) * 100) / 100))}>＋</button></div>
               <button className="reader-toolbar-icon" type="button" aria-label="打开当前 PDF 文件位置" title="文件位置" onClick={() => void window.workbench.revealPaperFile(paperId, pdfKind).catch((error) => setFailure(errorMessage(error)))}>↗</button>
               <button className="reader-toolbar-icon" type="button" data-testid="toggle-chat" aria-label={readerLayout.chatVisible ? '隐藏 AI 助手' : '显示 AI 助手'} aria-pressed={!readerLayout.chatVisible} onClick={() => toggleReaderPanel('chat')}>{readerLayout.chatVisible ? '◫' : '◧'}</button>
               {searchNotice && <span className="search-result">{searchNotice}</span>}
               {selectionNotice && <span className="selection-notice" role="status">{selectionNotice}</span>}
+              {manualAnnotationLinkId && <>
+                <button type="button" className="primary-button compact-button" disabled={!manualAnnotationLinkSelection || manualAnnotationLinkSaving} onClick={() => void saveManualAnnotationLink()}>确认关联</button>
+                <button type="button" className="secondary-button compact-button" onClick={() => { setManualAnnotationLinkId(null); setManualAnnotationLinkSelection(null); setSelectionNotice(''); }}>取消关联</button>
+              </>}
             </div>
             <div className="pdf-scroll" ref={setPdfScrollElement} data-testid="pdf-scroll" data-pdf-kind={pdfDocument ? loadedPdfKindRef.current : undefined} aria-label="PDF 页面滚动区" onScroll={(event) => {
               if (!activeRef.current) return;
@@ -1385,11 +1658,11 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
                 setHighlightPaletteOpen(false);
               }
               scrollPositionRef.current = event.currentTarget.scrollTop;
-              if (isAtPdfScrollEnd() && paper) updatePageFromScroll(paper.page_count);
+              if (isAtPdfScrollEnd() && paper) updatePageFromScroll(pdfPageCount);
             }}>
               {pdfFailure ? <div className="pdf-error">{pdfFailure}</div> : !pdfDocument ? <div className="pdf-loading">正在载入 PDF…</div> : (
                 <div className="pdf-pages">
-                  {Array.from({ length: paper.page_count }, (_, index) => index + 1).map((page) => (
+                  {Array.from({ length: pdfPageCount }, (_, index) => index + 1).map((page) => (
                     <PdfPage
                       key={`${pdfKind}-${page}`}
                       document={pdfDocument}
@@ -1398,7 +1671,15 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
                       containerWidth={pdfScrollWidth}
                       scrollRoot={pdfScrollElement}
                       pageAspectRatio={pageAspects[page - 1] || 0.72}
-                      annotations={annotations.filter((item) => item.pdf_kind === pdfKind && item.page_no === page)}
+                      annotations={annotationsForPage(page)}
+                      mappingRequests={mappingRequestsByPage[page] || []}
+                      onMapped={receiveAnnotationMappings}
+                      paragraphMarkers={annotations.flatMap((annotation) => {
+                        const mapped = mappedAnnotations[annotation.id];
+                        return annotation.pdf_kind !== pdfKind && mapped?.kind === 'paragraph' && mapped.context.page_no === page && mapped.context.rects[0]
+                          ? [{ id: annotation.id, rect: mapped.context.rects[0], comment: annotation.comment || annotation.selected_text }] : [];
+                      })}
+                      onAnnotationClick={openAnnotationComment}
                       active={active}
                       onSelection={capturePdfSelection}
                       locateRequest={locationSearch?.candidates[locationSearch.index]?.page_no === page
@@ -1406,7 +1687,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
                         ? { id: `${locationSearch.id}:${locationSearch.index}`, quote: locationSearch.candidates[locationSearch.index].quote }
                         : null}
                       onLocate={receivePdfMatches}
-                      previewSelection={actionLocationPreview?.selection.pdf_kind === pdfKind ? actionLocationPreview.selection : null}
+                      previewSelection={manualAnnotationLinkSelection?.pdf_kind === pdfKind ? manualAnnotationLinkSelection : actionLocationPreview?.selection.pdf_kind === pdfKind ? actionLocationPreview.selection : null}
                     />
                   ))}
                 </div>
@@ -1429,6 +1710,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
               settings={settings} currentModel={currentModel} modelFailure={modelFailure}
               onModelChange={chooseModel} onWebSearchChange={updateWebSearch}
               reasoningPreferences={reasoningPreferences} onReasoningChange={changeReasoningPreferences}
+              notes={paperNotes} activeNoteId={activeNoteId}
               selectionToAssociate={selectionToAssociate}
               onAssociationComplete={(request) => {
                 setSelectionToAssociate((current) => current === request ? null : current);
@@ -1440,18 +1722,15 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
               onConfirmAction={confirmAgentAction}
             />
             <section id={`reader-side-panel-notes-${paperId}`} className="reader-notes-panel" role="tabpanel" aria-labelledby={`reader-side-tab-notes-${paperId}`} hidden={rightPanel !== 'notes'}>
-              <div className="reader-notes-heading">
-                <h2>阅读笔记</h2>
-                <span data-testid="reader-note-save-status" role="status">{notesLoaded ? noteSaveStatus : '正在载入…'}</span>
-              </div>
-              <textarea
-                data-testid="reader-note-editor" aria-label="阅读笔记" value={noteText} disabled={!notesLoaded}
-                placeholder="记录这篇文献的阅读笔记…" onChange={(event) => changeNoteText(event.target.value)}
-              />
-              <div className="reader-note-actions">
-                <span>{notesFailure && <span className="reader-note-error" role="alert">{notesFailure}</span>}</span>
-                <button type="button" className="primary-button compact-button" disabled={!notesLoaded || noteActionPending || noteSaveStatus === '保存中…' || (noteSaveStatus === '已保存' && !noteConflictRef.current)} onClick={() => void persistPaperNotes(noteDraftRef.current, noteRevisionRef.current, true, true)}>保存笔记</button>
-              </div>
+              <ReaderNotesPanel
+                paperId={paperId} notes={paperNotes} activeNoteId={activeNoteId} text={noteText}
+                loading={!notesLoaded} disabled={noteSwitchPending || noteActionPending}
+                saveStatus={noteSaveStatus} error={notesFailure} onChange={changeNoteText}
+                noteConflict={noteConflict} onResolveConflict={resolveNoteConflict}
+                onSelectNote={switchNote} onCreateNote={() => createNote()}
+                onRenameNote={renameNote} onDeleteNote={deleteNote}
+                onSave={() => persistPaperNotes(noteDraftRef.current, noteRevisionRef.current, true, true)}
+              >
               <div className="reader-annotations-heading"><h3>高亮、下划线与批注</h3><span>{annotations.length}</span></div>
               {annotationFailure && <div className="reader-note-error" role="alert">{annotationFailure}</div>}
               <div className="reader-annotations-list" data-testid="reader-annotations-list">
@@ -1466,6 +1745,13 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
                     <button type="button" className="reader-annotation-jump" aria-label="跳到此处" onClick={() => jumpToAnnotation(annotation)}>跳到此处</button>
                   </div>
                   <blockquote>{annotation.selected_text}</blockquote>
+                  <div className="annotation-view-links" aria-label="标注可见视图">
+                    {(['original', 'mono', 'dual'] as const).map((kind) => <span key={kind} className={annotation.pdf_kind === kind || annotation.view_contexts?.[kind] || (kind === pdfKind && mappedAnnotations[annotation.id]) ? 'linked' : ''}>{kind === 'original' ? '英文' : kind === 'mono' ? '中文' : '对照'}</span>)}
+                    {annotation.pdf_kind !== pdfKind && <button type="button" className="reader-annotation-jump" disabled={manualAnnotationLinkSaving} onClick={() => {
+                      setManualAnnotationLinkId(annotation.id); setManualAnnotationLinkSelection(null);
+                      setSelectionNotice('请在当前 PDF 中选中对应文字，然后确认关联。');
+                    }}>手动关联当前视图</button>}
+                  </div>
                   {editingAnnotation === annotation.id ? <>
                     <textarea aria-label="批注内容" value={annotationEditText} onChange={(event) => setAnnotationEditText(event.target.value)} />
                     <div className="reader-annotation-actions">
@@ -1481,6 +1767,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
                   </>}
                 </article>)}
               </div>
+              </ReaderNotesPanel>
             </section>
           </div>
         </div>
@@ -1562,8 +1849,6 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
           <textarea id="reader-ai-annotation-explanation" aria-label="AI 批注解释" disabled={aiAnnotationDraft.status === 'saving'} value={aiAnnotationDraft.comment}
             onChange={(event) => setAiAnnotationDraft((current) => current ? { ...current, comment: event.target.value, failure: '' } : current)} />
           {aiAnnotationDraft.generatedQuestion !== aiAnnotationDraft.question.trim() && <div className="ai-annotation-status">问题有修改，请重新生成解释后保存。</div>}
-          {aiAnnotationDraft.reasoning && <details className="reasoning-panel"><summary>模型返回的思考内容</summary><div data-testid="reader-ai-annotation-reasoning">{aiAnnotationDraft.reasoning}</div></details>}
-          {aiAnnotationDraft.requestedThinking === 'enabled' && !aiAnnotationDraft.reasoning && <div className="ai-annotation-status">此服务未返回可显示的思考内容。</div>}
         </>}
         {aiAnnotationDraft.failure && <div className="reader-note-error" role="alert">{aiAnnotationDraft.failure}</div>}
         <div className="reader-annotation-actions">
@@ -1700,6 +1985,7 @@ type PaperChatsProps = {
   onChooseActionLocation: (sessionId: string, actionId: string, target: SelectionContext) => void;
   onManualReselect: (sessionId: string, action: AgentAction) => void;
   onConfirmAction: (sessionId: string, action: AgentAction, input: AgentActionConfirmInput) => Promise<AgentAction>;
+  notes: PaperNote[]; activeNoteId: string;
 };
 type ChatSession = { id: string; title: string; created_at: string; selection_context?: SelectionContext | null };
 
@@ -1872,6 +2158,11 @@ function ChatPanel(props: PaperChatsProps & {
   const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
   const [busyActions, setBusyActions] = useState<Record<string, boolean>>({});
   const [question, setQuestion] = useState('');
+  const [pendingAttachments, setPendingAttachments] = useState<ChatAttachmentView[]>([]);
+  const [activeTurnId, setActiveTurnId] = useState<string | number | null>(null);
+  const [actionNoteTargets, setActionNoteTargets] = useState<Record<string, string>>({});
+  const attachmentEpochRef = useRef(0);
+  const removedUploadsRef = useRef(new Set<string>());
   const [busy, setBusy] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [failure, setFailure] = useState('');
@@ -1885,6 +2176,62 @@ function ChatPanel(props: PaperChatsProps & {
   const handleRef = useRef<ChatStreamHandle | null>(null);
   const autoLocatedActionsRef = useRef(new Set<string>());
   const busyActionsRef = useRef(new Set<string>());
+
+  useEffect(() => () => { attachmentEpochRef.current += 1; }, [paperId, sessionId]);
+
+  async function loadAttachmentPreview(attachment: ChatAttachmentView) {
+    const content = await api<{ mime_type: string; data_base64: string }>(`/papers/${paperId}/chat-sessions/${sessionId}/attachments/${attachment.id}/content`);
+    return `data:${content.mime_type};base64,${content.data_base64}`;
+  }
+
+  async function removeAttachment(id: string) {
+    removedUploadsRef.current.add(id);
+    setPendingAttachments((previous) => previous.filter((attachment) => attachment.id !== id));
+    if (id.startsWith('pending-')) return;
+    try { await api(`/papers/${paperId}/chat-sessions/${sessionId}/attachments/${id}`, 'DELETE'); }
+    catch (error) { setFailure(errorMessage(error)); }
+  }
+
+  async function addAttachmentFiles(files: File[]) {
+    if (busy) return;
+    const epoch = attachmentEpochRef.current;
+    let slots = 5 - pendingAttachments.length;
+    for (const file of files) {
+      if (epoch !== attachmentEpochRef.current) return;
+      if (slots <= 0) { setFailure('每条消息最多添加 5 个附件。'); break; }
+      const temporaryId = `pending-${crypto.randomUUID()}`;
+      if (file.size > 10 * 1024 * 1024) { setFailure('单个附件不能超过 10 MB。'); continue; }
+      slots -= 1;
+      setPendingAttachments((previous) => [...previous, { id: temporaryId, name: file.name, mime_type: file.type || '', size: file.size, status: 'uploading' }]);
+      try {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(new Error('无法读取附件。'));
+          reader.readAsDataURL(file);
+        });
+        const uploaded = await api<ChatAttachment>(`/papers/${paperId}/chat-sessions/${sessionId}/attachments`, 'POST', {
+          name: file.name, mime_type: file.type || '', data_base64: dataUrl.slice(dataUrl.indexOf(',') + 1),
+          ...(/\.pdf$/i.test(file.name) ? { page_images: await renderPdfAttachment(file) } : {}),
+        });
+        if (removedUploadsRef.current.has(temporaryId)) {
+          await api(`/papers/${paperId}/chat-sessions/${sessionId}/attachments/${uploaded.id}`, 'DELETE');
+          removedUploadsRef.current.delete(temporaryId);
+          continue;
+        }
+        if (epoch !== attachmentEpochRef.current) {
+          await api(`/papers/${paperId}/chat-sessions/${sessionId}/attachments/${uploaded.id}`, 'DELETE');
+          return;
+        }
+        setPendingAttachments((previous) => previous.map((item) => item.id === temporaryId ? {
+          ...uploaded, status: 'ready', ...(uploaded.mime_type.startsWith('image/') ? { previewUrl: dataUrl } : {}),
+        } : item));
+      } catch (error) {
+        if (epoch !== attachmentEpochRef.current) return;
+        setPendingAttachments((previous) => previous.map((item) => item.id === temporaryId ? { ...item, status: 'error', error: errorMessage(error) } : item));
+      }
+    }
+  }
 
   const refresh = useCallback(async () => {
     const [nextMessages, nextRuns, nextActions] = await Promise.all([
@@ -1945,6 +2292,9 @@ function ChatPanel(props: PaperChatsProps & {
       const updated = await props.onConfirmAction(sessionId, action, {
         ...(preview ? { selection_context: preview.selection, ...(preview.manualReselect ? { manual_reselect: true as const } : {}) } : {}),
         ...(draft !== original ? action.kind === 'annotation' ? { comment: draft } : { text: draft } : {}),
+        ...(action.kind === 'note' ? ((actionNoteTargets[action.id] || (action.payload.new_note ? '__new__' : '')) === '__new__' ? { new_note: true, note_title: 'AI 笔记' } : {
+          new_note: false, note_id: actionNoteTargets[action.id] || action.payload.note_id || props.activeNoteId,
+        }) : {}),
       });
       replaceAgentAction(updated);
     } catch (error) { setActionErrors((previous) => ({ ...previous, [action.id]: errorMessage(error) })); }
@@ -2002,7 +2352,7 @@ function ChatPanel(props: PaperChatsProps & {
     });
   }
 
-  async function startStream(input: { question?: string; runId?: string }) {
+  async function startStream(input: { question?: string; runId?: string; attachment_ids?: string[]; onRejected?: () => void }) {
     followLatest();
     const requestPreferences = { ...props.reasoningPreferences };
     const requestModel = currentModel;
@@ -2015,11 +2365,14 @@ function ChatPanel(props: PaperChatsProps & {
     setBusy(true);
     setStopping(false);
     let ended = false;
+    let rejected = false;
     try {
       const handle = await window.workbench.startChatStream({
         paperId, sessionId, question: input.question, runId: input.runId,
         model: requestModel, webSearch: webSearchEnabled,
         selection_context: requestSelectionContext || undefined,
+        attachment_ids: input.attachment_ids,
+        selected_note_id: props.activeNoteId || undefined,
         ...(requestPreferences.thinking === 'default' ? {} : { thinking: requestPreferences.thinking }),
         ...(requestPreferences.effort === 'default' ? {} : { reasoning_effort: requestPreferences.effort }),
       }, (event) => {
@@ -2029,6 +2382,10 @@ function ChatPanel(props: PaperChatsProps & {
         const messageId = typeof data.message_id === 'number' ? data.message_id : previous.messageId;
         if (['done', 'cancelled', 'error'].includes(event.type)) {
           ended = true;
+          if (event.type === 'error' && messageId == null && data.request_rejected === true) {
+            rejected = true;
+            input.onRejected?.();
+          }
           finishStream(event, { ...previous, messageId });
           return;
         }
@@ -2056,6 +2413,11 @@ function ChatPanel(props: PaperChatsProps & {
         }
         activeRef.current = next;
         setActiveStream(next);
+        if (event.type === 'status' && previous.messageId == null && messageId != null) {
+          void api<ChatMessage[]>(`/papers/${paperId}/chat?session_id=${sessionId}`).then((currentMessages) => {
+            if (activeRef.current?.messageId === messageId && !activeRef.current.completed) setMessages(currentMessages);
+          }).catch(() => { /* completion refresh retries the history */ });
+        }
       });
       if (!ended && activeRef.current) {
         const next = { ...activeRef.current, requestId: handle.requestId };
@@ -2065,6 +2427,7 @@ function ChatPanel(props: PaperChatsProps & {
       } else {
         handle.dispose();
       }
+      return !rejected;
     } catch (error) {
       handleRef.current?.dispose();
       handleRef.current = null;
@@ -2073,16 +2436,22 @@ function ChatPanel(props: PaperChatsProps & {
       setBusy(false);
       setFailure(errorMessage(error));
       await refresh().catch((error) => setFailure(errorMessage(error)));
+      return false;
     }
   }
 
-  async function send(event: FormEvent) {
-    event.preventDefault();
+  async function send() {
     const text = question.trim();
-    if (!text || busy) return;
+    if ((!text && !pendingAttachments.length) || busy || pendingAttachments.some((item) => item.status !== 'ready')) return;
     setQuestion('');
     setFailure('');
-    await startStream({ question: text });
+    const attachments = pendingAttachments;
+    const started = await startStream({ question: text || '请分析这些附件。', attachment_ids: attachments.map((item) => item.id), onRejected: () => {
+      setQuestion((current) => current || text);
+      setPendingAttachments((current) => [...current, ...attachments.filter((attachment) => !current.some((item) => item.id === attachment.id))]);
+    } });
+    if (started) setPendingAttachments([]);
+    else setQuestion(text);
   }
 
   async function resume(run: AnalysisRun) {
@@ -2120,10 +2489,10 @@ function ChatPanel(props: PaperChatsProps & {
       : activeStream.tool === 'read_paper' ? '正在读取相关原文…'
         : activeStream.tool === 'summarize_paper' || activeStream.runId ? '正在发送整篇原文…' : '正在使用文献工具…'
     : activeStream?.runId ? '正在发送整篇原文…' : '正在生成回答…';
-  const effortOptions = reasoningEffortOptions(currentModel);
 
   return (
     <aside className="chat-panel">
+      <div className="chat-messages-shell">
       <div className="chat-messages" ref={messagesRef} data-testid="chat-messages" aria-live="polite" onWheel={(event) => {
         if (event.deltaY < 0) { followLatestRef.current = false; setFollowingLatest(false); }
       }} onScroll={(event) => {
@@ -2133,13 +2502,17 @@ function ChatPanel(props: PaperChatsProps & {
         const following = container.scrollHeight - container.scrollTop - container.clientHeight <= 4;
         followLatestRef.current = following;
         setFollowingLatest(following);
+        const turnNodes = Array.from(container.querySelectorAll<HTMLElement>('[data-chat-turn-id]'));
+        const middle = container.getBoundingClientRect().top + container.clientHeight / 2;
+        const turn = turnNodes.filter((node) => node.getBoundingClientRect().top <= middle).at(-1) || turnNodes[0];
+        if (turn) setActiveTurnId(turn.dataset.chatTurnId || null);
       }}>
         {selectionContext && <div className="reader-selection-association" data-testid="reader-selection-association">
-          <div><strong>已关联原文 · 第 {selectionContext.page_no} 页</strong><blockquote>{selectionContext.selected_text}</blockquote></div>
+          <div><strong>已关联{selectionContext.pdf_kind === 'original' ? '原文' : selectionContext.pdf_kind === 'mono' ? '中文' : '对照'} · 第 {selectionContext.page_no} 页</strong><blockquote>{selectionContext.selected_text}</blockquote></div>
           <button type="button" className="secondary-button compact-button" data-testid="reader-clear-associated-selection" onClick={() => void onClearAssociation(sessionId)}>清除</button>
         </div>}
         {visibleMessages.length === 0 && runs.length === 0 && !activeStream && <div className="chat-empty"><div className="chat-empty-mark" aria-hidden="true">问</div><p>可以直接问“详细总结一下这篇文献”，也可以询问实验设计、数据或结论。</p></div>}
-        {visibleMessages.map((message, index) => <Message key={message.id ?? `${message.created_at || index}-${index}`} message={message} onJump={onJump} />)}
+        {visibleMessages.map((message, index) => <Message key={message.id ?? `${message.created_at || index}-${index}`} message={message} onJump={onJump} onLoadAttachmentPreview={loadAttachmentPreview} />)}
         {runs.filter((run) => !(run.status === 'running' && activeStream?.runId === run.id)).map((run) => <div className="run-card" key={run.id}>
           <div className="run-title">{run.kind === 'full_prompt' ? '整篇原文总结' : '全文分块总结'} {run.status === 'running' ? '进行中' : run.status === 'completed' ? '已完成' : '未完成'}</div>
           <div className="run-progress">{run.kind === 'full_prompt' ? '整篇原文以一次请求发送，不截断或拆分。' : `已覆盖 ${run.completed_chunks}/${run.total_chunks} 个正文分块`}</div>
@@ -2160,6 +2533,14 @@ function ChatPanel(props: PaperChatsProps & {
             <label htmlFor={`reader-agent-action-text-${action.id}`}>{action.kind === 'annotation' ? '批注草稿' : '建议追加到笔记'}</label>
             <textarea id={`reader-agent-action-text-${action.id}`} data-testid={`reader-agent-action-text-${action.id}`} value={draft} disabled={!pending || !!busyActions[action.id]}
               onChange={(event) => setActionDrafts((previous) => ({ ...previous, [action.id]: event.target.value }))} />
+            {action.kind === 'note' && pending && <label className="agent-note-target">保存到
+              <select aria-label="建议笔记保存到" disabled={!!busyActions[action.id]}
+                value={actionNoteTargets[action.id] || (action.payload.new_note ? '__new__' : action.payload.note_id || props.activeNoteId)}
+                onChange={(event) => setActionNoteTargets((previous) => ({ ...previous, [action.id]: event.target.value }))}>
+                {props.notes.map((note) => <option key={note.id} value={note.id}>{note.title}</option>)}
+                <option value="__new__">＋ 新建笔记</option>
+              </select>
+            </label>}
             {action.kind === 'annotation' && <>
               {choices.length > 1 && <div className="agent-action-locations" role="group" aria-label="选择匹配的批注位置">{choices.map((match, index) => <button
                 key={`${match.pdf_kind}-${match.page_no}-${match.rects[0]?.x}-${match.rects[0]?.y}-${index}`}
@@ -2187,59 +2568,30 @@ function ChatPanel(props: PaperChatsProps & {
         })}
         {activeStream && <div className="chat-message assistant active-chat-stream">
           <div className="message-role">Folio · 正在生成</div>
-          {activeStream.reasoning && <details className="reasoning-panel" open><summary>模型返回的思考内容</summary><div data-testid="streaming-reasoning">{activeStream.reasoning}</div></details>}
-          {activeStream.completed && activeStream.thinking === 'enabled' && !activeStream.reasoning && <div className="ai-annotation-status">此服务未返回可显示的思考内容。</div>}
           <div className="message-content" data-testid="streaming-answer"><MarkdownContent markdown={activeStream.answer || '…'} sources={activeStream.sources} onJump={onJump} /></div>
           <div className="assistant-thinking"><span className="typing-dots">•••</span>{activeLabel}{activeStream.query ? ` ${activeStream.query}` : ''}</div>
         </div>}
       </div>
+      <ChatTurnNavigation
+        turns={visibleMessages.filter((message) => message.role === 'user' && message.id != null).map((message) => ({ id: message.id!, excerpt: message.content.slice(0, 80) || '附件提问' }))}
+        activeId={activeTurnId} containerRef={messagesRef}
+        onNavigate={(id) => { followLatestRef.current = false; setFollowingLatest(false); setActiveTurnId(id); }}
+      />
+      </div>
       {!followingLatest && <button className="chat-follow-latest" type="button" onClick={followLatest}>回到最新 ↓</button>}
       {failure && <div className="chat-error" role="alert">{failure}</div>}
-      <form className="chat-composer" onSubmit={(event) => void send(event)}>
-        <textarea aria-label="向当前文献提问" value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => {
-          if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(event); }
-        }} placeholder="询问这篇文献…" rows={3} />
-        <div className="composer-footer">
-          <div className="composer-options">
-            <label className="web-search-toggle"><input type="checkbox" aria-label="联网搜索" checked={webSearchEnabled} disabled={!settings || busy} onChange={(event) => changeWebSearch(event.target.checked)} />联网搜索</label>
-            <div className="reasoning-controls">
-              <label><span>思考</span><select aria-label="思考模式" data-testid="reader-thinking-mode" value={props.reasoningPreferences.thinking}
-                onChange={(event) => {
-                  const thinking = event.target.value as ReasoningThinking;
-                  props.onReasoningChange(thinking === 'disabled' ? { thinking, effort: 'default' } : { thinking });
-                }}>
-                <option value="default">默认</option><option value="enabled">启用</option><option value="disabled">关闭</option>
-              </select></label>
-              <label><span>推理强度</span><select aria-label="推理强度" data-testid="reader-reasoning-effort" value={props.reasoningPreferences.effort}
-                disabled={props.reasoningPreferences.thinking === 'disabled'}
-                onChange={(event) => props.onReasoningChange({ effort: event.target.value as ReasoningEffort })}>
-                <option value="default">默认</option>
-                {effortOptions.options.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
-              </select></label>
-            </div>
-          </div>
-          {effortOptions.uncertain && props.reasoningPreferences.effort !== 'default' && <div className="reasoning-capability-notice" role="status">当前模型服务对推理强度的支持情况未知，服务可能忽略此设置。</div>}
-          <div className="composer-actions">
-            <div className="model-picker" title={currentModel || undefined}>
-              <span className="model-picker-name" data-testid="reader-model-name" title={currentModel || undefined}>{currentModel || '正在加载模型…'}</span>
-              <span className="model-picker-chevron" data-testid="reader-model-chevron" aria-hidden="true">▾</span>
-              <select
-                aria-label="当前 AI 模型" data-testid="reader-model-select" title={currentModel || undefined}
-                value={currentModel} disabled={!settings || !currentModel}
-                onChange={(event) => void onModelChange(event.target.value)}
-              >
-                {!currentModel && <option value="">正在加载模型…</option>}
-                {settings?.model && <option value={settings.model}>{settings.model}</option>}
-                {currentModel && currentModel !== settings?.model && !settings?.model_options.includes(currentModel) && <option value={currentModel}>{currentModel}</option>}
-                {settings?.model_options.filter((model) => model !== settings.model).map((model) => <option key={model} value={model}>{model}</option>)}
-              </select>
-            </div>
-            {busy ? <button type="button" className="secondary-button send-button" aria-label="停止生成" disabled={!handleRef.current || stopping} onClick={() => void stop()}>{stopping ? '正在停止…' : '停止生成'}</button>
-              : <button className="primary-button send-button" disabled={!question.trim()}>发送 ↑</button>}
-          </div>
-          {modelFailure && <div className="reader-model-error" role="alert">{modelFailure}</div>}
-        </div>
-      </form>
+      <ChatComposer
+        value={question} onChange={setQuestion} onSubmit={() => send()}
+        attachments={pendingAttachments} onFiles={(files) => void addAttachmentFiles(files)}
+        onRemoveAttachment={(id) => void removeAttachment(id)}
+        onLoadPreview={loadAttachmentPreview} disabled={!settings} busy={busy} stopping={stopping}
+        onStop={() => void stop()} searchEnabled={webSearchEnabled} onSearchChange={changeWebSearch}
+        currentModel={currentModel}
+        models={[...new Set([currentModel, settings?.model || '', ...(settings?.model_options || [])])].filter(Boolean).map((id) => ({ id, efforts: reasoningEffortOptions(id).options }))}
+        onModelChange={onModelChange} effort={props.reasoningPreferences.effort}
+        onEffortChange={(effort) => props.onReasoningChange({ thinking: 'default', effort })}
+      />
+      {modelFailure && <div className="reader-model-error" role="alert">{modelFailure}</div>}
     </aside>
   );
 }
@@ -2284,11 +2636,14 @@ function MarkdownContent({ markdown, sources, onJump }: { markdown: string; sour
   </ReactMarkdown>;
 }
 
-function Message({ message, onJump }: { message: ChatMessage; onJump: (source: Source) => void }) {
+function Message({ message, onJump, onLoadAttachmentPreview }: {
+  message: ChatMessage; onJump: (source: Source) => void;
+  onLoadAttachmentPreview: (attachment: ChatAttachmentView) => Promise<string | null>;
+}) {
   const incomplete = message.role === 'assistant' && message.status && message.status !== 'completed';
-  return <div className={`chat-message ${message.role}`}>
+  return <div className={`chat-message ${message.role}`} data-chat-turn-id={message.role === 'user' ? message.id : undefined}>
     <div className="message-role">{message.role === 'user' ? '你' : 'Folio'}{incomplete ? ` · ${message.status === 'cancelled' ? '已停止，未完成' : message.status === 'interrupted' ? '窗口关闭时中断' : message.status === 'error' ? '未完成' : '处理中断'}` : ''}</div>
-    {message.reasoning && <details className="reasoning-panel"><summary>思考过程</summary><div>{message.reasoning}</div></details>}
+    {!!message.attachments?.length && <ChatAttachmentList attachments={message.attachments} onLoadPreview={onLoadAttachmentPreview} />}
     <div className="message-content"><MarkdownContent markdown={message.content} sources={message.sources} onJump={onJump} /></div>
     {message.error && <div className="message-incomplete-error">{message.error}</div>}
     {(message.sources || []).some((source) => source.kind === 'web' && source.url) && <div className="web-source-list">

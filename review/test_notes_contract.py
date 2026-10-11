@@ -19,6 +19,9 @@ class NotesReview(unittest.TestCase):
         self.token.start()
         self.first = app.import_pdf(str(flow.FIXTURES / "quartz_alpha.pdf"))["paper"]["id"]
         self.second = app.import_pdf(str(flow.FIXTURES / "quartz_beta_same_title.pdf"))["paper"]["id"]
+        with connect() as db:
+            db.execute("UPDATE papers SET status = 'translating' WHERE id = ?", (self.first,))
+        asyncio.run(flow.fixture_pdf_engine(self.first))
 
     def tearDown(self):
         self.token.stop()
