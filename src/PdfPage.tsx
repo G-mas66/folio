@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.mjs?url';
-import { PdfAnnotation, PdfAnnotationRect, PdfSelection } from './api';
+import { PdfAnnotation, PdfAnnotationRect, PdfSelection, SelectionContext } from './api';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -209,6 +209,124 @@ function visualLineCount(rects: { rect: DOMRect; underline_edge: UnderlineEdge }
   return bands.length;
 }
 
+function normalizedText(value: string) {
+  return Array.from(value.normalize('NFKC').toLocaleLowerCase()).filter((character) => !/[\u200b\u200c\u200d\ufeff]/u.test(character)).join('').replace(/\s+/gu, ' ').trim();
+}
+
+function buildNormalizedTextMap(textLayer: HTMLElement) {
+  const source: { character: string; node: Text | null; start: number; end: number }[] = [];
+  const walker = textLayer.ownerDocument.createTreeWalker(textLayer, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const textNode = node as Text;
+      let offset = 0;
+      for (const character of Array.from(textNode.data)) {
+        const start = offset;
+        offset += character.length;
+        for (const normalized of Array.from(character.normalize('NFKC').toLocaleLowerCase())) {
+          if (!/[\u200b\u200c\u200d\ufeff]/u.test(normalized)) source.push({ character: normalized, node: textNode, start, end: offset });
+        }
+      }
+    } else if ((node as HTMLElement).tagName === 'BR') {
+      source.push({ character: ' ', node: null, start: 0, end: 0 });
+    }
+    node = walker.nextNode();
+  }
+
+  const characters: string[] = [];
+  const positions: { node: Text | null; start: number; end: number }[] = [];
+  for (const item of source) {
+    if (/\s/u.test(item.character)) {
+      if (!characters.length || characters[characters.length - 1] === ' ') continue;
+      characters.push(' ');
+      positions.push(item);
+    } else {
+      characters.push(item.character);
+      positions.push(item);
+    }
+  }
+  if (characters[characters.length - 1] === ' ') {
+    characters.pop();
+    positions.pop();
+  }
+  return { text: characters.join(''), positions };
+}
+
+function selectionForRange(range: Range, textLayer: HTMLElement, stage: HTMLElement, pageNumber: number): PdfSelection | null {
+  if (!range.toString().trim()) return null;
+  const bounds = stage.getBoundingClientRect();
+  if (bounds.width <= 0 || bounds.height <= 0) return null;
+  const pieces: { rect: DOMRect; underline_edge: UnderlineEdge }[] = [];
+  const walker = textLayer.ownerDocument.createTreeWalker(textLayer, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    const textNode = node as Text;
+    if (range.intersectsNode(textNode)) {
+      const start = range.startContainer === textNode ? range.startOffset : 0;
+      const end = range.endContainer === textNode ? range.endOffset : textNode.length;
+      if (end > start) {
+        const part = textLayer.ownerDocument.createRange();
+        part.setStart(textNode, start);
+        part.setEnd(textNode, end);
+        for (const rect of Array.from(part.getClientRects())) {
+          const left = Math.max(bounds.left, rect.left);
+          const top = Math.max(bounds.top, rect.top);
+          const right = Math.min(bounds.right, rect.right);
+          const bottom = Math.min(bounds.bottom, rect.bottom);
+          if (right > left && bottom > top) pieces.push({ rect: new DOMRect(left, top, right - left, bottom - top), underline_edge: underlineEdgeFor(textNode) });
+        }
+      }
+    }
+    node = walker.nextNode();
+  }
+  const merged = mergeSelectionRects(pieces);
+  if (!merged.length || merged.length > MAX_SELECTION_RECTS || visualLineCount(merged) > MAX_SELECTION_LINES) return null;
+  const selectedText = range.toString().trim();
+  if (selectedText.length > MAX_SELECTION_TEXT_LENGTH) return null;
+  const anchor = range.getBoundingClientRect();
+  return {
+    page_no: pageNumber,
+    selected_text: selectedText,
+    rects: merged.map(({ rect, underline_edge }) => ({
+      x: Math.max(0, Math.min(1, (rect.left - bounds.left) / bounds.width)),
+      y: Math.max(0, Math.min(1, (rect.top - bounds.top) / bounds.height)),
+      width: Math.max(0, Math.min(1, rect.width / bounds.width)),
+      height: Math.max(0, Math.min(1, rect.height / bounds.height)),
+      underline_edge,
+    })),
+    anchor: { left: anchor.left, top: anchor.top, bottom: anchor.bottom },
+  };
+}
+
+export function findTextSelections(textLayer: HTMLElement, stage: HTMLElement, pageNumber: number, quote: string): PdfSelection[] {
+  const target = normalizedText(quote);
+  if (!target) return [];
+  const source = buildNormalizedTextMap(textLayer);
+  const matches: PdfSelection[] = [];
+  let from = 0;
+  while (from <= source.text.length - target.length) {
+    const start = source.text.indexOf(target, from);
+    if (start < 0) break;
+    const end = start + target.length;
+    let first = start;
+    let last = end - 1;
+    while (first < end && !source.positions[first]?.node) first += 1;
+    while (last >= first && !source.positions[last]?.node) last -= 1;
+    const startPosition = source.positions[first];
+    const endPosition = source.positions[last];
+    if (startPosition?.node && endPosition?.node) {
+      const range = textLayer.ownerDocument.createRange();
+      range.setStart(startPosition.node, startPosition.start);
+      range.setEnd(endPosition.node, endPosition.end);
+      const selection = selectionForRange(range, textLayer, stage, pageNumber);
+      if (selection) matches.push(selection);
+    }
+    from = start + 1;
+  }
+  return matches;
+}
+
 export async function loadPdfDocument(paperId: string, kind: PdfKind): Promise<SharedPdfDocument> {
   const bytes = await window.workbench.request<Uint8Array>({ path: `/papers/${paperId}/pdf?kind=${kind}`, binary: true });
   const resources = new URL('./pdfjs/', window.location.href);
@@ -235,12 +353,15 @@ export async function pageAspectRatios(document: SharedPdfDocument, pageCount: n
 
 export function PdfPage({
   document, pageNumber, scale, fitWidth = true, containerWidth, scrollRoot, pageAspectRatio,
-  annotations, active, onSelection,
+  annotations, active, onSelection, locateRequest, onLocate, previewSelection,
 }: {
   document: SharedPdfDocument; pageNumber: number; scale: number; fitWidth?: boolean;
   containerWidth: number; scrollRoot: HTMLElement | null; pageAspectRatio: number;
   annotations: PdfAnnotation[]; active: boolean;
   onSelection: (selection: PdfSelection | null, notice?: string, contextMenuPoint?: { left: number; top: number }) => void;
+  locateRequest?: { id: string; quote: string } | null;
+  onLocate?: (id: string, pageNumber: number, matches: PdfSelection[]) => void;
+  previewSelection?: SelectionContext | null;
 }) {
   const frameRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -248,6 +369,7 @@ export function PdfPage({
   const textRef = useRef<HTMLDivElement>(null);
   const renderTaskRef = useRef<RenderTaskRef | null>(null);
   const renderQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const lastLocateIdRef = useRef<string | null>(null);
   const [nearby, setNearby] = useState(false);
   const [failure, setFailure] = useState('');
   const [rendered, setRendered] = useState(false);
@@ -429,6 +551,15 @@ export function PdfPage({
     };
   }, [document, pageNumber, scale, fitWidth, containerWidth, nearby]);
 
+  useEffect(() => {
+    if (!rendered || !locateRequest || !onLocate || lastLocateIdRef.current === locateRequest.id) return;
+    const textLayer = textRef.current;
+    const stage = stageRef.current;
+    if (!textLayer || !stage) return;
+    lastLocateIdRef.current = locateRequest.id;
+    onLocate(locateRequest.id, pageNumber, findTextSelections(textLayer, stage, pageNumber, locateRequest.quote));
+  }, [rendered, locateRequest?.id, locateRequest?.quote, onLocate, pageNumber]);
+
   return <div
     className="pdf-page-frame"
     data-page-number={pageNumber}
@@ -450,6 +581,14 @@ export function PdfPage({
             title={annotation.comment || annotation.selected_text}
             style={{ left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` }}
           />))}
+          {previewSelection?.page_no === pageNumber && previewSelection.rects.map((rect, index) => <span
+            key={`preview-${index}`}
+            className="pdf-annotation-rect annotation-color-blue pdf-location-preview"
+            data-testid={`pdf-location-preview-${pageNumber}-${index}`}
+            aria-hidden="true"
+            title="待确认的文字位置"
+            style={{ left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` }}
+          />)}
         </div>
         <div className="textLayer" ref={textRef} onMouseUp={() => captureSelection()} onContextMenu={(event) => {
           if (captureSelection({ left: event.clientX, top: event.clientY })) event.preventDefault();

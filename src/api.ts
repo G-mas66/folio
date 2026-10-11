@@ -28,7 +28,7 @@ export type Folder = { id: string; name: string; color: string; created_at: stri
 export type Source = { id: string; kind?: 'web'; start_page: number; end_page: number; title?: string; url?: string; snippet?: string };
 export type ChatMessage = {
   id?: number; role: 'user' | 'assistant'; content: string; sources?: Source[];
-  reasoning?: string; status?: string; error?: string; created_at?: string;
+  reasoning?: string; thinking?: 'default' | 'enabled' | 'disabled'; status?: string; error?: string; created_at?: string;
 };
 export type Segment = {
   id: number;
@@ -73,8 +73,39 @@ export type PdfSelection = {
   anchor: { left: number; top: number; bottom: number };
 };
 
+export type SelectionContext = {
+  pdf_kind: 'original' | 'mono' | 'dual';
+  page_no: number;
+  rects: PdfAnnotationRect[];
+  selected_text: string;
+};
+
+export type ReasoningThinking = 'default' | 'enabled' | 'disabled';
+export type ReasoningEffort = 'default' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export type AgentActionCandidate = { page_no: number; quote: string; pdf_kind?: SelectionContext['pdf_kind'] };
+export type AgentAction = {
+  id: string;
+  kind: 'annotation' | 'note';
+  status: 'pending' | 'applied' | 'cancelled';
+  payload: {
+    comment?: string;
+    quote?: string;
+    page_no?: number;
+    pdf_kind?: SelectionContext['pdf_kind'];
+    selection_context?: SelectionContext;
+    text?: string;
+    candidates?: AgentActionCandidate[];
+    location_status?: 'not_found' | 'matched';
+  };
+  result?: unknown;
+};
+
 export type ChatStreamInput = {
   paperId: string; sessionId?: string; question?: string; model?: string; webSearch?: boolean; runId?: string;
+  selection_context?: SelectionContext;
+  thinking?: ReasoningThinking;
+  reasoning_effort?: ReasoningEffort;
 };
 export type FeedbackInput = { message: string; contact?: string };
 export type ChatStreamEvent = { requestId: string; type: string; data: Record<string, unknown> };

@@ -26,6 +26,7 @@ const modules = [
   'review.test_notes_contract', 'review.test_storage_identity', 'review.test_protocol_contract',
   'review.test_chat_sessions', 'review.test_chinese_import', 'review.test_pdf_process_cleanup',
   'backend_tests.test_glossary_contract',
+  'review.test_reasoning_protocol', 'backend_tests.test_agent_actions',
 ];
 const env = {
   ...process.env,

@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { api, ChatMessage, ChatStreamEvent, ChatStreamHandle, errorMessage, Paper, PdfAnnotation, PdfSelection, Segment, Source } from './api';
+import { AgentAction, AgentActionCandidate, api, ChatMessage, ChatStreamEvent, ChatStreamHandle, errorMessage, Paper, PdfAnnotation, PdfSelection, ReasoningEffort, ReasoningThinking, Segment, SelectionContext, Source } from './api';
 import { loadPdfDocument, pageAspectRatios, PdfPage, PdfKind, SharedPdfDocument } from './PdfPage';
 import './reader-reference.css';
 
@@ -16,6 +16,16 @@ type ReaderSettings = { model: string; model_options: string[]; web_search_enabl
 type ReaderLayoutState = { outlineWidth: number; chatWidth: number; outlineVisible: boolean; chatVisible: boolean };
 type ReaderSelection = PdfSelection & { pdf_kind: PdfKind };
 type AnnotationDraft = { selection: ReaderSelection; comment: string };
+type AiAnnotationDraft = {
+  requestId: number; paperId: string; selection: ReaderSelection; question: string; generatedQuestion: string; comment: string; reasoning: string;
+  requestedThinking: ReasoningThinking;
+  status: 'asking' | 'loading' | 'preview' | 'saving'; failure: string;
+};
+type ReasoningPreferences = { thinking: ReasoningThinking; effort: ReasoningEffort };
+type ActionLocationPreview = { sessionId: string; actionId: string; selection: SelectionContext; manualReselect: boolean };
+type LocationSearch = { id: string; sessionId: string; actionId: string; candidates: AgentActionCandidate[]; index: number; matches: SelectionContext[] };
+type AgentActionConfirmInput = { selection_context?: SelectionContext; manual_reselect?: true; comment?: string; text?: string };
+type SelectionAssociationRequest = { selection: ReaderSelection; sessionId: string };
 type SelectionContextMenu = { left: number; top: number };
 type SentenceTranslation = {
   requestId: number; paperId: string; text: string; translation: string; failure: string;
@@ -24,7 +34,42 @@ type SentenceTranslation = {
 type NoteSaveStatus = '未保存' | '保存中…' | '已保存' | '保存失败';
 
 const readerLayoutKey = 'paper-workbench.reader-layout.v1';
+const reasoningPreferencesKey = 'paper-workbench.reasoning-preferences.v1';
 const defaultReaderLayout: ReaderLayoutState = { outlineWidth: 240, chatWidth: 470, outlineVisible: true, chatVisible: true };
+const defaultReasoningPreferences: ReasoningPreferences = { thinking: 'default', effort: 'default' };
+
+function reasoningEffortOptions(model: string) {
+  if (/deepseek/i.test(model)) return { options: ['low', 'high', 'max'] as ReasoningEffort[], uncertain: false };
+  if (/^o[1-4](?:-|$)/i.test(model)) return { options: ['low', 'medium', 'high'] as ReasoningEffort[], uncertain: false };
+  if (/^gpt-5(?:\.|-|$)/i.test(model)) return { options: ['minimal', 'low', 'medium', 'high'] as ReasoningEffort[], uncertain: false };
+  return { options: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as ReasoningEffort[], uncertain: true };
+}
+
+function readReasoningPreferences(): Record<string, ReasoningPreferences> {
+  try {
+    const saved = JSON.parse(localStorage.getItem(reasoningPreferencesKey) || '{}') as Record<string, Partial<ReasoningPreferences>>;
+    return Object.fromEntries(Object.entries(saved).map(([model, value]) => [model, {
+      thinking: ['default', 'enabled', 'disabled'].includes(value.thinking || '') ? value.thinking as ReasoningThinking : 'default',
+      effort: ['default', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value.effort || '') ? value.effort as ReasoningEffort : 'default',
+    }]));
+  } catch { return {}; }
+}
+
+function toSelectionContext(selection: ReaderSelection): SelectionContext {
+  return { pdf_kind: selection.pdf_kind, page_no: selection.page_no, rects: selection.rects, selected_text: selection.selected_text };
+}
+
+function sortAnnotations(items: PdfAnnotation[]) {
+  const position = (annotation: PdfAnnotation) => annotation.rects.reduce((best, rect) =>
+    rect.y < best.y || (rect.y === best.y && rect.x < best.x) ? rect : best,
+  { x: 1, y: 1 });
+  return [...items].sort((left, right) => {
+    const leftStart = position(left);
+    const rightStart = position(right);
+    return left.page_no - right.page_no || leftStart.y - rightStart.y || leftStart.x - rightStart.x
+      || left.pdf_kind.localeCompare(right.pdf_kind) || left.created_at.localeCompare(right.created_at) || left.id.localeCompare(right.id);
+  });
+}
 
 function readReaderLayout(): ReaderLayoutState {
   try {
@@ -73,12 +118,14 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   const [noteSaveStatus, setNoteSaveStatusState] = useState<NoteSaveStatus>('未保存');
   const [notesLoaded, setNotesLoaded] = useState(false);
   const [notesFailure, setNotesFailure] = useState('');
+  const [noteActionPending, setNoteActionPending] = useState(false);
   const [annotations, setAnnotations] = useState<PdfAnnotation[]>([]);
   const [selection, setSelection] = useState<ReaderSelection | null>(null);
   const [selectionContextMenu, setSelectionContextMenu] = useState<SelectionContextMenu | null>(null);
   const [selectionNotice, setSelectionNotice] = useState('');
   const [highlightPaletteOpen, setHighlightPaletteOpen] = useState(false);
   const [annotationDraft, setAnnotationDraft] = useState<AnnotationDraft | null>(null);
+  const [aiAnnotationDraft, setAiAnnotationDraft] = useState<AiAnnotationDraft | null>(null);
   const [sentenceTranslation, setSentenceTranslation] = useState<SentenceTranslation | null>(null);
   const [editingAnnotation, setEditingAnnotation] = useState<string | null>(null);
   const [selectedAnnotation, setSelectedAnnotation] = useState<string | null>(null);
@@ -87,6 +134,12 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   const [settings, setSettings] = useState<ReaderSettings | null>(null);
   const [currentModel, setCurrentModel] = useState('');
   const [modelFailure, setModelFailure] = useState('');
+  const [reasoningPreferencesByModel, setReasoningPreferencesByModel] = useState<Record<string, ReasoningPreferences>>(readReasoningPreferences);
+  const [selectionToAssociate, setSelectionToAssociate] = useState<SelectionAssociationRequest | null>(null);
+  const [locationSearch, setLocationSearch] = useState<LocationSearch | null>(null);
+  const [locationChoices, setLocationChoices] = useState<{ sessionId: string; actionId: string; matches: SelectionContext[] } | null>(null);
+  const [actionLocationPreview, setActionLocationPreview] = useState<ActionLocationPreview | null>(null);
+  const [actionLocationMessage, setActionLocationMessage] = useState<{ actionId: string; message: string } | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [mode, setMode] = useState<'bilingual' | 'mono' | 'original'>('bilingual');
   const pdfKind: PdfKind = mode === 'original' ? 'original' : mode === 'mono' ? 'mono' : 'dual';
@@ -106,6 +159,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   const resizeStartLayoutRef = useRef<ReaderLayoutState | null>(null);
   const pendingReaderLayoutRef = useRef<ReaderLayoutState | null>(null);
   const activeRef = useRef(active);
+  const paperIdRef = useRef(paperId);
   const activeEpochRef = useRef(0);
   const lastActivePropRef = useRef(active);
   const hasActivatedReaderRef = useRef(false);
@@ -124,12 +178,20 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   const noteLoadedRef = useRef(false);
   const noteStatusRef = useRef<NoteSaveStatus>('未保存');
   const noteSaveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const noteActionPendingRef = useRef(false);
+  const noteActionPaperRef = useRef<string | null>(null);
+  const noteConflictRef = useRef(false);
   const saveNoteOnUnmountRef = useRef<(text: string, revision: number) => void>(() => undefined);
   const flushNoteBeforeUpdateRef = useRef<() => Promise<void>>(async () => undefined);
   const noteSaveTimerRef = useRef<number | null>(null);
   const selectionContextMenuRef = useRef<HTMLDivElement>(null);
   const sentenceTranslationRef = useRef<HTMLDivElement>(null);
   const sentenceTranslationRequestRef = useRef(0);
+  const aiAnnotationRequestRef = useRef(0);
+  const locationSearchRequestRef = useRef(0);
+  const locationSearchRef = useRef<LocationSearch | null>(null);
+  const manualRetargetActionRef = useRef<{ sessionId: string; actionId: string; pdfKind: PdfKind } | null>(null);
+  const activeChatSessionRef = useRef('');
   const sentenceTranslationDragRef = useRef<{ pointerId: number; x: number; y: number; left: number; top: number } | null>(null);
   const pendingAnnotationJumpRef = useRef<{ pdfKind: PdfKind; page: number } | null>(null);
   const previousPdfKindRef = useRef<PdfKind>(pdfKind);
@@ -140,17 +202,35 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
     lastActivePropRef.current = active;
   }
   activeRef.current = active;
+  paperIdRef.current = paperId;
+  const reasoningPreferences = reasoningPreferencesByModel[currentModel] || defaultReasoningPreferences;
+
+  function changeReasoningPreferences(next: Partial<ReasoningPreferences>) {
+    if (!currentModel) return;
+    setReasoningPreferencesByModel((previous) => {
+      const updated = { ...previous, [currentModel]: { ...(previous[currentModel] || defaultReasoningPreferences), ...next } };
+      try { localStorage.setItem(reasoningPreferencesKey, JSON.stringify(updated)); } catch { /* model preferences are optional */ }
+      return updated;
+    });
+  }
 
   function setNoteSaveStatus(status: NoteSaveStatus) {
     noteStatusRef.current = status;
     setNoteSaveStatusState(status);
   }
 
-  async function persistPaperNotes(text: string, revision: number, updateUi = true) {
+  async function persistPaperNotes(text: string, revision: number, updateUi = true, force = false) {
+    if ((noteActionPendingRef.current || noteConflictRef.current) && !force) {
+      noteSaveTimerRef.current = null;
+      return;
+    }
     if (noteSaveTimerRef.current !== null) window.clearTimeout(noteSaveTimerRef.current);
     noteSaveTimerRef.current = null;
     if (updateUi) setNoteSaveStatus('保存中…');
-    const request = noteSaveQueueRef.current.catch(() => undefined).then(() => api<{ text: string }>(`/papers/${paperId}/notes`, 'PUT', { text }));
+    const request = noteSaveQueueRef.current.catch(() => undefined).then(() => {
+      if ((noteActionPendingRef.current || noteConflictRef.current) && !force) throw new Error('笔记追加期间产生了较新的草稿；已暂停自动保存。');
+      return api<{ text: string }>(`/papers/${paperId}/notes`, 'PUT', { text });
+    });
     noteSaveQueueRef.current = request.then(() => undefined, () => undefined);
     try {
       await request;
@@ -170,6 +250,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
       }
       setNoteSaveStatus('已保存');
       setNotesFailure('');
+      noteConflictRef.current = false;
     } catch (error) {
       if (updateUi && noteRevisionRef.current === revision) {
         setNoteSaveStatus('保存失败');
@@ -358,6 +439,18 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
 
   useEffect(() => {
     let canceled = false;
+    setSelectionToAssociate(null);
+    aiAnnotationRequestRef.current += 1;
+    setAiAnnotationDraft(null);
+    locationSearchRequestRef.current += 1;
+    locationSearchRef.current = null;
+    setLocationSearch(null);
+    setLocationChoices(null);
+    setActionLocationPreview(null);
+    manualRetargetActionRef.current = null;
+    noteActionPendingRef.current = false;
+    noteActionPaperRef.current = null;
+    noteConflictRef.current = false;
     setSelection(null);
     setSelectionContextMenu(null);
     setHighlightPaletteOpen(false);
@@ -399,7 +492,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
       setNotesFailure(`${errorMessage(error)}${storageFailure ? '；本地草稿存储也不可用。' : ''}`);
     });
     void api<PdfAnnotation[]>(`/papers/${paperId}/annotations`).then((items) => {
-      if (!canceled) setAnnotations(items);
+      if (!canceled) setAnnotations(sortAnnotations(items));
     }).catch((error) => {
       if (!canceled) setAnnotationFailure(errorMessage(error));
     });
@@ -427,6 +520,23 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
       document.removeEventListener('keydown', closeOnEscape);
     };
   }, [selectionContextMenu, sentenceTranslation?.requestId]);
+
+  useLayoutEffect(() => {
+    if (!selectionContextMenu) return;
+    const reposition = () => {
+      const menu = selectionContextMenuRef.current;
+      if (!menu) return;
+      const bounds = menu.getBoundingClientRect();
+      const left = bounded(selectionContextMenu.left, 8, window.innerWidth - bounds.width - 8);
+      const top = bounded(selectionContextMenu.top, 8, window.innerHeight - bounds.height - 8);
+      if (left !== selectionContextMenu.left || top !== selectionContextMenu.top) {
+        setSelectionContextMenu((current) => current === selectionContextMenu ? { left, top } : current);
+      }
+    };
+    reposition();
+    window.addEventListener('resize', reposition);
+    return () => window.removeEventListener('resize', reposition);
+  }, [selectionContextMenu, highlightPaletteOpen]);
 
   useEffect(() => {
     if (!notesLoaded || noteRevisionRef.current <= noteSavedRevisionRef.current) return;
@@ -467,7 +577,22 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   }, [pdfKind]);
 
   useEffect(() => {
+    const search = locationSearch;
+    if (!search) return;
+    const candidate = search.candidates[search.index];
+    if (candidate) goToPdfLocation(candidate.pdf_kind || 'original', candidate.page_no);
+  }, [locationSearch?.id, locationSearch?.index, pdfKind, pdfDocument]);
+
+  useEffect(() => {
     if (active) return;
+    aiAnnotationRequestRef.current += 1;
+    setAiAnnotationDraft(null);
+    locationSearchRequestRef.current += 1;
+    locationSearchRef.current = null;
+    setLocationSearch(null);
+    setLocationChoices(null);
+    setActionLocationPreview(null);
+    manualRetargetActionRef.current = null;
     setSelection(null);
     setSelectionContextMenu(null);
     setHighlightPaletteOpen(false);
@@ -732,13 +857,15 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
       color,
       kind,
     });
-    setAnnotations((previous) => [...previous, created]);
+    setAnnotations((previous) => sortAnnotations([...previous, created]));
     setRightPanel('notes');
     setAnnotationFailure('');
     return created;
   }
 
   function clearPdfSelection() {
+    aiAnnotationRequestRef.current += 1;
+    setAiAnnotationDraft(null);
     setSelection(null);
     setSelectionContextMenu(null);
     setHighlightPaletteOpen(false);
@@ -754,10 +881,37 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
       if (notice) setSelectionNotice(notice);
       return;
     }
+    const manualRetarget = manualRetargetActionRef.current;
+    if (manualRetarget) {
+      manualRetargetActionRef.current = null;
+      if (activeChatSessionRef.current === manualRetarget.sessionId) {
+        setActionLocationPreview({
+          sessionId: manualRetarget.sessionId,
+          actionId: manualRetarget.actionId,
+          selection: toSelectionContext({ ...value, pdf_kind: pdfKind }),
+          manualReselect: true,
+        });
+        setLocationChoices(null);
+        setActionLocationMessage(null);
+      }
+      setSelection(null);
+      setSelectionContextMenu(null);
+      window.getSelection()?.removeAllRanges();
+      return;
+    }
+    if (aiAnnotationDraft) {
+      aiAnnotationRequestRef.current += 1;
+      setAiAnnotationDraft(null);
+    }
+    if (locationSearchRef.current) {
+      locationSearchRef.current = null;
+      setLocationSearch(null);
+      setActionLocationMessage(null);
+    }
     setSelection({ ...value, pdf_kind: pdfKind });
     setSelectionContextMenu(contextMenuPoint ? {
-      left: bounded(contextMenuPoint.left, 8, window.innerWidth - 176),
-      top: bounded(contextMenuPoint.top, 8, window.innerHeight - 220),
+      left: bounded(contextMenuPoint.left, 8, window.innerWidth - 8),
+      top: bounded(contextMenuPoint.top, 8, window.innerHeight - 8),
     } : null);
     setHighlightPaletteOpen(false);
     setSelectionNotice('');
@@ -791,6 +945,265 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
     setSelectionContextMenu(null);
     setHighlightPaletteOpen(false);
     setAnnotationFailure('');
+  }
+
+  function goToPdfLocation(targetKind: PdfKind, targetPage: number) {
+    const nextMode = targetKind === 'dual' ? 'bilingual' : targetKind;
+    if (targetKind !== pdfKind) {
+      pendingAnnotationJumpRef.current = { pdfKind: targetKind, page: targetPage };
+      initialPageScrollPendingRef.current = true;
+      setMode(nextMode);
+      return;
+    }
+    pendingAnnotationJumpRef.current = { pdfKind: targetKind, page: targetPage };
+    if (pdfDocument && loadedPdfKindRef.current === targetKind) {
+      pendingAnnotationJumpRef.current = null;
+      goToPage(targetPage);
+    }
+  }
+
+  function startActionLocation(sessionId: string, action: AgentAction) {
+    if (action.status !== 'pending' || action.kind !== 'annotation') return;
+    const linked = action.payload.selection_context;
+    if (linked) {
+      setLocationSearch(null);
+      locationSearchRef.current = null;
+      setLocationChoices(null);
+      setActionLocationPreview({ sessionId, actionId: action.id, selection: linked, manualReselect: false });
+      setActionLocationMessage(null);
+      goToPdfLocation(linked.pdf_kind, linked.page_no);
+      return;
+    }
+    const fallbackKind = action.payload.pdf_kind || 'original';
+    const candidates = (action.payload.candidates?.length ? action.payload.candidates : action.payload.quote && action.payload.page_no ? [{
+      page_no: action.payload.page_no, quote: action.payload.quote, pdf_kind: fallbackKind,
+    }] : []).filter((candidate) => candidate.page_no > 0 && candidate.quote.trim());
+    const unique = candidates.filter((candidate, index) => candidates.findIndex((other) =>
+      other.page_no === candidate.page_no && other.pdf_kind === candidate.pdf_kind && other.quote === candidate.quote) === index);
+    if (!unique.length) {
+      setActionLocationMessage({ actionId: action.id, message: '没有可自动定位的页码和引文；可以在原文 PDF 中手动选择。' });
+      setLocationChoices(null);
+      setActionLocationPreview(null);
+      return;
+    }
+    const search: LocationSearch = {
+      id: String(++locationSearchRequestRef.current), sessionId, actionId: action.id,
+      candidates: unique.map((candidate) => ({ ...candidate, pdf_kind: candidate.pdf_kind || fallbackKind })), index: 0, matches: [],
+    };
+    locationSearchRef.current = search;
+    setLocationSearch(search);
+    setLocationChoices(null);
+    setActionLocationPreview(null);
+    setActionLocationMessage({ actionId: action.id, message: '正在 PDF 文本层中定位…' });
+    goToPdfLocation(search.candidates[0].pdf_kind || 'original', search.candidates[0].page_no);
+  }
+
+  function receivePdfMatches(id: string, page: number, matches: PdfSelection[]) {
+    const current = locationSearchRef.current;
+    if (!current || `${current.id}:${current.index}` !== id) return;
+    const candidate = current.candidates[current.index];
+    if (!candidate || candidate.page_no !== page) return;
+    const found = matches.map((match) => toSelectionContext({ ...match, pdf_kind: candidate.pdf_kind || 'original' }));
+    const allMatches = [...current.matches, ...found];
+    if (current.index + 1 < current.candidates.length) {
+      const next = { ...current, index: current.index + 1, matches: allMatches };
+      locationSearchRef.current = next;
+      setLocationSearch(next);
+      goToPdfLocation(next.candidates[next.index].pdf_kind || 'original', next.candidates[next.index].page_no);
+      return;
+    }
+    locationSearchRef.current = null;
+    setLocationSearch(null);
+    if (!allMatches.length) {
+      setLocationChoices(null);
+      setActionLocationPreview(null);
+      setActionLocationMessage({ actionId: current.actionId, message: '在候选页的 PDF 文本层中没有找到这段引文；批注草稿仍保留，可手动重新选择。' });
+      return;
+    }
+    setLocationChoices({ sessionId: current.sessionId, actionId: current.actionId, matches: allMatches });
+    setActionLocationMessage(null);
+    if (allMatches.length === 1) {
+      const selection = allMatches[0];
+      setActionLocationPreview({ sessionId: current.sessionId, actionId: current.actionId, selection, manualReselect: false });
+      goToPdfLocation(selection.pdf_kind, selection.page_no);
+    }
+  }
+
+  function chooseActionLocation(sessionId: string, actionId: string, target: SelectionContext) {
+    if (activeChatSessionRef.current && activeChatSessionRef.current !== sessionId) return;
+    setActionLocationPreview({ sessionId, actionId, selection: target, manualReselect: false });
+    setActionLocationMessage(null);
+    goToPdfLocation(target.pdf_kind, target.page_no);
+  }
+
+  function beginManualActionReselect(sessionId: string, action: AgentAction) {
+    if (action.status !== 'pending' || action.kind !== 'annotation') return;
+    const kind = action.payload.selection_context?.pdf_kind || action.payload.pdf_kind || 'original';
+    const page = action.payload.selection_context?.page_no || action.payload.page_no || action.payload.candidates?.[0]?.page_no || pageNumber;
+    locationSearchRequestRef.current += 1;
+    locationSearchRef.current = null;
+    manualRetargetActionRef.current = { sessionId, actionId: action.id, pdfKind: kind };
+    setLocationSearch(null);
+    setLocationChoices(null);
+    setActionLocationPreview(null);
+    setActionLocationMessage({ actionId: action.id, message: '请在 PDF 中拖选实际文字；选中后会先显示位置预览。' });
+    goToPdfLocation(kind, page);
+  }
+
+  function changeActiveChatSession(sessionId: string) {
+    if (activeChatSessionRef.current && activeChatSessionRef.current !== sessionId) {
+      locationSearchRequestRef.current += 1;
+      locationSearchRef.current = null;
+      manualRetargetActionRef.current = null;
+      setLocationSearch(null);
+      setLocationChoices(null);
+      setActionLocationPreview(null);
+      setActionLocationMessage(null);
+    }
+    activeChatSessionRef.current = sessionId;
+  }
+
+  async function confirmAgentAction(sessionId: string, action: AgentAction, input: AgentActionConfirmInput) {
+    const targetPaperId = paperId;
+    let noteSnapshot: { text: string; revision: number } | null = null;
+    if (action.kind === 'note') {
+      if (paperIdRef.current !== targetPaperId) throw new Error('文献已切换，请在当前文献中重新确认。');
+      if (!notesLoaded) throw new Error('笔记仍在载入，请稍后再确认。');
+      try { await flushNoteBeforeUpdateRef.current(); }
+      catch (error) {
+        const detail = notesFailure || errorMessage(error).replace('，更新安装已取消。', '');
+        throw new Error(`${detail ? `${detail}；` : ''}现有笔记未保存，请先保存后再确认追加。`);
+      }
+      if (paperIdRef.current !== targetPaperId) throw new Error('文献已切换，请在当前文献中重新确认。');
+      noteSnapshot = { text: noteDraftRef.current, revision: noteRevisionRef.current };
+      noteActionPendingRef.current = true;
+      noteActionPaperRef.current = targetPaperId;
+      setNoteActionPending(true);
+    }
+    try {
+      const result = await api<AgentAction>(`/papers/${targetPaperId}/agent-actions/${action.id}/confirm`, 'POST', {
+        ...input,
+        ...(noteSnapshot ? { expected_note_text: noteSnapshot.text } : {}),
+      });
+      if (paperIdRef.current !== targetPaperId) return result;
+      const payload = result.result as { annotation?: PdfAnnotation; notes?: { text: string; updated_at: string | null } } | undefined;
+      if (payload?.annotation) {
+        setAnnotations((previous) => sortAnnotations([...previous.filter((item) => item.id !== payload.annotation?.id), payload.annotation as PdfAnnotation]));
+        setAnnotationFailure('');
+      }
+      if (payload?.notes && noteSnapshot) {
+        if (noteRevisionRef.current === noteSnapshot.revision && noteDraftRef.current === noteSnapshot.text) {
+          if (noteSaveTimerRef.current !== null) window.clearTimeout(noteSaveTimerRef.current);
+          noteSaveTimerRef.current = null;
+          noteDraftRef.current = payload.notes.text;
+          noteRevisionRef.current += 1;
+          noteSavedRevisionRef.current = noteRevisionRef.current;
+          setNoteText(payload.notes.text);
+          setNoteSaveStatus('已保存');
+          setNotesFailure('');
+          try { localStorage.removeItem(`paper-workbench.note-draft.${paperId}`); }
+          catch { setNoteSaveStatus('保存失败'); setNotesFailure('建议笔记已保存到数据库，但本地草稿状态无法同步。'); }
+        } else {
+          noteConflictRef.current = true;
+          setNoteSaveStatus('未保存');
+          setNotesFailure('建议笔记已保存，但期间出现了较新的本地草稿。草稿已保留；请核对两者后手动保存。');
+        }
+      }
+      setActionLocationPreview((current) => current?.sessionId === sessionId && current.actionId === action.id ? null : current);
+      setLocationChoices((current) => current?.sessionId === sessionId && current.actionId === action.id ? null : current);
+      setActionLocationMessage(null);
+      return result;
+    } catch (error) {
+      if (paperIdRef.current === targetPaperId && noteSnapshot && (noteRevisionRef.current !== noteSnapshot.revision || noteDraftRef.current !== noteSnapshot.text)) {
+        noteConflictRef.current = true;
+        setNoteSaveStatus('未保存');
+        setNotesFailure('笔记在确认期间被修改；较新的本地草稿已保留。请核对后手动保存，再重试建议。');
+      }
+      throw error;
+    } finally {
+      if (noteSnapshot && noteActionPaperRef.current === targetPaperId) {
+        noteActionPendingRef.current = false;
+        noteActionPaperRef.current = null;
+        setNoteActionPending(false);
+      }
+    }
+  }
+
+  function beginAiAnnotationQuestion() {
+    if (!selection) return;
+    aiAnnotationRequestRef.current += 1;
+    setAiAnnotationDraft({
+      requestId: aiAnnotationRequestRef.current, paperId, selection, question: '', generatedQuestion: '', comment: '', reasoning: '', requestedThinking: 'default',
+      status: 'asking', failure: '',
+    });
+    setSelection(null);
+    setSelectionContextMenu(null);
+    setHighlightPaletteOpen(false);
+    window.getSelection()?.removeAllRanges();
+  }
+
+  function associateSelectionWithChat() {
+    if (!selection) return;
+    setSelectionToAssociate({ selection, sessionId: activeChatSessionRef.current });
+    setSelection(null);
+    setSelectionContextMenu(null);
+    setHighlightPaletteOpen(false);
+    setRightPanel('chat');
+    window.getSelection()?.removeAllRanges();
+  }
+
+  function cancelAiAnnotation() {
+    aiAnnotationRequestRef.current += 1;
+    setAiAnnotationDraft(null);
+  }
+
+  async function generateAiAnnotation() {
+    const draft = aiAnnotationDraft;
+    if (!draft || draft.paperId !== paperId || !draft.question.trim()) {
+      setAiAnnotationDraft((current) => current ? { ...current, failure: '请先填写希望 AI 回答的问题。' } : current);
+      return;
+    }
+    const requestId = ++aiAnnotationRequestRef.current;
+    const question = draft.question.trim();
+    const prefs = reasoningPreferencesByModel[currentModel] || defaultReasoningPreferences;
+    const model = currentModel;
+    setAiAnnotationDraft({ ...draft, requestId, question, requestedThinking: prefs.thinking, status: 'loading', failure: '' });
+    try {
+      const result = await api<{ comment: string; reasoning?: string }>(`/papers/${paperId}/ai-annotation`, 'POST', {
+        selection_context: toSelectionContext(draft.selection), question,
+        ...(model ? { model } : {}),
+        ...(prefs.thinking === 'default' ? {} : { thinking: prefs.thinking }),
+        ...(prefs.effort === 'default' ? {} : { reasoning_effort: prefs.effort }),
+      });
+      if (aiAnnotationRequestRef.current !== requestId || draft.paperId !== paperId) return;
+      setAiAnnotationDraft((current) => current?.requestId === requestId && current.paperId === paperId
+        ? { ...current, generatedQuestion: question, comment: result.comment || '', reasoning: result.reasoning || '', status: 'preview', failure: '' }
+        : current);
+    } catch (error) {
+      if (aiAnnotationRequestRef.current !== requestId || draft.paperId !== paperId) return;
+      setAiAnnotationDraft((current) => current?.requestId === requestId
+        ? { ...current, status: 'asking', failure: errorMessage(error) }
+        : current);
+    }
+  }
+
+  async function saveAiAnnotation() {
+    const draft = aiAnnotationDraft;
+    if (!draft || draft.paperId !== paperId || !draft.comment.trim() || draft.question.trim() !== draft.generatedQuestion) {
+      setAiAnnotationDraft((current) => current ? { ...current, failure: current.question.trim() !== current.generatedQuestion
+        ? '问题已更改，请重新生成解释后保存。' : '请填写批注内容。' } : current);
+      return;
+    }
+    setAiAnnotationDraft((current) => current?.requestId === draft.requestId ? { ...current, status: 'saving', failure: '' } : current);
+    try {
+      await persistAnnotation(draft.selection, 'comment', 'yellow', `问题：${draft.question.trim()}\n\n批注：${draft.comment.trim()}`);
+      if (aiAnnotationRequestRef.current === draft.requestId) {
+        aiAnnotationRequestRef.current += 1;
+        setAiAnnotationDraft(null);
+      }
+    } catch (error) {
+      setAiAnnotationDraft((current) => current?.requestId === draft.requestId ? { ...current, status: 'preview', failure: errorMessage(error) } : current);
+    }
   }
 
   async function translateSelectedSentence() {
@@ -894,7 +1307,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   async function saveEditedAnnotation(annotation: PdfAnnotation) {
     try {
       const updated = await api<PdfAnnotation>(`/papers/${paperId}/annotations/${annotation.id}`, 'PATCH', { comment: annotationEditText });
-      setAnnotations((previous) => previous.map((item) => item.id === updated.id ? updated : item));
+      setAnnotations((previous) => sortAnnotations(previous.map((item) => item.id === updated.id ? updated : item)));
       setEditingAnnotation(null);
       setAnnotationFailure('');
     } catch (error) {
@@ -988,6 +1401,12 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
                       annotations={annotations.filter((item) => item.pdf_kind === pdfKind && item.page_no === page)}
                       active={active}
                       onSelection={capturePdfSelection}
+                      locateRequest={locationSearch?.candidates[locationSearch.index]?.page_no === page
+                        && (locationSearch.candidates[locationSearch.index]?.pdf_kind || 'original') === pdfKind
+                        ? { id: `${locationSearch.id}:${locationSearch.index}`, quote: locationSearch.candidates[locationSearch.index].quote }
+                        : null}
+                      onLocate={receivePdfMatches}
+                      previewSelection={actionLocationPreview?.selection.pdf_kind === pdfKind ? actionLocationPreview.selection : null}
                     />
                   ))}
                 </div>
@@ -1009,6 +1428,16 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
               onJump={jumpToSource}
               settings={settings} currentModel={currentModel} modelFailure={modelFailure}
               onModelChange={chooseModel} onWebSearchChange={updateWebSearch}
+              reasoningPreferences={reasoningPreferences} onReasoningChange={changeReasoningPreferences}
+              selectionToAssociate={selectionToAssociate}
+              onAssociationComplete={(request) => {
+                setSelectionToAssociate((current) => current === request ? null : current);
+              }}
+              onCurrentSessionChange={changeActiveChatSession}
+              onOpenPdfLocation={goToPdfLocation}
+              locationChoices={locationChoices} actionLocationPreview={actionLocationPreview} actionLocationMessage={actionLocationMessage}
+              onLocateAction={startActionLocation} onChooseActionLocation={chooseActionLocation} onManualReselect={beginManualActionReselect}
+              onConfirmAction={confirmAgentAction}
             />
             <section id={`reader-side-panel-notes-${paperId}`} className="reader-notes-panel" role="tabpanel" aria-labelledby={`reader-side-tab-notes-${paperId}`} hidden={rightPanel !== 'notes'}>
               <div className="reader-notes-heading">
@@ -1021,7 +1450,7 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
               />
               <div className="reader-note-actions">
                 <span>{notesFailure && <span className="reader-note-error" role="alert">{notesFailure}</span>}</span>
-                <button type="button" className="primary-button compact-button" disabled={!notesLoaded || noteSaveStatus === '保存中…' || noteSaveStatus === '已保存'} onClick={() => void persistPaperNotes(noteDraftRef.current, noteRevisionRef.current)}>保存笔记</button>
+                <button type="button" className="primary-button compact-button" disabled={!notesLoaded || noteActionPending || noteSaveStatus === '保存中…' || (noteSaveStatus === '已保存' && !noteConflictRef.current)} onClick={() => void persistPaperNotes(noteDraftRef.current, noteRevisionRef.current, true, true)}>保存笔记</button>
               </div>
               <div className="reader-annotations-heading"><h3>高亮、下划线与批注</h3><span>{annotations.length}</span></div>
               {annotationFailure && <div className="reader-note-error" role="alert">{annotationFailure}</div>}
@@ -1066,6 +1495,8 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
         <button type="button" aria-label="高亮" aria-expanded={highlightPaletteOpen} onMouseDown={(event) => event.preventDefault()} onClick={() => setHighlightPaletteOpen((open) => !open)}>高亮</button>
         <button type="button" aria-label="下划线" onMouseDown={(event) => event.preventDefault()} onClick={() => void addUnderline()}>下划线</button>
         <button type="button" aria-label="批注" onMouseDown={(event) => event.preventDefault()} onClick={beginAnnotationDraft}>批注</button>
+        <button type="button" aria-label="AI 批注" data-testid="reader-ai-annotation" onMouseDown={(event) => event.preventDefault()} onClick={beginAiAnnotationQuestion}>AI 批注</button>
+        <button type="button" aria-label="向 AI 提问" data-testid="reader-ask-ai-about-selection" onMouseDown={(event) => event.preventDefault()} onClick={associateSelectionWithChat}>向 AI 提问</button>
         <button type="button" aria-label="翻译句子" onMouseDown={(event) => event.preventDefault()} onClick={() => void translateSelectedSentence()}>翻译句子</button>
         <button type="button" aria-label="取消文字选择" onMouseDown={(event) => event.preventDefault()} onClick={clearPdfSelection}>取消选择</button>
         {highlightPaletteOpen && <div className="pdf-highlight-palette" role="group" aria-label="高亮颜色">
@@ -1105,6 +1536,42 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
         <div className="reader-annotation-actions">
           <button type="button" className="secondary-button compact-button" onClick={() => setAnnotationDraft(null)}>取消</button>
           <button type="button" className="primary-button compact-button" onClick={() => void saveAnnotationDraft()}>保存批注</button>
+        </div>
+      </div>}
+      {aiAnnotationDraft && active && aiAnnotationDraft.paperId === paperId && <div
+        className="pdf-annotation-draft ai-annotation-draft"
+        data-testid={aiAnnotationDraft.status === 'preview' ? 'reader-ai-annotation-preview' : 'reader-ai-annotation-dialog'}
+        role="dialog"
+        aria-label="生成 AI 批注"
+        style={{ left: Math.max(8, Math.min(window.innerWidth - 380, aiAnnotationDraft.selection.anchor.left)), top: Math.max(8, Math.min(window.innerHeight - 360, aiAnnotationDraft.selection.anchor.bottom + 8)) }}
+        onMouseDown={(event) => { if ((event.target as HTMLElement).tagName !== 'TEXTAREA') event.preventDefault(); }}
+      >
+        <div className="ai-annotation-heading"><span>AI 批注 · 第 {aiAnnotationDraft.selection.page_no} 页</span><button type="button" aria-label="关闭 AI 批注" disabled={aiAnnotationDraft.status === 'saving'} onClick={cancelAiAnnotation}>×</button></div>
+        <blockquote className="ai-annotation-quote">{aiAnnotationDraft.selection.selected_text}</blockquote>
+        <label htmlFor="reader-ai-annotation-question">先写下你想问的问题</label>
+        <textarea
+          id="reader-ai-annotation-question" data-testid="reader-ai-annotation-question" aria-label="AI 批注问题"
+          autoFocus disabled={aiAnnotationDraft.status === 'loading' || aiAnnotationDraft.status === 'saving'} value={aiAnnotationDraft.question}
+          onChange={(event) => setAiAnnotationDraft((current) => current ? { ...current, question: event.target.value, failure: '' } : current)}
+          placeholder="例如：这句话中的方法解决了什么问题？"
+        />
+        {aiAnnotationDraft.status === 'loading' && <div className="ai-annotation-status" role="status">正在根据这段原文生成简短解释…</div>}
+        {aiAnnotationDraft.status === 'saving' && <div className="ai-annotation-status" role="status">正在保存批注…</div>}
+        {(aiAnnotationDraft.status === 'preview' || aiAnnotationDraft.status === 'saving') && <>
+          <label htmlFor="reader-ai-annotation-explanation">可编辑的简短解释</label>
+          <textarea id="reader-ai-annotation-explanation" aria-label="AI 批注解释" disabled={aiAnnotationDraft.status === 'saving'} value={aiAnnotationDraft.comment}
+            onChange={(event) => setAiAnnotationDraft((current) => current ? { ...current, comment: event.target.value, failure: '' } : current)} />
+          {aiAnnotationDraft.generatedQuestion !== aiAnnotationDraft.question.trim() && <div className="ai-annotation-status">问题有修改，请重新生成解释后保存。</div>}
+          {aiAnnotationDraft.reasoning && <details className="reasoning-panel"><summary>模型返回的思考内容</summary><div data-testid="reader-ai-annotation-reasoning">{aiAnnotationDraft.reasoning}</div></details>}
+          {aiAnnotationDraft.requestedThinking === 'enabled' && !aiAnnotationDraft.reasoning && <div className="ai-annotation-status">此服务未返回可显示的思考内容。</div>}
+        </>}
+        {aiAnnotationDraft.failure && <div className="reader-note-error" role="alert">{aiAnnotationDraft.failure}</div>}
+        <div className="reader-annotation-actions">
+          <button type="button" className="secondary-button compact-button" disabled={aiAnnotationDraft.status === 'saving'} onClick={cancelAiAnnotation}>取消</button>
+          {aiAnnotationDraft.status === 'preview' && <button type="button" className="secondary-button compact-button" disabled={!aiAnnotationDraft.question.trim()} onClick={() => void generateAiAnnotation()}>重新生成</button>}
+          {aiAnnotationDraft.status === 'preview' || aiAnnotationDraft.status === 'saving'
+            ? <button type="button" className="primary-button compact-button" data-testid="reader-ai-annotation-save" disabled={aiAnnotationDraft.status === 'saving' || !aiAnnotationDraft.comment.trim() || aiAnnotationDraft.generatedQuestion !== aiAnnotationDraft.question.trim()} onClick={() => void saveAiAnnotation()}>{aiAnnotationDraft.status === 'saving' ? '正在保存…' : '保存批注'}</button>
+            : <button type="button" className="primary-button compact-button" disabled={!aiAnnotationDraft.question.trim() || aiAnnotationDraft.status === 'loading'} onClick={() => void generateAiAnnotation()}>生成预览</button>}
         </div>
       </div>}
     </div>
@@ -1212,6 +1679,7 @@ function LayoutSeparator({
 type ActiveStream = {
   answer: string; reasoning: string; phase: string; tool?: string; query?: string;
   runId?: string; messageId?: number; requestId?: string; sources: Source[];
+  thinking: ReasoningThinking; completed?: boolean;
 };
 
 type PaperChatsProps = {
@@ -1221,8 +1689,19 @@ type PaperChatsProps = {
   settings: ReaderSettings | null; currentModel: string; modelFailure: string;
   onModelChange: (model: string) => Promise<void>;
   onWebSearchChange: (enabled: boolean) => Promise<void>;
+  reasoningPreferences: ReasoningPreferences; onReasoningChange: (preferences: Partial<ReasoningPreferences>) => void;
+  selectionToAssociate: SelectionAssociationRequest | null; onAssociationComplete: (request: SelectionAssociationRequest, sessionId: string) => void;
+  onCurrentSessionChange: (sessionId: string) => void;
+  onOpenPdfLocation: (kind: PdfKind, page: number) => void;
+  locationChoices: { sessionId: string; actionId: string; matches: SelectionContext[] } | null;
+  actionLocationPreview: ActionLocationPreview | null;
+  actionLocationMessage: { actionId: string; message: string } | null;
+  onLocateAction: (sessionId: string, action: AgentAction) => void;
+  onChooseActionLocation: (sessionId: string, actionId: string, target: SelectionContext) => void;
+  onManualReselect: (sessionId: string, action: AgentAction) => void;
+  onConfirmAction: (sessionId: string, action: AgentAction, input: AgentActionConfirmInput) => Promise<AgentAction>;
 };
-type ChatSession = { id: string; title: string; created_at: string };
+type ChatSession = { id: string; title: string; created_at: string; selection_context?: SelectionContext | null };
 
 function PaperChats(props: PaperChatsProps) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -1230,7 +1709,35 @@ function PaperChats(props: PaperChatsProps) {
   const [busySessions, setBusySessions] = useState<Record<string, boolean>>({});
   const [changing, setChanging] = useState(false);
   const [failure, setFailure] = useState('');
+  const [associationFailure, setAssociationFailure] = useState('');
+  const [associationRetry, setAssociationRetry] = useState(0);
+  const attemptedAssociationRef = useRef<SelectionAssociationRequest | null>(null);
+  const latestAssociationBySessionRef = useRef(new Map<string, object>());
+  const selectionWriteQueueRef = useRef(new Map<string, Promise<void>>());
+  const currentSessionRef = useRef(currentSession);
+  const selectionToAssociateRef = useRef(props.selectionToAssociate);
+  currentSessionRef.current = currentSession;
+  selectionToAssociateRef.current = props.selectionToAssociate;
   const selectionKey = `paper-workbench.chat-session.${props.paperId}`;
+
+  function selectSession(sessionId: string) {
+    currentSessionRef.current = sessionId;
+    setCurrentSession(sessionId);
+    props.onCurrentSessionChange(sessionId);
+  }
+
+  function writeSessionSelection(sessionId: string, selectionContext: SelectionContext | null) {
+    const previous = selectionWriteQueueRef.current.get(sessionId) || Promise.resolve();
+    const request = previous.catch(() => undefined).then(() => api<{ selection_context: SelectionContext | null }>(
+      `/papers/${props.paperId}/chat-sessions/${sessionId}/selection`, 'PUT', { selection_context: selectionContext },
+    ));
+    const settled = request.then(() => undefined, () => undefined);
+    selectionWriteQueueRef.current.set(sessionId, settled);
+    void settled.then(() => {
+      if (selectionWriteQueueRef.current.get(sessionId) === settled) selectionWriteQueueRef.current.delete(sessionId);
+    });
+    return request;
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -1239,7 +1746,7 @@ function PaperChats(props: PaperChatsProps) {
       let saved = '';
       try { saved = localStorage.getItem(selectionKey) || ''; } catch { /* session history is stored in the database */ }
       setSessions(list);
-      setCurrentSession(list.some((session) => session.id === saved) ? saved : list[0]?.id || '');
+      selectSession(list.some((session) => session.id === saved) ? saved : list[0]?.id || '');
     }).catch((error) => { if (!cancelled) setFailure(errorMessage(error)); });
     return () => { cancelled = true; };
   }, [props.paperId, selectionKey]);
@@ -1248,7 +1755,51 @@ function PaperChats(props: PaperChatsProps) {
     if (currentSession) {
       try { localStorage.setItem(selectionKey, currentSession); } catch { /* selecting a session still works */ }
     }
-  }, [currentSession, selectionKey]);
+    props.onCurrentSessionChange(currentSession);
+  }, [currentSession, selectionKey, props.onCurrentSessionChange]);
+
+  useEffect(() => {
+    const request = props.selectionToAssociate;
+    if (!request) { attemptedAssociationRef.current = null; return; }
+    const targetSessionId = request.sessionId && sessions.some((session) => session.id === request.sessionId)
+      ? request.sessionId : currentSession;
+    if (!targetSessionId || attemptedAssociationRef.current === request) return;
+    attemptedAssociationRef.current = request;
+    latestAssociationBySessionRef.current.set(targetSessionId, request);
+    const originatingSessionId = request.sessionId || currentSessionRef.current;
+    setAssociationFailure('');
+    void writeSessionSelection(targetSessionId, toSelectionContext(request.selection)).then((result) => {
+      if (latestAssociationBySessionRef.current.get(targetSessionId) === request) {
+        setSessions((previous) => previous.map((session) => session.id === targetSessionId ? { ...session, selection_context: result.selection_context } : session));
+        latestAssociationBySessionRef.current.delete(targetSessionId);
+      }
+      if (selectionToAssociateRef.current === request) {
+        if (currentSessionRef.current === originatingSessionId && currentSessionRef.current !== targetSessionId) selectSession(targetSessionId);
+        props.onAssociationComplete(request, targetSessionId);
+      }
+    }).catch((error) => {
+      if (latestAssociationBySessionRef.current.get(targetSessionId) === request) latestAssociationBySessionRef.current.delete(targetSessionId);
+      if (selectionToAssociateRef.current === request) setAssociationFailure(errorMessage(error));
+    });
+  }, [props.paperId, props.selectionToAssociate, currentSession, sessions, associationRetry, props.onAssociationComplete]);
+
+  async function clearAssociation(sessionId: string) {
+    const requestToken = {};
+    latestAssociationBySessionRef.current.set(sessionId, requestToken);
+    setAssociationFailure('');
+    try {
+      const result = await writeSessionSelection(sessionId, null);
+      if (latestAssociationBySessionRef.current.get(sessionId) === requestToken) {
+        setSessions((previous) => previous.map((session) => session.id === sessionId ? { ...session, selection_context: result.selection_context } : session));
+        latestAssociationBySessionRef.current.delete(sessionId);
+      }
+    } catch (error) {
+      if (latestAssociationBySessionRef.current.get(sessionId) === requestToken) {
+        latestAssociationBySessionRef.current.delete(sessionId);
+        setAssociationFailure(errorMessage(error));
+      }
+    }
+  }
 
   const markBusy = useCallback((id: string, busy: boolean) => {
     setBusySessions((previous) => previous[id] === busy ? previous : { ...previous, [id]: busy });
@@ -1261,7 +1812,7 @@ function PaperChats(props: PaperChatsProps) {
     try {
       const created = await api<ChatSession>(`/papers/${props.paperId}/chat-sessions`, 'POST', {});
       setSessions((previous) => [...previous, created]);
-      setCurrentSession(created.id);
+      selectSession(created.id);
       props.onRightPanelChange('chat');
     } catch (error) { setFailure(errorMessage(error)); }
     finally { setChanging(false); }
@@ -1275,7 +1826,7 @@ function PaperChats(props: PaperChatsProps) {
       await api(`/papers/${props.paperId}/chat-sessions/${session.id}`, 'DELETE');
       const list = await api<ChatSession[]>(`/papers/${props.paperId}/chat-sessions`);
       setSessions(list);
-      if (currentSession === session.id) setCurrentSession(list[0]?.id || '');
+      if (currentSession === session.id) selectSession(list[0]?.id || '');
     } catch (error) { setFailure(errorMessage(error)); }
     finally { setChanging(false); }
   }
@@ -1292,7 +1843,7 @@ function PaperChats(props: PaperChatsProps) {
       </div>
       <div className="chat-session-tabs" role="tablist" aria-label="文献 AI 会话">
         {sessions.map((session) => <div className={`chat-session-tab ${session.id === currentSession ? 'active' : ''}`} key={session.id}>
-          <button type="button" role="tab" aria-selected={session.id === currentSession} data-testid={`chat-session-${session.id}`} title={session.title} onClick={() => { setCurrentSession(session.id); props.onRightPanelChange('chat'); }}>{session.title}</button>
+          <button type="button" role="tab" aria-selected={session.id === currentSession} data-testid={`chat-session-${session.id}`} title={session.title} onClick={() => { selectSession(session.id); props.onRightPanelChange('chat'); }}>{session.title}</button>
           <button type="button" className="chat-session-close" aria-label={`删除会话 ${session.title}`} title={busySessions[session.id] ? '请先停止此会话的生成' : '删除此会话'} disabled={changing || busySessions[session.id]} onClick={() => void deleteSession(session)}>×</button>
         </div>)}
       </div>
@@ -1300,19 +1851,26 @@ function PaperChats(props: PaperChatsProps) {
     </div>
     <div id={`reader-side-panel-chat-${props.paperId}`} className="reader-side-content" role="tabpanel" aria-labelledby={`reader-side-tab-chat-${props.paperId}`} hidden={props.rightPanel !== 'chat'}>
       {failure && <div className="chat-error" role="alert">{failure}</div>}
+      {associationFailure && <div className="chat-error" role="alert">{associationFailure}{props.selectionToAssociate && <button type="button" className="secondary-button compact-button" onClick={() => { attemptedAssociationRef.current = null; setAssociationRetry((value) => value + 1); }}>重试关联</button>}</div>}
       {!sessions.length && !failure && <div className="chat-empty">正在读取会话…</div>}
       {sessions.map((session) => <div className="chat-session-content" data-session-id={session.id} key={session.id} hidden={session.id !== currentSession}>
-        <ChatPanel {...props} sessionId={session.id} visible={props.visible && session.id === currentSession} onBusyChange={markBusy} />
+        <ChatPanel {...props} sessionId={session.id} selectionContext={session.selection_context || null} onClearAssociation={clearAssociation} visible={props.visible && session.id === currentSession} onBusyChange={markBusy} />
       </div>)}
     </div>
   </>;
 }
 
-function ChatPanel({ paperId, active, visible, onJump, settings, currentModel, modelFailure, onModelChange, onWebSearchChange, sessionId, onBusyChange }: PaperChatsProps & {
-  sessionId: string; onBusyChange: (id: string, busy: boolean) => void;
+function ChatPanel(props: PaperChatsProps & {
+  sessionId: string; selectionContext: SelectionContext | null; onClearAssociation: (sessionId: string) => Promise<void>;
+  onBusyChange: (id: string, busy: boolean) => void;
 }) {
+  const { paperId, active, visible, onJump, settings, currentModel, modelFailure, onModelChange, onWebSearchChange, sessionId, selectionContext, onClearAssociation, onBusyChange } = props;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [runs, setRuns] = useState<AnalysisRun[]>([]);
+  const [agentActions, setAgentActions] = useState<AgentAction[]>([]);
+  const [actionDrafts, setActionDrafts] = useState<Record<string, string>>({});
+  const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
+  const [busyActions, setBusyActions] = useState<Record<string, boolean>>({});
   const [question, setQuestion] = useState('');
   const [busy, setBusy] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -1325,20 +1883,84 @@ function ChatPanel({ paperId, active, visible, onJump, settings, currentModel, m
   const [followingLatest, setFollowingLatest] = useState(true);
   const activeRef = useRef<ActiveStream | null>(null);
   const handleRef = useRef<ChatStreamHandle | null>(null);
+  const autoLocatedActionsRef = useRef(new Set<string>());
+  const busyActionsRef = useRef(new Set<string>());
 
   const refresh = useCallback(async () => {
-    const [nextMessages, nextRuns] = await Promise.all([
+    const [nextMessages, nextRuns, nextActions] = await Promise.all([
       api<ChatMessage[]>(`/papers/${paperId}/chat?session_id=${sessionId}`),
       api<AnalysisRun[]>(`/papers/${paperId}/analysis?session_id=${sessionId}`),
+      api<AgentAction[]>(`/papers/${paperId}/agent-actions?session_id=${encodeURIComponent(sessionId)}`),
     ]);
     setMessages(nextMessages);
     setRuns(nextRuns);
+    setAgentActions((previous) => {
+      const existing = new Map(previous.map((action) => [action.id, action]));
+      return nextActions.map((action) => {
+        const current = existing.get(action.id);
+        return current && current.status !== 'pending' && action.status === 'pending' ? current : action;
+      });
+    });
+    setActionDrafts((previous) => {
+      const next = { ...previous };
+      nextActions.forEach((action) => { if (!(action.id in next)) next[action.id] = action.kind === 'annotation' ? action.payload.comment || '' : action.payload.text || ''; });
+      return next;
+    });
   }, [paperId, sessionId]);
 
   useEffect(() => {
     if (active && visible) void refresh().catch((error) => setFailure(errorMessage(error)));
   }, [active, visible, refresh]);
   useEffect(() => { onBusyChange(sessionId, busy); }, [sessionId, busy, onBusyChange]);
+
+  useEffect(() => {
+    if (!active || !visible) return;
+    for (const action of agentActions) {
+      if (action.kind !== 'annotation' || action.status !== 'pending' || autoLocatedActionsRef.current.has(action.id)) continue;
+      autoLocatedActionsRef.current.add(action.id);
+      props.onLocateAction(sessionId, action);
+    }
+  }, [active, visible, agentActions, sessionId, props.onLocateAction]);
+
+  function replaceAgentAction(action: AgentAction) {
+    setAgentActions((previous) => [...previous.filter((item) => item.id !== action.id), action]);
+    setActionDrafts((previous) => previous[action.id] === undefined ? {
+      ...previous, [action.id]: action.kind === 'annotation' ? action.payload.comment || '' : action.payload.text || '',
+    } : previous);
+  }
+
+  async function confirmAction(action: AgentAction) {
+    if (busyActionsRef.current.has(action.id) || action.status !== 'pending') return;
+    const original = action.kind === 'annotation' ? action.payload.comment || '' : action.payload.text || '';
+    const draft = actionDrafts[action.id] ?? original;
+    const preview = props.actionLocationPreview?.sessionId === sessionId && props.actionLocationPreview.actionId === action.id ? props.actionLocationPreview : null;
+    if (action.kind === 'annotation' && !preview) {
+      setActionErrors((previous) => ({ ...previous, [action.id]: '请先在 PDF 中定位或手动重新选择批注位置。' }));
+      return;
+    }
+    busyActionsRef.current.add(action.id);
+    setBusyActions((previous) => ({ ...previous, [action.id]: true }));
+    setActionErrors((previous) => ({ ...previous, [action.id]: '' }));
+    try {
+      const updated = await props.onConfirmAction(sessionId, action, {
+        ...(preview ? { selection_context: preview.selection, ...(preview.manualReselect ? { manual_reselect: true as const } : {}) } : {}),
+        ...(draft !== original ? action.kind === 'annotation' ? { comment: draft } : { text: draft } : {}),
+      });
+      replaceAgentAction(updated);
+    } catch (error) { setActionErrors((previous) => ({ ...previous, [action.id]: errorMessage(error) })); }
+    finally { busyActionsRef.current.delete(action.id); setBusyActions((previous) => ({ ...previous, [action.id]: false })); }
+  }
+
+  async function cancelAction(action: AgentAction) {
+    if (busyActionsRef.current.has(action.id) || action.status !== 'pending') return;
+    busyActionsRef.current.add(action.id);
+    setBusyActions((previous) => ({ ...previous, [action.id]: true }));
+    setActionErrors((previous) => ({ ...previous, [action.id]: '' }));
+    try {
+      replaceAgentAction(await api<AgentAction>(`/papers/${paperId}/agent-actions/${action.id}/cancel`, 'POST', {}));
+    } catch (error) { setActionErrors((previous) => ({ ...previous, [action.id]: errorMessage(error) })); }
+    finally { busyActionsRef.current.delete(action.id); setBusyActions((previous) => ({ ...previous, [action.id]: false })); }
+  }
 
   useEffect(() => {
     if (settings) setWebSearchEnabled(settings.web_search_enabled);
@@ -1361,6 +1983,7 @@ function ChatPanel({ paperId, active, visible, onJump, settings, currentModel, m
     const finalState = {
       ...current,
       messageId,
+      completed: true,
       answer: event.type === 'done' && typeof data.answer === 'string' ? data.answer : current.answer,
     };
     activeRef.current = finalState;
@@ -1381,8 +2004,11 @@ function ChatPanel({ paperId, active, visible, onJump, settings, currentModel, m
 
   async function startStream(input: { question?: string; runId?: string }) {
     followLatest();
+    const requestPreferences = { ...props.reasoningPreferences };
+    const requestModel = currentModel;
+    const requestSelectionContext = selectionContext;
     const initial: ActiveStream = {
-      answer: '', reasoning: '', phase: 'thinking', runId: input.runId, sources: [],
+      answer: '', reasoning: '', phase: 'thinking', runId: input.runId, sources: [], thinking: requestPreferences.thinking,
     };
     activeRef.current = initial;
     setActiveStream(initial);
@@ -1392,7 +2018,10 @@ function ChatPanel({ paperId, active, visible, onJump, settings, currentModel, m
     try {
       const handle = await window.workbench.startChatStream({
         paperId, sessionId, question: input.question, runId: input.runId,
-        model: currentModel, webSearch: webSearchEnabled,
+        model: requestModel, webSearch: webSearchEnabled,
+        selection_context: requestSelectionContext || undefined,
+        ...(requestPreferences.thinking === 'default' ? {} : { thinking: requestPreferences.thinking }),
+        ...(requestPreferences.effort === 'default' ? {} : { reasoning_effort: requestPreferences.effort }),
       }, (event) => {
         const previous = activeRef.current;
         if (!previous || (previous.requestId && previous.requestId !== event.requestId)) return;
@@ -1416,6 +2045,10 @@ function ChatPanel({ paperId, active, visible, onJump, settings, currentModel, m
           next.answer += data.text;
         } else if (event.type === 'reasoning_delta' && typeof data.text === 'string') {
           next.reasoning += data.text;
+        } else if ((event.type === 'reasoning_summary_delta' || event.type === 'reasoning_summary') && typeof data.text === 'string') {
+          next.reasoning += data.text;
+        } else if (event.type === 'agent_action' && data.action && typeof data.action === 'object') {
+          replaceAgentAction(data.action as AgentAction);
         } else if (event.type === 'turn_reset') {
           next.answer = '';
         } else if (event.type === 'sources' && Array.isArray(data.sources)) {
@@ -1487,6 +2120,7 @@ function ChatPanel({ paperId, active, visible, onJump, settings, currentModel, m
       : activeStream.tool === 'read_paper' ? '正在读取相关原文…'
         : activeStream.tool === 'summarize_paper' || activeStream.runId ? '正在发送整篇原文…' : '正在使用文献工具…'
     : activeStream?.runId ? '正在发送整篇原文…' : '正在生成回答…';
+  const effortOptions = reasoningEffortOptions(currentModel);
 
   return (
     <aside className="chat-panel">
@@ -1500,6 +2134,10 @@ function ChatPanel({ paperId, active, visible, onJump, settings, currentModel, m
         followLatestRef.current = following;
         setFollowingLatest(following);
       }}>
+        {selectionContext && <div className="reader-selection-association" data-testid="reader-selection-association">
+          <div><strong>已关联原文 · 第 {selectionContext.page_no} 页</strong><blockquote>{selectionContext.selected_text}</blockquote></div>
+          <button type="button" className="secondary-button compact-button" data-testid="reader-clear-associated-selection" onClick={() => void onClearAssociation(sessionId)}>清除</button>
+        </div>}
         {visibleMessages.length === 0 && runs.length === 0 && !activeStream && <div className="chat-empty"><div className="chat-empty-mark" aria-hidden="true">问</div><p>可以直接问“详细总结一下这篇文献”，也可以询问实验设计、数据或结论。</p></div>}
         {visibleMessages.map((message, index) => <Message key={message.id ?? `${message.created_at || index}-${index}`} message={message} onJump={onJump} />)}
         {runs.filter((run) => !(run.status === 'running' && activeStream?.runId === run.id)).map((run) => <div className="run-card" key={run.id}>
@@ -1508,9 +2146,49 @@ function ChatPanel({ paperId, active, visible, onJump, settings, currentModel, m
           {run.error && <p className="paper-error">{run.error}</p>}
           {run.status !== 'running' && run.status !== 'completed' && <button className="secondary-button compact-button" disabled={busy} onClick={() => void resume(run)}>继续总结</button>}
         </div>)}
+        {agentActions.map((action) => {
+          const original = action.kind === 'annotation' ? action.payload.comment || '' : action.payload.text || '';
+          const draft = actionDrafts[action.id] ?? original;
+          const preview = props.actionLocationPreview?.sessionId === sessionId && props.actionLocationPreview.actionId === action.id ? props.actionLocationPreview : null;
+          const choices = props.locationChoices?.sessionId === sessionId && props.locationChoices.actionId === action.id ? props.locationChoices.matches : [];
+          const locationMessage = props.actionLocationMessage?.actionId === action.id ? props.actionLocationMessage.message : '';
+          const pending = action.status === 'pending';
+          const actionQuote = action.payload.selection_context?.selected_text || action.payload.quote;
+          return <article className="agent-action-card" key={action.id} data-testid={`reader-agent-action-${action.id}`} data-action-kind={action.kind} data-action-status={action.status}>
+            <div className="agent-action-heading"><strong>{action.kind === 'annotation' ? 'AI 批注建议' : 'AI 笔记建议'}</strong><span>{pending ? '待确认' : action.status === 'applied' ? '已保存' : '已取消'}</span></div>
+            {actionQuote && <blockquote className="agent-action-quote">{actionQuote}{action.payload.page_no && <> · 第 {action.payload.page_no} 页</>}</blockquote>}
+            <label htmlFor={`reader-agent-action-text-${action.id}`}>{action.kind === 'annotation' ? '批注草稿' : '建议追加到笔记'}</label>
+            <textarea id={`reader-agent-action-text-${action.id}`} data-testid={`reader-agent-action-text-${action.id}`} value={draft} disabled={!pending || !!busyActions[action.id]}
+              onChange={(event) => setActionDrafts((previous) => ({ ...previous, [action.id]: event.target.value }))} />
+            {action.kind === 'annotation' && <>
+              {choices.length > 1 && <div className="agent-action-locations" role="group" aria-label="选择匹配的批注位置">{choices.map((match, index) => <button
+                key={`${match.pdf_kind}-${match.page_no}-${match.rects[0]?.x}-${match.rects[0]?.y}-${index}`}
+                type="button" className={preview?.selection === match ? 'active' : ''}
+                data-testid={`reader-agent-action-location-${action.id}-${index}`} aria-pressed={preview?.selection === match}
+                onClick={() => props.onChooseActionLocation(sessionId, action.id, match)}
+              >位置 {index + 1} · 第 {match.page_no} 页</button>)}</div>}
+              {locationMessage && <div className="agent-action-location-message" role="status">{locationMessage}</div>}
+              {preview && <div className="agent-action-location-preview" data-testid="reader-action-location-preview">
+                <span>{preview.manualReselect ? '手动重选预览' : '批注位置预览'} · 第 {preview.selection.page_no} 页 · {preview.selection.pdf_kind === 'original' ? '原文 PDF' : preview.selection.pdf_kind === 'mono' ? '中文 PDF' : '双语 PDF'}</span>
+                <blockquote>{preview.selection.selected_text}</blockquote>
+                <button type="button" className="secondary-button compact-button" onClick={() => props.onOpenPdfLocation(preview.selection.pdf_kind, preview.selection.page_no)}>跳到预览位置</button>
+              </div>}
+              {pending && <div className="agent-action-location-actions">
+                <button type="button" className="secondary-button compact-button" onClick={() => props.onLocateAction(sessionId, action)}>重新定位</button>
+                <button type="button" className="secondary-button compact-button" data-testid={`reader-agent-action-reselect-${action.id}`} onClick={() => props.onManualReselect(sessionId, action)}>手动重选位置</button>
+              </div>}
+            </>}
+            {actionErrors[action.id] && <div className="chat-error" role="alert">{actionErrors[action.id]}</div>}
+            {pending && <div className="agent-action-actions">
+              <button type="button" className="secondary-button compact-button" data-testid={`reader-agent-action-cancel-${action.id}`} disabled={!!busyActions[action.id]} onClick={() => void cancelAction(action)}>取消建议</button>
+              <button type="button" className="primary-button compact-button" data-testid={`reader-agent-action-confirm-${action.id}`} disabled={!!busyActions[action.id] || (action.kind === 'annotation' && !preview) || !draft.trim()} onClick={() => void confirmAction(action)}>{busyActions[action.id] ? '处理中…' : action.kind === 'annotation' ? '确认并保存批注' : '确认追加到笔记'}</button>
+            </div>}
+          </article>;
+        })}
         {activeStream && <div className="chat-message assistant active-chat-stream">
           <div className="message-role">Folio · 正在生成</div>
-          {activeStream.reasoning && <details className="reasoning-panel" open><summary>思考过程</summary><div data-testid="streaming-reasoning">{activeStream.reasoning}</div></details>}
+          {activeStream.reasoning && <details className="reasoning-panel" open><summary>模型返回的思考内容</summary><div data-testid="streaming-reasoning">{activeStream.reasoning}</div></details>}
+          {activeStream.completed && activeStream.thinking === 'enabled' && !activeStream.reasoning && <div className="ai-annotation-status">此服务未返回可显示的思考内容。</div>}
           <div className="message-content" data-testid="streaming-answer"><MarkdownContent markdown={activeStream.answer || '…'} sources={activeStream.sources} onJump={onJump} /></div>
           <div className="assistant-thinking"><span className="typing-dots">•••</span>{activeLabel}{activeStream.query ? ` ${activeStream.query}` : ''}</div>
         </div>}
@@ -1524,7 +2202,23 @@ function ChatPanel({ paperId, active, visible, onJump, settings, currentModel, m
         <div className="composer-footer">
           <div className="composer-options">
             <label className="web-search-toggle"><input type="checkbox" aria-label="联网搜索" checked={webSearchEnabled} disabled={!settings || busy} onChange={(event) => changeWebSearch(event.target.checked)} />联网搜索</label>
+            <div className="reasoning-controls">
+              <label><span>思考</span><select aria-label="思考模式" data-testid="reader-thinking-mode" value={props.reasoningPreferences.thinking}
+                onChange={(event) => {
+                  const thinking = event.target.value as ReasoningThinking;
+                  props.onReasoningChange(thinking === 'disabled' ? { thinking, effort: 'default' } : { thinking });
+                }}>
+                <option value="default">默认</option><option value="enabled">启用</option><option value="disabled">关闭</option>
+              </select></label>
+              <label><span>推理强度</span><select aria-label="推理强度" data-testid="reader-reasoning-effort" value={props.reasoningPreferences.effort}
+                disabled={props.reasoningPreferences.thinking === 'disabled'}
+                onChange={(event) => props.onReasoningChange({ effort: event.target.value as ReasoningEffort })}>
+                <option value="default">默认</option>
+                {effortOptions.options.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
+              </select></label>
+            </div>
           </div>
+          {effortOptions.uncertain && props.reasoningPreferences.effort !== 'default' && <div className="reasoning-capability-notice" role="status">当前模型服务对推理强度的支持情况未知，服务可能忽略此设置。</div>}
           <div className="composer-actions">
             <div className="model-picker" title={currentModel || undefined}>
               <span className="model-picker-name" data-testid="reader-model-name" title={currentModel || undefined}>{currentModel || '正在加载模型…'}</span>

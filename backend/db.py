@@ -84,7 +84,8 @@ def initialize() -> None:
                 paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
                 title TEXT NOT NULL,
                 is_default INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                selection_context_json TEXT NOT NULL DEFAULT 'null'
             );
             CREATE INDEX IF NOT EXISTS chat_sessions_by_paper ON chat_sessions(paper_id, created_at, id);
             CREATE TABLE IF NOT EXISTS pages (
@@ -148,6 +149,8 @@ def initialize() -> None:
                 sources_json TEXT NOT NULL DEFAULT '[]',
                 model_snapshot TEXT NOT NULL DEFAULT '',
                 protocol_snapshot TEXT NOT NULL DEFAULT '',
+                thinking_snapshot TEXT NOT NULL DEFAULT 'default',
+                reasoning_effort_snapshot TEXT NOT NULL DEFAULT 'default',
                 session_id TEXT REFERENCES chat_sessions(id) ON DELETE CASCADE,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -186,6 +189,18 @@ def initialize() -> None:
                 updated_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS annotations_by_paper_page ON paper_annotations(paper_id, pdf_kind, page_no);
+            CREATE TABLE IF NOT EXISTS paper_agent_actions (
+                id TEXT PRIMARY KEY,
+                paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+                session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                message_id INTEGER REFERENCES chat_messages(id) ON DELETE SET NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('annotation', 'note')),
+                status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'applied', 'cancelled')),
+                payload_json TEXT NOT NULL,
+                result_json TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS paper_agent_actions_by_session ON paper_agent_actions(paper_id, session_id, created_at, id);
             """
         )
         columns = {row["name"] for row in db.execute("PRAGMA table_info(papers)").fetchall()}
@@ -217,12 +232,15 @@ def initialize() -> None:
         original_settings_columns = {row["name"] for row in db.execute("PRAGMA table_info(settings)").fetchall()}
         legacy_protocol_column = "protocol" not in original_settings_columns
         for table, name, definition in (
+            ("chat_sessions", "selection_context_json", "TEXT NOT NULL DEFAULT 'null'"),
             ("settings", "protocol", "TEXT NOT NULL DEFAULT 'custom_chat_completions'"),
             ("settings", "model_options_json", "TEXT NOT NULL DEFAULT '[]'"),
             ("settings", "models_url", "TEXT NOT NULL DEFAULT ''"),
             ("settings", "web_search_enabled", "INTEGER NOT NULL DEFAULT 1"),
             ("analysis_runs", "model_snapshot", "TEXT NOT NULL DEFAULT ''"),
             ("analysis_runs", "protocol_snapshot", "TEXT NOT NULL DEFAULT ''"),
+            ("analysis_runs", "thinking_snapshot", "TEXT NOT NULL DEFAULT 'default'"),
+            ("analysis_runs", "reasoning_effort_snapshot", "TEXT NOT NULL DEFAULT 'default'"),
             ("analysis_runs", "session_id", "TEXT REFERENCES chat_sessions(id) ON DELETE CASCADE"),
             ("chat_messages", "session_id", "TEXT REFERENCES chat_sessions(id) ON DELETE CASCADE"),
             ("chat_messages", "reasoning", "TEXT NOT NULL DEFAULT ''"),

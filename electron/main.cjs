@@ -612,6 +612,9 @@ function startChatStream(event, input) {
       model: input.model,
       web_search: input.webSearch,
       session_id: input.sessionId,
+      selection_context: input.selection_context,
+      thinking: input.thinking,
+      reasoning_effort: input.reasoning_effort,
     };
   }
   const stream = {
