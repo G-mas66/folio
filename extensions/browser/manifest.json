@@ -4,6 +4,9 @@
   "version": "1.0.0",
   "description": "将网页论文和 PDF 收藏到本机 Folio。",
   "minimum_chrome_version": "109",
+  "icons": {
+    "256": "icons/folio-icon.png"
+  },
   "permissions": [
     "activeTab",
     "scripting",
@@ -22,6 +25,7 @@
   },
   "action": {
     "default_title": "收藏到 Folio",
+    "default_icon": "icons/folio-icon.png",
     "default_popup": "popup.html"
   }
 }
