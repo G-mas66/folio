@@ -1,0 +1,2 @@
+.plugin-pairing-field { display: grid; gap: 8px; }
+.plugin-pairing-field input { width: 100%; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--field); padding: 10px 12px; font: 13px/1.6 Consolas, monospace; }

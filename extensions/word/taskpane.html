@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Folio 引用</title>
+  <link rel="stylesheet" href="/taskpane.css">
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <script defer src="/taskpane.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Folio 引用</h1>
+      <p>从 Folio 文献库插入可刷新、可离线重排的引用。</p>
+    </header>
+
+    <section class="license-credit" aria-label="引用引擎归属">
+      引用格式由 citeproc-js 提供，作者 Frank Bennett ·
+      <a href="https://github.com/Juris-M/citeproc-js" target="_blank" rel="noreferrer">项目主页</a>
+    </section>
+
+    <section>
+      <label for="token">Folio 插件 token</label>
+      <div class="inline">
+        <input id="token" type="password" autocomplete="off" placeholder="从 Folio 设置复制">
+        <button id="saveToken" type="button">保存</button>
+      </div>
+    </section>
+
+    <section>
+      <label for="query">查找文献</label>
+      <div class="inline">
+        <input id="query" type="search" placeholder="题名、作者、DOI 或关键词">
+        <button id="search" type="button" disabled>查询</button>
+      </div>
+      <div class="result-heading"><span id="resultCount"></span><span>可多选</span></div>
+      <div id="results" class="results" aria-live="polite"></div>
+      <button id="insert" class="primary" type="button" disabled>插入所选引用</button>
+    </section>
+
+    <section>
+      <label for="style">文档引用格式</label>
+      <div class="inline">
+        <select id="style">
+          <option value="apa">APA 7</option>
+          <option value="gb">GB/T 7714-2015（顺序编码制）</option>
+        </select>
+        <button id="refresh" type="button" disabled>刷新文档引用</button>
+      </div>
+      <p class="hint">引用、格式和文献快照保存在当前 Word 文档。切换格式或重新编号不需要联网；完成后请保存文档。</p>
+    </section>
+
+    <div id="status" class="status" role="status"></div>
+  </main>
+</body>
+</html>

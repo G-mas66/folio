@@ -1,0 +1,31 @@
+:root { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; color: #172321; background: #f7f8f5; font-size: 13px; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { padding: 16px; max-width: 620px; margin: 0 auto; }
+header h1 { margin: 0 0 3px; font-size: 21px; }
+header p, .hint { color: #52615e; line-height: 1.5; margin: 4px 0 12px; }
+section { margin: 14px 0; padding: 12px; border: 1px solid #d8dfdc; border-radius: 8px; background: #fff; }
+label { display: block; font-weight: 600; margin-bottom: 7px; }
+input, select, button { font: inherit; min-height: 34px; border: 1px solid #c7d0cc; border-radius: 5px; padding: 6px 8px; }
+input:focus, select:focus, button:focus { outline: 2px solid #63a89a; outline-offset: 1px; }
+input, select { min-width: 0; width: 100%; background: #fff; }
+.inline { display: flex; gap: 7px; align-items: center; }
+.inline button { flex: 0 0 auto; }
+.inline select { flex: 0 0 52%; }
+button { background: #f0f4f2; cursor: pointer; }
+button:disabled { cursor: default; opacity: .55; }
+button.primary { width: 100%; margin-top: 9px; background: #175e52; color: #fff; border-color: #175e52; font-weight: 600; }
+.result-heading { display: flex; justify-content: space-between; color: #65736f; font-size: 12px; margin: 10px 0 5px; }
+.results { display: grid; gap: 7px; max-height: 330px; overflow: auto; }
+.record { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; margin: 0; border: 1px solid #e2e8e5; border-radius: 6px; padding: 8px; font-weight: 400; }
+.record > input { width: 15px; height: 15px; min-height: 15px; margin: 2px 0 0; }
+.record-details { display: grid; gap: 4px; min-width: 0; }
+.record-details strong { overflow-wrap: anywhere; }
+.record-details > span { color: #596762; line-height: 1.4; overflow-wrap: anywhere; }
+.record-details .missing { color: #8a4d1a; }
+.locator { grid-column: 2; display: flex; align-items: center; gap: 8px; font-size: 12px; color: #596762; }
+.locator input { max-width: 120px; min-height: 28px; }
+.license-credit { padding: 8px 10px; background: #eaf1ee; border-left: 3px solid #175e52; line-height: 1.5; }
+a { color: #175e52; }
+.status { min-height: 18px; margin: 8px 2px; color: #24594e; line-height: 1.45; overflow-wrap: anywhere; }
+.status.error { color: #9a2b2b; }

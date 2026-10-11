@@ -12,6 +12,7 @@ const { classifyUpdateError, createUpdateChecker, updateCheckErrorMessage } = re
 const { checkForUpdatesWithApiFallback } = require('./update-api.cjs');
 const { appInfoFields, requestUninstall, submitFeedback } = require('./app-actions.cjs');
 const { releaseNotesText, selectMacUpdate } = require('./update-service.cjs');
+const { createPluginBridge } = require('./plugin-bridge.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
 const legacyWindowsRoot = 'D:\\个人工作台';
@@ -62,6 +63,12 @@ let windowsUpdateCheckPromise;
 let windowsUpdateCheckActive = false;
 let backendToken;
 let backendBase;
+let pluginBridge;
+let pluginBridgeError = '';
+let wordHost;
+let pluginShutdownComplete = false;
+let pluginShutdownPending = false;
+let wordHostState = { running: false, state: 'not_started', url: 'https://localhost:37862/taskpane.html', message: '' };
 let mainWindow;
 let autoUpdater;
 let CancellationToken;
@@ -421,6 +428,30 @@ function waitForBackendExit(child, timeoutMs = 15000) {
   });
 }
 
+async function startPluginBridge() {
+  try {
+    if (!pluginBridge) pluginBridge = createPluginBridge({ dataDir: uiDataRoot, getBackendBase: () => backendBase, getBackendToken: () => backendToken });
+    await pluginBridge.start(); pluginBridgeError = '';
+  }
+  catch (error) { pluginBridgeError = error.message || '插件连接服务无法启动。'; }
+  return { ...(pluginBridge?.getStatus() || { running: false, host: '127.0.0.1', port: 37861 }), error: pluginBridgeError };
+}
+
+async function startWordPluginHost() {
+  try {
+    const directory = app.isPackaged ? path.join(process.resourcesPath, 'plugins', 'word') : path.join(projectRoot, 'extensions', 'word');
+    const hostModule = require(path.join(directory, 'server.cjs'));
+    const options = { assetsRoot: path.join(directory, 'dist') };
+    const status = wordHost ? wordHost.getStatus() : hostModule.getWordHostStatus(options);
+    if (!wordHost && status.state === 'ready') wordHost = await hostModule.startWordHost(options);
+    const current = wordHost ? wordHost.getStatus() : status;
+    wordHostState = { running: Boolean(current.running), state: current.state, url: current.url,
+      message: current.state === 'certificate_missing' ? '请先按 Word 插件安装说明准备本机证书，再点击重试连接服务。'
+        : current.state === 'assets_missing' ? 'Word 插件资源未构建，请检查安装文件。' : current.running ? 'Word 插件本机服务已启动。' : 'Word 插件尚未就绪。' };
+  } catch (error) { wordHostState = { ...wordHostState, running: false, state: 'error', message: error.code === 'EADDRINUSE' ? 'Word 插件端口已被占用。' : 'Word 插件本机服务启动失败，请检查安装说明与证书。' }; }
+  return wordHostState;
+}
+
 async function stopBackendProcess() {
   if (backendStopPromise) return backendStopPromise;
   const child = backend;
@@ -658,6 +689,22 @@ async function cancelPaperStreams(event, paperId) {
 }
 
 ipcMain.handle('workbench:request', (_event, input) => requestApi(input));
+ipcMain.handle('workbench:plugin-connection', async (event, action) => {
+  if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('无效的插件连接请求。');
+  if (!['status', 'start', 'token', 'rotate'].includes(action)) throw new Error('无效的插件连接操作。');
+  if (!pluginBridge || action === 'start') await startPluginBridge();
+  await startWordPluginHost();
+  if (!pluginBridge) throw new Error(pluginBridgeError || '插件连接服务无法启动。');
+  if (action === 'rotate') await pluginBridge.rotateToken();
+  return { ...pluginBridge.getStatus(), error: pluginBridgeError, word: wordHostState, ...(action === 'token' || action === 'rotate' ? { token: pluginBridge.getToken() } : {}) };
+});
+ipcMain.handle('workbench:open-plugin-folder', async (event, kind) => {
+  if (BrowserWindow.fromWebContents(event.sender) !== mainWindow || !['browser', 'word'].includes(kind)) throw new Error('无效的插件安装文件请求。');
+  const directory = app.isPackaged ? path.join(process.resourcesPath, 'plugins', kind) : path.join(projectRoot, 'extensions', kind);
+  const error = await shell.openPath(directory);
+  if (error) throw new Error(error);
+  return true;
+});
 ipcMain.handle('workbench:set-theme-preference', (event, preference) => {
   if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('无效的主题设置请求。');
   if (!['system', 'light', 'dark'].includes(preference)) throw new Error('无效的主题设置。');
@@ -849,6 +896,8 @@ if (!gotSingleInstanceLock) {
   try {
     if (locationStartupError) throw locationStartupError;
     await startBackend();
+    await startPluginBridge();
+    await startWordPluginHost();
     createMainWindow();
     if (app.isPackaged && ['win32', 'darwin'].includes(process.platform)) setTimeout(() => void checkForUpdatesInternal().catch(() => {}), 2000).unref();
   } catch (error) {
@@ -867,9 +916,17 @@ app.on('before-quit', (event) => {
     event.preventDefault();
     return;
   }
-  if (!backend || backend.exitCode !== null) return;
+  if (pluginShutdownComplete && (!backend || backend.exitCode !== null)) return;
   event.preventDefault();
-  void stopBackendProcess().then(() => app.quit()).catch(() => {
+  if (pluginShutdownPending) return;
+  pluginShutdownPending = true;
+  void Promise.all([stopBackendProcess(), pluginBridge?.stop(), wordHost?.stop()]).then(() => {
+    pluginShutdownComplete = true;
+    pluginShutdownPending = false;
+    app.quit();
+  }).catch(() => {
+    pluginShutdownComplete = true;
+    pluginShutdownPending = false;
     if (backend && backend.exitCode === null) backend.kill();
     app.quit();
   });

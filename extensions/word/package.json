@@ -1,0 +1,20 @@
+{
+  "name": "folio-word-citations",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone Microsoft Word task pane for Folio citations",
+  "scripts": {
+    "build": "node scripts/build.cjs",
+    "start": "node server.cjs",
+    "test": "node --test tests/*.test.cjs"
+  },
+  "dependencies": {
+    "citeproc": "2.4.63",
+    "core-js": "3.50.0"
+  },
+  "devDependencies": {
+    "@babel/core": "7.28.4",
+    "@babel/preset-env": "7.28.3",
+    "esbuild": "0.28.2"
+  }
+}

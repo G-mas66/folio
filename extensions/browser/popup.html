@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Folio 文献收藏</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">LOCAL LIBRARY</p>
+      <h1>收藏到 Folio</h1>
+    </div>
+    <span id="connection-state" class="badge">检查中</span>
+  </header>
+
+  <main>
+    <section id="pair-view" class="panel" hidden>
+      <h2>连接本机 Folio</h2>
+      <p class="muted">在 Folio 设置页复制浏览器插件配对凭证，再粘贴到这里。凭证保存在此浏览器的扩展存储中。</p>
+      <form id="pair-form">
+        <label for="pair-token">配对凭证</label>
+        <input id="pair-token" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 64 位配对凭证" required>
+        <button class="primary" type="submit">配对</button>
+      </form>
+      <p id="pair-error" class="message error" role="status" hidden></p>
+    </section>
+
+    <section id="app-view" hidden>
+      <section class="panel">
+        <div class="section-heading">
+          <div>
+            <h2>当前页面</h2>
+            <p id="page-caption" class="muted">正在读取页面信息…</p>
+          </div>
+          <button id="refresh-page" class="quiet" type="button">重新读取</button>
+        </div>
+        <div id="candidate-list" class="candidate-list"></div>
+        <div class="controls">
+          <label for="folder-select">保存到</label>
+          <select id="folder-select">
+            <option value="">未分类</option>
+          </select>
+          <button id="capture-button" class="primary" type="button" disabled>收藏所选</button>
+        </div>
+        <p id="page-message" class="message" role="status" hidden></p>
+        <div id="capture-results" class="capture-results" aria-live="polite"></div>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <div>
+            <h2>Folio 书目</h2>
+            <p class="muted">查找已收藏的记录。</p>
+          </div>
+        </div>
+        <form id="search-form" class="search-row">
+          <input id="search-query" type="search" maxlength="300" placeholder="标题、作者或 DOI">
+          <button class="quiet" type="submit">搜索</button>
+        </form>
+        <div id="search-results" class="search-results"></div>
+      </section>
+
+      <footer class="footer">
+        <span>PDF 仅在你选择后读取；单个文件上限 25 MiB。</span>
+        <button id="unpair-button" class="link-button" type="button">更换配对凭证</button>
+      </footer>
+    </section>
+  </main>
+
+  <script src="shared.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,69 @@
+:root {
+  color-scheme: light;
+  font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  color: #18251f;
+  background: #f4f6f3;
+  font-size: 13px;
+}
+
+* { box-sizing: border-box; }
+body { width: 420px; max-height: 620px; margin: 0; overflow-y: auto; }
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+[hidden] { display: none !important; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 17px 18px 14px;
+  background: #e5eee7;
+  border-bottom: 1px solid #d6e1d8;
+}
+.eyebrow { margin: 0 0 4px; color: #537261; font-size: 9px; font-weight: 700; letter-spacing: .14em; }
+h1 { margin: 0; font-size: 18px; font-weight: 650; }
+h2 { margin: 0; font-size: 14px; font-weight: 650; }
+.badge { padding: 5px 9px; border-radius: 999px; background: #f2e6c9; color: #775919; font-size: 11px; white-space: nowrap; }
+.badge.good { background: #d7e9dc; color: #28613c; }
+.badge.bad { background: #f4dddd; color: #8d3333; }
+main { padding: 12px; }
+.panel { padding: 14px; margin-bottom: 10px; border: 1px solid #e2e7e2; border-radius: 10px; background: #fff; box-shadow: 0 2px 8px #1b3c2410; }
+.section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.muted { margin: 5px 0 0; color: #68766e; font-size: 11px; line-height: 1.45; }
+.quiet, .link-button { padding: 6px 8px; border: 1px solid #d6dfd8; border-radius: 6px; background: #fff; color: #315440; }
+.quiet:hover, .link-button:hover { background: #f3f7f3; }
+.primary { min-height: 34px; padding: 7px 12px; border: 0; border-radius: 6px; background: #2e6445; color: white; font-weight: 600; }
+.primary:hover { background: #245239; }
+.primary:disabled { cursor: default; opacity: .48; }
+label { color: #42534a; font-size: 11px; font-weight: 600; }
+input, select { min-height: 34px; padding: 7px 9px; border: 1px solid #d6dfd8; border-radius: 6px; background: #fff; color: inherit; }
+input:focus, select:focus { outline: 2px solid #91b79b; outline-offset: 1px; }
+#pair-form { display: grid; gap: 7px; margin-top: 13px; }
+#pair-form .primary { margin-top: 3px; }
+.candidate-list { display: grid; gap: 8px; max-height: 265px; overflow: auto; }
+.candidate { padding: 10px; border: 1px solid #e3e9e4; border-radius: 8px; background: #fcfdfb; }
+.candidate.selected { border-color: #9cbea5; background: #f5faf5; }
+.candidate-title { display: flex; align-items: flex-start; gap: 8px; }
+.candidate-title input { min-height: 0; margin: 2px 0 0; }
+.candidate-name { color: #213329; font-size: 12px; font-weight: 650; line-height: 1.4; overflow-wrap: anywhere; }
+.candidate-meta { margin: 5px 0 0 22px; color: #64736a; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.pdf-row { display: flex; align-items: center; gap: 7px; margin: 8px 0 0 22px; }
+.pdf-row label { white-space: nowrap; }
+.pdf-row select { flex: 1; min-width: 0; min-height: 30px; padding: 5px 7px; font-size: 11px; }
+.missing { display: inline-block; margin: 6px 0 0 22px; color: #8a6221; font-size: 10px; }
+.empty { padding: 14px 6px; color: #68766e; text-align: center; font-size: 11px; }
+.controls { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; margin-top: 12px; }
+.controls select { min-width: 0; }
+.message { margin: 9px 0 0; color: #41594a; font-size: 11px; line-height: 1.45; }
+.message.error { color: #9b3939; }
+.capture-results { display: grid; gap: 5px; margin-top: 8px; }
+.capture-result { padding: 7px 8px; border-radius: 6px; background: #f4f7f4; color: #405348; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.capture-result.error { background: #fff3ed; color: #8b4c2d; }
+.search-row { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
+.search-results { max-height: 160px; overflow: auto; }
+.search-item { padding: 8px 1px; border-bottom: 1px solid #edf0ed; }
+.search-item:last-child { border-bottom: 0; }
+.search-title { margin: 0; color: #213329; font-size: 11px; font-weight: 600; line-height: 1.4; }
+.search-meta { margin: 3px 0 0; color: #738078; font-size: 10px; }
+.footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 2px 2px 4px; color: #77847c; font-size: 10px; }
+.link-button { padding: 4px 0; border: 0; color: #68766e; font-size: 10px; white-space: nowrap; }

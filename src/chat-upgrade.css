@@ -11,6 +11,12 @@
 
 .chat-messages-shell > .chat-messages {
   width: 100%;
+  scrollbar-width: none;
+  scrollbar-gutter: auto;
+}
+
+.chat-messages-shell > .chat-messages::-webkit-scrollbar {
+  display: none;
 }
 
 .chat-turn-navigation {

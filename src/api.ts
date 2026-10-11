@@ -166,6 +166,8 @@ declare global {
       submitFeedback(input: FeedbackInput): Promise<{ requiresActivation: boolean }>;
       uninstallApp(): Promise<boolean>;
       getAppInfo(): Promise<StorageLocationInfo>;
+      pluginConnection(action: 'status' | 'start' | 'token' | 'rotate'): Promise<{ running: boolean; host: string; port: number; error?: string; token?: string; word?: { running: boolean; state: string; url: string; message: string } }>;
+      openPluginFolder(kind: 'browser' | 'word'): Promise<boolean>;
       getUpdateState(): Promise<UpdateState>;
       checkForUpdates(): Promise<UpdateState>;
       downloadUpdate(): Promise<UpdateState>;

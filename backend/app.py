@@ -31,11 +31,12 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
-from . import ai, free_translation
+from . import ai, free_translation, literature, research_agent
 from .ai import AIError
 from .free_translation import FreeTranslationError
 from .db import FOLDER_COLORS, connect, data_root, initialize, library_root
 from .pdf_extract import PDFProblem, detect_source_language, extract_pdf, safe_pdf_name
+from .research_skills import FULL_RESEARCH_GUIDANCE, RESEARCH_SKILL_ROUTING, RESEARCH_SKILL_TOOL, load_research_skill
 
 app = FastAPI(title="Personal Paper Workbench", docs_url=None, redoc_url=None, openapi_url=None)
 worker_task: asyncio.Task | None = None
@@ -626,6 +627,8 @@ async def queue_loop() -> None:
 async def startup() -> None:
     global worker_task
     initialize()
+    literature.ensure_tables()
+    research_agent.initialize_research_tables()
     with connect() as db:
         legacy = db.execute(
             "SELECT * FROM papers WHERE source_language = 'unknown' AND (status IN ('queued', 'translating', 'checking', 'waiting_api') OR (status = 'completed' AND (mono_pdf_file_name = '' OR dual_pdf_file_name = '')))",
@@ -659,6 +662,7 @@ async def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    await research_agent.shutdown_research_tasks()
     if worker_task:
         worker_task.cancel()
         await asyncio.gather(worker_task, return_exceptions=True)
@@ -1849,6 +1853,7 @@ async def delete_paper(paper_id: str):
     if not paper:
         raise HTTPException(status_code=404, detail="找不到这篇文献。")
     store_status(paper_id, "stopped", "文献已删除。")
+    await research_agent.cancel_research_for_paper(paper_id)
     process = pdf_processes.get(paper_id)
     if process:
         await terminate_pdf_process(process)
@@ -2070,7 +2075,7 @@ async def execute_full_prompt(
             paper["id"],
             ai.chat_completion,
             [
-                {"role": "system", "content": with_latex_rules("你是严谨的学术论文阅读助手。请根据完整原文回答用户要求；覆盖正文与附录中提供的所有内容，不要截断或臆测。事实需使用给出的 [S数字] 引用，引用对应原文页码。")},
+                {"role": "system", "content": with_latex_rules("你是严谨的学术论文阅读助手。请根据完整原文回答用户要求；覆盖正文与附录中提供的所有内容，不要截断或臆测。事实需使用给出的 [S数字] 引用，引用对应原文页码。" + FULL_RESEARCH_GUIDANCE)},
                 {"role": "user", "content": f"用户要求与重点：\n{question}\n\n以下是整篇论文的全部可提取原文，按原顺序并带页码标记。请完整阅读后直接给出最终中文回答，不要只概括开头部分。\n\n{body}"},
             ],
             operation="full_summary_single",
@@ -2302,7 +2307,7 @@ async def stream_full_prompt(
             raise AIError("missing_run", "找不到这次总结任务。")
         db.execute("UPDATE analysis_runs SET status = 'running', error = '', updated_at = ? WHERE id = ?", (now(), run_id))
     messages = [
-        {"role": "system", "content": with_latex_rules("你是严谨的学术论文阅读助手。请根据完整原文回答用户要求；覆盖正文与附录中提供的所有内容，不要截断或臆测。事实需使用给出的 [S数字] 引用，引用对应原文页码。")},
+        {"role": "system", "content": with_latex_rules("你是严谨的学术论文阅读助手。请根据完整原文回答用户要求；覆盖正文与附录中提供的所有内容，不要截断或臆测。事实需使用给出的 [S数字] 引用，引用对应原文页码。" + FULL_RESEARCH_GUIDANCE)},
         {"role": "user", "content": f"用户要求与重点：\n{run['question']}\n\n以下是整篇论文的全部可提取原文，按原顺序并带页码标记。请完整阅读后直接给出最终中文回答，不要只概括开头部分。\n\n{body}"},
     ]
     reasoning: list[str] = []
@@ -2474,7 +2479,8 @@ PAPER_TOOLS = [
     },
 ]
 PAPER_TOOLS.extend(AGENT_ACTION_TOOLS)
-LEGACY_PAPER_TOOLS = [*PAPER_TOOLS[:2], *AGENT_ACTION_TOOLS]
+PAPER_TOOLS.append(RESEARCH_SKILL_TOOL)
+LEGACY_PAPER_TOOLS = [*PAPER_TOOLS[:2], *AGENT_ACTION_TOOLS, RESEARCH_SKILL_TOOL]
 
 
 def read_paper_evidence(paper_id: str, arguments: dict[str, Any], page_count: int) -> tuple[str, dict[str, dict[str, int]]]:
@@ -3213,6 +3219,8 @@ def cancel_agent_action(paper_id: str, action_id: str):
 @app.delete("/papers/{paper_id}/chat-sessions/{session_id}", dependencies=[Depends(authorize)])
 def delete_chat_session(paper_id: str, session_id: str):
     require_paper(paper_id)
+    if research_agent.research_session_is_active(session_id):
+        raise HTTPException(status_code=409, detail="这段对话仍有深度研究任务，请先停止任务后再删除。")
     with connect() as db:
         row = db.execute(
             "SELECT id, is_default FROM chat_sessions WHERE id = ? AND paper_id = ?",
@@ -3387,6 +3395,9 @@ async def create_stream_response(
                         yield event_stream("status", {"phase": "tool", "tool": name, "query": query})
                         tool_content, found_sources = read_paper_evidence(paper_id, arguments, paper["page_count"])
                         allowed_paper_sources.update(found_sources)
+                    elif name == "load_research_skill":
+                        tool_content = load_research_skill(arguments)
+                        yield event_stream("status", {"phase": "tool", "tool": name})
                     elif name == "web_search" and web_search_enabled:
                         query = arguments.get("query", "") if isinstance(arguments, dict) else ""
                         yield event_stream("status", {"phase": "tool", "tool": name, "query": query})
@@ -3574,6 +3585,7 @@ async def chat_stream(paper_id: str, value: StreamChatInput):
             + "只引用工具或近期对话中实际提供的 [S数字] 或 [W数字] 来源，不要自编来源编号。"
             + "只有用户明确要求制作或添加批注时才调用 prepare_annotation；只有用户明确要求添加或保存笔记时才调用 prepare_note。普通解释、回答或总结请求不得创建待确认写入。批注原文引文必须来自 read_paper；若用户明确要求批注当前选区，应使用 use_selection=true，并将 quote 逐字取自当前选中文字。工具只准备草稿，不会保存批注或笔记。"
             + "\n" + selection_context_prompt(selection_context)
+            + "\n" + RESEARCH_SKILL_ROUTING
         )},
         *chat_history_messages(history, paper_id, session["id"], config[0], model),
         {"role": "user", "content": user_content},
@@ -3680,6 +3692,7 @@ async def chat(paper_id: str, value: ChatInput):
                 "该工具覆盖全部正文和附录。与本文无关的问题直接回答，不读取文献。只引用工具或近期对话中实际提供的 [S数字] 来源，不要自编来源编号。"
                 "只有用户明确要求制作或添加批注时才调用 prepare_annotation；只有用户明确要求添加或保存笔记时才调用 prepare_note。普通解释、回答或总结请求不得创建待确认写入。批注原文引文必须来自 read_paper；若用户明确要求批注当前选区，应使用 use_selection=true，并将 quote 逐字取自当前选中文字。工具只准备草稿，不会保存批注或笔记。\n"
                 + selection_context_prompt(selection_context)
+                + "\n" + RESEARCH_SKILL_ROUTING
             ),
         },
         *chat_history_messages(history, paper_id, session["id"], config[0], turn_model),
@@ -3726,6 +3739,8 @@ async def chat(paper_id: str, value: ChatInput):
                 if name == "read_paper":
                     tool_content, sources = read_paper_evidence(paper_id, arguments, paper["page_count"])
                     allowed.update(sources)
+                elif name == "load_research_skill":
+                    tool_content = load_research_skill(arguments)
                 elif name == "prepare_annotation":
                     if user_explicitly_requested_action(question, "annotation"):
                         action = prepare_annotation_action(paper, session["id"], None, arguments, selection_context)
@@ -3792,3 +3807,7 @@ async def resume_analysis(paper_id: str, run_id: str, value: StreamRequestInput 
         with connect() as db:
             db.execute("UPDATE analysis_runs SET session_id = ? WHERE id = ?", (session["id"], run_id))
     return await execute_summary(run_id)
+
+
+literature.register(app, authorize, import_pdf)
+research_agent.register(app, authorize, require_paper, read_paper_evidence, stream_config_for)

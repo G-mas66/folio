@@ -13,6 +13,10 @@ $env:TMPDIR = $env:TEMP
 New-Item -ItemType Directory -Force -Path $env:npm_config_cache, $env:ELECTRON_CACHE, $env:ELECTRON_BUILDER_CACHE, $env:TEMP | Out-Null
 Push-Location $ProjectRoot
 try {
+  npm --prefix extensions/word ci
+  if ($LASTEXITCODE -ne 0) { throw "Word plugin dependency install failed with exit code $LASTEXITCODE" }
+  npm run build:plugins
+  if ($LASTEXITCODE -ne 0) { throw "Plugin build failed with exit code $LASTEXITCODE" }
   npm run build:ui
   if ($LASTEXITCODE -ne 0) { throw "UI build failed with exit code $LASTEXITCODE" }
   npm run build:backend

@@ -28,6 +28,8 @@ const modules = [
   'review.test_chat_sessions', 'review.test_chinese_import', 'review.test_pdf_process_cleanup',
   'backend_tests.test_glossary_contract',
   'review.test_reasoning_protocol', 'backend_tests.test_agent_actions',
+  'backend_tests.test_research_skills',
+  'backend_tests.test_literature_plugin', 'backend_tests.test_research_agent',
 ];
 const env = {
   ...process.env,

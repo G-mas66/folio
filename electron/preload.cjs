@@ -34,6 +34,8 @@ contextBridge.exposeInMainWorld('workbench', Object.freeze({
   submitFeedback: (input) => ipcRenderer.invoke('workbench:submit-feedback', input),
   uninstallApp: () => ipcRenderer.invoke('workbench:uninstall-app'),
   getAppInfo: () => ipcRenderer.invoke('workbench:get-app-info'),
+  pluginConnection: (action) => ipcRenderer.invoke('workbench:plugin-connection', action),
+  openPluginFolder: (kind) => ipcRenderer.invoke('workbench:open-plugin-folder', kind),
   getUpdateState: () => ipcRenderer.invoke('workbench:get-update-state'),
   checkForUpdates: () => ipcRenderer.invoke('workbench:update-check'),
   downloadUpdate: () => ipcRenderer.invoke('workbench:update-download'),

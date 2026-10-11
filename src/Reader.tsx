@@ -11,6 +11,7 @@ import { ChatComposer, ChatAttachmentList, type ChatAttachmentView } from './Cha
 import { ChatTurnNavigation } from './ChatTurnNavigation';
 import './chat-upgrade.css';
 import { ReaderNotesPanel } from './ReaderNotesPanel';
+import { ResearchTasksPanel } from './ResearchTasksPanel';
 import { annotationMappingCandidates, normalizePdfText } from './annotationMapping';
 import { renderPdfAttachment } from './PdfAttachment';
 
@@ -1705,9 +1706,10 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
             aria-hidden={!readerLayout.chatVisible}
           >
             <PaperChats
-              paperId={paperId} active={active} visible={rightPanel === 'chat'} rightPanel={rightPanel} onRightPanelChange={setRightPanel}
+              paperId={paperId} pageCount={paper.page_count} active={active} visible={rightPanel === 'chat'} rightPanel={rightPanel} onRightPanelChange={setRightPanel}
               onJump={jumpToSource}
               settings={settings} currentModel={currentModel} modelFailure={modelFailure}
+              defaultEffort={reasoningPreferences.effort}
               onModelChange={chooseModel} onWebSearchChange={updateWebSearch}
               reasoningPreferences={reasoningPreferences} onReasoningChange={changeReasoningPreferences}
               notes={paperNotes} activeNoteId={activeNoteId}
@@ -1968,10 +1970,10 @@ type ActiveStream = {
 };
 
 type PaperChatsProps = {
-  paperId: string; active: boolean; visible: boolean;
+  paperId: string; pageCount: number; active: boolean; visible: boolean;
   rightPanel: 'chat' | 'notes'; onRightPanelChange: (panel: 'chat' | 'notes') => void;
   onJump: (source: Source) => void;
-  settings: ReaderSettings | null; currentModel: string; modelFailure: string;
+  settings: ReaderSettings | null; currentModel: string; modelFailure: string; defaultEffort: ReasoningEffort;
   onModelChange: (model: string) => Promise<void>;
   onWebSearchChange: (enabled: boolean) => Promise<void>;
   reasoningPreferences: ReasoningPreferences; onReasoningChange: (preferences: Partial<ReasoningPreferences>) => void;
@@ -1992,6 +1994,7 @@ type ChatSession = { id: string; title: string; created_at: string; selection_co
 function PaperChats(props: PaperChatsProps) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSession, setCurrentSession] = useState('');
+  const [assistantMode, setAssistantMode] = useState<'chat' | 'research'>('chat');
   const [busySessions, setBusySessions] = useState<Record<string, boolean>>({});
   const [changing, setChanging] = useState(false);
   const [failure, setFailure] = useState('');
@@ -2099,6 +2102,7 @@ function PaperChats(props: PaperChatsProps) {
       const created = await api<ChatSession>(`/papers/${props.paperId}/chat-sessions`, 'POST', {});
       setSessions((previous) => [...previous, created]);
       selectSession(created.id);
+      setAssistantMode('chat');
       props.onRightPanelChange('chat');
     } catch (error) { setFailure(errorMessage(error)); }
     finally { setChanging(false); }
@@ -2129,7 +2133,7 @@ function PaperChats(props: PaperChatsProps) {
       </div>
       <div className="chat-session-tabs" role="tablist" aria-label="文献 AI 会话">
         {sessions.map((session) => <div className={`chat-session-tab ${session.id === currentSession ? 'active' : ''}`} key={session.id}>
-          <button type="button" role="tab" aria-selected={session.id === currentSession} data-testid={`chat-session-${session.id}`} title={session.title} onClick={() => { selectSession(session.id); props.onRightPanelChange('chat'); }}>{session.title}</button>
+          <button type="button" role="tab" aria-selected={session.id === currentSession} data-testid={`chat-session-${session.id}`} title={session.title} onClick={() => { selectSession(session.id); setAssistantMode('chat'); props.onRightPanelChange('chat'); }}>{session.title}</button>
           <button type="button" className="chat-session-close" aria-label={`删除会话 ${session.title}`} title={busySessions[session.id] ? '请先停止此会话的生成' : '删除此会话'} disabled={changing || busySessions[session.id]} onClick={() => void deleteSession(session)}>×</button>
         </div>)}
       </div>
@@ -2139,9 +2143,24 @@ function PaperChats(props: PaperChatsProps) {
       {failure && <div className="chat-error" role="alert">{failure}</div>}
       {associationFailure && <div className="chat-error" role="alert">{associationFailure}{props.selectionToAssociate && <button type="button" className="secondary-button compact-button" onClick={() => { attemptedAssociationRef.current = null; setAssociationRetry((value) => value + 1); }}>重试关联</button>}</div>}
       {!sessions.length && !failure && <div className="chat-empty">正在读取会话…</div>}
-      {sessions.map((session) => <div className="chat-session-content" data-session-id={session.id} key={session.id} hidden={session.id !== currentSession}>
-        <ChatPanel {...props} sessionId={session.id} selectionContext={session.selection_context || null} onClearAssociation={clearAssociation} visible={props.visible && session.id === currentSession} onBusyChange={markBusy} />
-      </div>)}
+      {!!sessions.length && <div className="assistant-mode-switch" role="tablist" aria-label="AI 工作模式">
+        <button type="button" role="tab" data-testid="reader-chat-mode-chat" aria-selected={assistantMode === 'chat'} aria-controls={`reader-chat-mode-panel-chat-${props.paperId}`} className={assistantMode === 'chat' ? 'active' : ''} onClick={() => setAssistantMode('chat')}>聊天</button>
+        <button type="button" role="tab" data-testid="reader-chat-mode-research" aria-selected={assistantMode === 'research'} aria-controls={`reader-chat-mode-panel-research-${props.paperId}`} className={assistantMode === 'research' ? 'active' : ''} onClick={() => setAssistantMode('research')}>深度研究</button>
+      </div>}
+      <div id={`reader-chat-mode-panel-chat-${props.paperId}`} className="assistant-mode-panel" role="tabpanel" aria-labelledby="reader-chat-mode-chat" hidden={assistantMode !== 'chat'}>
+        {sessions.map((session) => <div className="chat-session-content" data-session-id={session.id} key={session.id} hidden={session.id !== currentSession}>
+          <ChatPanel {...props} sessionId={session.id} selectionContext={session.selection_context || null} onClearAssociation={clearAssociation} visible={props.visible && assistantMode === 'chat' && session.id === currentSession} onBusyChange={markBusy} />
+        </div>)}
+      </div>
+      <div id={`reader-chat-mode-panel-research-${props.paperId}`} className="assistant-mode-panel research-mode-panel" role="tabpanel" aria-labelledby="reader-chat-mode-research" hidden={assistantMode !== 'research'}>
+        {sessions.find((session) => session.id === currentSession) && <ResearchTasksPanel
+          key={`${props.paperId}:${currentSession}`}
+          paperId={props.paperId} sessionId={currentSession} active={props.active && props.visible && assistantMode === 'research'}
+          pageCount={props.pageCount} currentModel={props.currentModel} defaultEffort={props.defaultEffort}
+          selectionContext={sessions.find((session) => session.id === currentSession)?.selection_context || null}
+          onOpenPdfLocation={(page) => props.onOpenPdfLocation('original', page)}
+        />}
+      </div>
     </div>
   </>;
 }
@@ -2487,6 +2506,7 @@ function ChatPanel(props: PaperChatsProps & {
   const activeLabel = activeStream?.phase === 'tool'
     ? activeStream.tool === 'web_search' ? '正在搜索网页…'
       : activeStream.tool === 'read_paper' ? '正在读取相关原文…'
+        : activeStream.tool === 'load_research_skill' ? '正在加载研究技能…'
         : activeStream.tool === 'summarize_paper' || activeStream.runId ? '正在发送整篇原文…' : '正在使用文献工具…'
     : activeStream?.runId ? '正在发送整篇原文…' : '正在生成回答…';
 

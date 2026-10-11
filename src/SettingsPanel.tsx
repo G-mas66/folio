@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, errorMessage, StorageLocationInfo, StorageMigrationProgress, UpdateState } from './api';
+import './plugin-settings.css';
 
 type Settings = {
   base_url: string;
@@ -38,6 +39,15 @@ export function SettingsPanel({ theme, onThemeChange }: { theme: ThemePreference
   const [updateActionBusy, setUpdateActionBusy] = useState(false);
   const [updateCancelRequested, setUpdateCancelRequested] = useState(false);
   const [updateFailure, setUpdateFailure] = useState('');
+  const [pluginState, setPluginState] = useState<{ running: boolean; port: number; error?: string; token?: string; word?: { running: boolean; state: string; url: string; message: string } } | null>(null);
+  const [pluginFailure, setPluginFailure] = useState('');
+  const [pluginBusy, setPluginBusy] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void window.workbench.pluginConnection('status').then((value) => { if (active) setPluginState(value); }).catch((reason) => { if (active) setPluginFailure(errorMessage(reason)); });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -383,6 +393,38 @@ export function SettingsPanel({ theme, onThemeChange }: { theme: ThemePreference
         <button className="text-button delete-paper-button" type="button" data-testid="uninstall-app" disabled={!storageLocation.canUninstall || uninstallBusy} onClick={() => void uninstallApp()}>{uninstallBusy ? '正在启动卸载程序…' : '卸载应用'}</button>
         {uninstallFailure && <div className="notice error-notice" role="alert">{uninstallFailure}</div>}
       </section>}
+      <section className="settings-card" aria-labelledby="plugin-connection-heading">
+        <div><div className="eyebrow">收藏与引用</div><h2 id="plugin-connection-heading">浏览器与 Word 插件</h2>
+          <p className="field-help">Chrome、Edge 和 Word 插件通过配对凭证连接本机 Folio。请将凭证粘贴到插件的连接设置。</p></div>
+        <div className="update-actions">
+          <button className="secondary-button compact-button" type="button" disabled={pluginBusy} onClick={async () => {
+            setPluginBusy(true); setPluginFailure('');
+            try { setPluginState(await window.workbench.pluginConnection('token')); }
+            catch (reason) { setPluginFailure(errorMessage(reason)); }
+            finally { setPluginBusy(false); }
+          }}>查看配对凭证</button>
+          <button className="text-button" type="button" disabled={pluginBusy} onClick={async () => {
+            setPluginBusy(true); setPluginFailure('');
+            try { setPluginState(await window.workbench.pluginConnection('rotate')); }
+            catch (reason) { setPluginFailure(errorMessage(reason)); }
+            finally { setPluginBusy(false); }
+          }}>重置凭证</button>
+          {pluginState && (!pluginState.running || (pluginState.word && !pluginState.word.running)) && <button className="secondary-button compact-button" type="button" disabled={pluginBusy} onClick={async () => {
+            setPluginBusy(true); setPluginFailure('');
+            try { const state = await window.workbench.pluginConnection('start'); setPluginState((previous) => ({ ...previous, ...state })); }
+            catch (reason) { setPluginFailure(errorMessage(reason)); }
+            finally { setPluginBusy(false); }
+          }}>重试连接服务</button>}
+        </div>
+        {pluginState && <p className="field-help">{pluginState.running ? '本机连接服务已启动。' : pluginState.error || '本机连接服务尚未启动。'}重置后需要在各插件重新配对。</p>}
+        {pluginState?.word && <p className="field-help">{pluginState.word.message}</p>}
+        {pluginState?.token && <label className="field-label plugin-pairing-field">配对凭证<input aria-label="插件配对凭证" value={pluginState.token} readOnly onFocus={(event) => event.target.select()} /></label>}
+        <div className="update-actions">{(['browser', 'word'] as const).map((kind) => <button className="text-button" key={kind} type="button" onClick={() => {
+          void window.workbench.openPluginFolder(kind).catch((reason) => setPluginFailure(errorMessage(reason)));
+        }}>{kind === 'browser' ? '打开浏览器插件安装文件' : '打开 Word 插件安装文件'}</button>)}</div>
+        <p className="field-help">浏览器插件在 Chrome 或 Edge 扩展管理页选择“加载已解压的扩展程序”。Word 插件的安装步骤见安装文件中的说明。</p>
+        {pluginFailure && <p className="notice error-notice" role="alert">{pluginFailure}</p>}
+      </section>
       <div className="privacy-card">
         <h2>数据与隐私</h2>
         <p>英文文献的免费翻译会发送标题和可提取的正文文字；中文文献跳过翻译。AI 问答与总结会把所需的原文发送到你配置的服务。PDF、阅读进度、聊天、笔记和批注保存在本机。</p>

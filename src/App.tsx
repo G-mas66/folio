@@ -3,6 +3,7 @@ import { api, errorMessage, Folder, Paper, UpdateState } from './api';
 import { loadPdfDocument } from './PdfPage';
 import { Reader } from './Reader';
 import { SettingsPanel } from './SettingsPanel';
+import { BibliographyPanel } from './BibliographyPanel';
 import { getThumbnailCover, removeThumbnailCover, saveThumbnailCover } from './thumbnailCoverCache';
 
 const statusText: Record<string, string> = {
@@ -182,7 +183,7 @@ function Workbench() {
       const validTabs = [...new Set(saved.paperIds)].filter((id) => Boolean(byId[id]));
       setReaderPapers(byId);
       setReaderTabs(validTabs);
-      setActivePanel(saved.active === 'settings' || saved.active === 'library' || validTabs.includes(saved.active) ? saved.active : 'library');
+      setActivePanel(['settings', 'library', 'bibliography'].includes(saved.active) || validTabs.includes(saved.active) ? saved.active : 'library');
     }).catch((e) => {
       if (mounted) setError(errorMessage(e));
     }).finally(() => {
@@ -467,6 +468,7 @@ function Workbench() {
           <div className="brand-wordmark">Folio</div>
         </div>
         <nav className="app-tab-strip" role="tablist" aria-label="工作台标签">
+          <button className={`app-tab ${activePanel === 'bibliography' ? 'selected' : ''}`} type="button" role="tab" aria-selected={activePanel === 'bibliography'} aria-controls="bibliography-tab-panel" data-testid="bibliography-tab" onClick={() => setActivePanel('bibliography')}>书目</button>
           <button className={`app-tab library-tab ${activePanel === 'library' ? 'selected' : ''}`} type="button" role="tab" aria-selected={activePanel === 'library'} aria-controls="library-tab-panel" data-testid="library-tab" onClick={() => setActivePanel('library')}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 5.5c3.4-1.1 6.1-.7 8.5 1.1v13c-2.4-1.8-5.1-2.2-8.5-1.1v-13Zm17 0c-3.4-1.1-6.1-.7-8.5 1.1v13c2.4-1.8 5.1-2.2 8.5-1.1v-13Z" /></svg><span>文献库</span></button>
           {readerTabs.map((paperId) => {
             const paper = readerPapers[paperId];
@@ -496,6 +498,9 @@ function Workbench() {
       <div className="app-content">
         <section className="app-panel settings-app-panel" hidden={activePanel !== 'settings'}>
           {activePanel === 'settings' && <SettingsPanel theme={themePreference} onThemeChange={setThemePreference} />}
+        </section>
+        <section className="app-panel settings-app-panel" id="bibliography-tab-panel" role="tabpanel" hidden={activePanel !== 'bibliography'}>
+          {activePanel === 'bibliography' && <BibliographyPanel onOpenPaper={(id) => { void api<Paper>(`/papers/${id}`).then(openReader).catch((reason) => setError(errorMessage(reason))); }} />}
         </section>
         <section className="app-panel library-app-panel" id="library-tab-panel" role="tabpanel" hidden={activePanel !== 'library'}>
         <div className="library-workspace">
@@ -534,7 +539,9 @@ function Workbench() {
           ) : (
             <section className={dragging ? 'paper-list dragging' : 'paper-list'} role="table" aria-label="文献列表">
               <div className="paper-list-header" role="row"><span role="columnheader">文献</span><span role="columnheader">分类</span><span role="columnheader">状态</span><span role="columnheader">操作</span></div>
-              {papers.map((paper) => <PaperCard key={paper.id} paper={paper} folders={folders} onOpen={() => openReader(paper)} onAction={(action) => void paperAction(paper, action)} onEdit={() => setEditing(paper)} onDelete={() => void deletePaper(paper)} onReveal={() => void revealFile(paper)} onMove={(folderId) => void movePaper(paper, folderId)} />)}
+              {papers.map((paper) => <PaperCard key={paper.id} paper={paper} folders={folders} onOpen={() => openReader(paper)} onAction={(action) => void paperAction(paper, action)} onEdit={() => setEditing(paper)} onDelete={() => void deletePaper(paper)} onReveal={() => void revealFile(paper)} onMove={(folderId) => void movePaper(paper, folderId)} onBibliography={() => {
+                void api('/literature/capture', 'POST', { paper_id: paper.id, title: titleFor(paper), source: 'local_pdf' }).then(() => setActivePanel('bibliography')).catch((reason) => setError(errorMessage(reason)));
+              }} />)}
             </section>
           )}
           <div className="library-footer"><div><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M4 14v5h16v-5" /></svg><span>拖入 PDF 即可导入</span></div><div><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v11H3V7Z" /></svg><span>所有数据保存在本机</span></div></div>
@@ -588,8 +595,8 @@ function LibraryNavigation({ folderFilter, folders, search, unfiledCount, onSear
   );
 }
 
-function PaperCard({ paper, folders, onOpen, onAction, onEdit, onDelete, onReveal, onMove }: {
-  paper: Paper; folders: Folder[]; onOpen: () => void; onAction: (action: 'stop' | 'continue' | 'retry') => void; onEdit: () => void; onDelete: () => void; onReveal: () => void; onMove: (folderId: string | null) => void;
+function PaperCard({ paper, folders, onOpen, onAction, onEdit, onDelete, onReveal, onMove, onBibliography }: {
+  paper: Paper; folders: Folder[]; onOpen: () => void; onAction: (action: 'stop' | 'continue' | 'retry') => void; onEdit: () => void; onDelete: () => void; onReveal: () => void; onMove: (folderId: string | null) => void; onBibliography: () => void;
 }) {
   const progress = paper.pdf_progress || 0;
   const canStop = ['queued', 'translating', 'waiting_api'].includes(paper.status);
@@ -629,6 +636,7 @@ function PaperCard({ paper, folders, onOpen, onAction, onEdit, onDelete, onRevea
               {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
             </select></label>
             <button className="text-button" onClick={onEdit}>编辑标题</button>
+            <button className="text-button" type="button" onClick={onBibliography}>书目信息</button>
             <button className="text-button" type="button" onClick={onReveal}>打开文件位置</button>
             {canStop && <button className="text-button" onClick={() => onAction('stop')}>暂停</button>}
             {canContinue && <button className="text-button" onClick={() => onAction('continue')}>继续翻译</button>}
