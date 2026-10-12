@@ -468,7 +468,7 @@ function Workbench() {
           <div className="brand-wordmark">Folio</div>
         </div>
         <nav className="app-tab-strip" role="tablist" aria-label="工作台标签">
-          <button className={`app-tab ${activePanel === 'bibliography' ? 'selected' : ''}`} type="button" role="tab" aria-selected={activePanel === 'bibliography'} aria-controls="bibliography-tab-panel" data-testid="bibliography-tab" onClick={() => setActivePanel('bibliography')}>书目</button>
+          <button className={`app-tab ${activePanel === 'bibliography' ? 'selected' : ''}`} type="button" role="tab" aria-selected={activePanel === 'bibliography'} aria-controls="bibliography-tab-panel" data-testid="bibliography-tab" onClick={() => setActivePanel('bibliography')}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 3h16v18H4V3Zm3 4v2h10V7H7Zm0 4v2h10v-2H7Zm0 4v2h7v-2H7Z" /></svg><span>书目</span></button>
           <button className={`app-tab library-tab ${activePanel === 'library' ? 'selected' : ''}`} type="button" role="tab" aria-selected={activePanel === 'library'} aria-controls="library-tab-panel" data-testid="library-tab" onClick={() => setActivePanel('library')}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 5.5c3.4-1.1 6.1-.7 8.5 1.1v13c-2.4-1.8-5.1-2.2-8.5-1.1v-13Zm17 0c-3.4-1.1-6.1-.7-8.5 1.1v13c2.4-1.8 5.1-2.2 8.5-1.1v-13Z" /></svg><span>文献库</span></button>
           {readerTabs.map((paperId) => {
             const paper = readerPapers[paperId];
@@ -500,7 +500,10 @@ function Workbench() {
           {activePanel === 'settings' && <SettingsPanel theme={themePreference} onThemeChange={setThemePreference} />}
         </section>
         <section className="app-panel settings-app-panel" id="bibliography-tab-panel" role="tabpanel" hidden={activePanel !== 'bibliography'}>
-          {activePanel === 'bibliography' && <BibliographyPanel onOpenPaper={(id) => { void api<Paper>(`/papers/${id}`).then(openReader).catch((reason) => setError(errorMessage(reason))); }} />}
+          {activePanel === 'bibliography' && <BibliographyPanel folders={folders} folderFilter={folderFilter === 'recent' ? 'all' : folderFilter} onSelectFolder={setFolderFilter} onRecordsChanged={() => { void refresh(); }}
+            folderActions={<><button className="text-button" type="button" onClick={() => beginFolderDialog('create')}>新建文件夹</button>{!['all', 'unfiled', 'recent'].includes(folderFilter) && <><button className="text-button" type="button" onClick={() => beginFolderDialog('rename')}>重命名文件夹</button><button className="text-button delete-paper-button" type="button" onClick={() => void deleteFolder()}>删除文件夹</button></>}</>}
+            onOpenPaper={(id) => { void api<Paper>(`/papers/${id}`).then(openReader).catch((reason) => setError(errorMessage(reason))); }} />}
+          {activePanel === 'bibliography' && folderDialog && <FolderDialog mode={folderDialog} value={folderName} onChange={setFolderName} onClose={() => setFolderDialog(null)} onSave={() => void saveFolder()} />}
         </section>
         <section className="app-panel library-app-panel" id="library-tab-panel" role="tabpanel" hidden={activePanel !== 'library'}>
         <div className="library-workspace">
@@ -547,7 +550,7 @@ function Workbench() {
           <div className="library-footer"><div><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M4 14v5h16v-5" /></svg><span>拖入 PDF 即可导入</span></div><div><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v11H3V7Z" /></svg><span>所有数据保存在本机</span></div></div>
           {dragging && <div className="drop-overlay" aria-hidden="true"><div>松开即可导入 PDF</div></div>}
           {editing && <TitleDialog paper={editing} onClose={() => setEditing(null)} onSave={(english, chinese) => void saveTitle(editing, english, chinese)} />}
-          {folderDialog && <FolderDialog mode={folderDialog} value={folderName} onChange={setFolderName} onClose={() => setFolderDialog(null)} onSave={() => void saveFolder()} />}
+          {activePanel === 'library' && folderDialog && <FolderDialog mode={folderDialog} value={folderName} onChange={setFolderName} onClose={() => setFolderDialog(null)} onSave={() => void saveFolder()} />}
           {feedbackDialog && <FeedbackDialog
             onClose={() => setFeedbackDialog(false)}
             onSubmitted={(requiresActivation) => {

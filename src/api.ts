@@ -166,8 +166,9 @@ declare global {
       submitFeedback(input: FeedbackInput): Promise<{ requiresActivation: boolean }>;
       uninstallApp(): Promise<boolean>;
       getAppInfo(): Promise<StorageLocationInfo>;
-      pluginConnection(action: 'status' | 'start' | 'token' | 'rotate'): Promise<{ running: boolean; host: string; port: number; error?: string; token?: string; word?: { running: boolean; state: string; url: string; message: string } }>;
+      pluginConnection(action: 'status' | 'start' | 'token' | 'rotate'): Promise<{ running: boolean; host: string; port: number; error?: string; token?: string; browser?: { installed: boolean; message: string }; word?: { running: boolean; state: string; url: string; message: string } }>;
       openPluginFolder(kind: 'browser' | 'word'): Promise<boolean>;
+      wordPlugin(action: 'status' | 'install' | 'repair' | 'uninstall'): Promise<{ state: 'not_installed' | 'installed' | 'restart_required' | 'blocked'; wordFound: boolean; wordBitness: string | null; wordRunning: boolean; message: string }>;
       getUpdateState(): Promise<UpdateState>;
       checkForUpdates(): Promise<UpdateState>;
       downloadUpdate(): Promise<UpdateState>;

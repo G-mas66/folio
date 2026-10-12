@@ -43,8 +43,16 @@ function makeControl(tag, text) {
     text: text || '',
     insertions: [],
     deleted: false,
+    ranges: [],
     getRange: function () {
-      return { text: this.text, load: function () {} };
+      var control = this;
+      var range = { loaded: false, requested: false, load: function () { this.requested = true; } };
+      Object.defineProperty(range, 'text', { get: function () {
+        if (!range.loaded) throw new Error('Property text is not loaded on this Range.');
+        return control.text;
+      } });
+      this.ranges.push(range);
+      return range;
     },
     insertHtml: function (html) {
       this.insertions.push(html);
@@ -141,6 +149,9 @@ function makeTaskpane(initialState, controls, options) {
         sync: function () {
           syncCount += 1;
           if (options.syncFailure && currentRun === options.syncFailure.run && syncCount === options.syncFailure.call) return Promise.reject(new Error('Word sync failed'));
+          controls.forEach(function (control) {
+            control.ranges.forEach(function (range) { if (range.requested) range.loaded = true; });
+          });
           return Promise.resolve();
         }
       };
@@ -168,7 +179,7 @@ function makeTaskpane(initialState, controls, options) {
     '\nstyleText.en = ' + JSON.stringify(styleSources.en) + ';' +
     '\nstyleText.zh = ' + JSON.stringify(styleSources.zh) + ';' +
     '\nsearchResults = {alpha: {id: "alpha", csl: ' + JSON.stringify(alpha) + '}};' +
-    '\nglobalThis.__taskpane = {refreshDocument: refreshDocument, insertCitation: insertCitation, state: function () { return readState(); }};';
+    '\nglobalThis.__taskpane = {refreshDocument: refreshDocument, refreshCommand: folioRefreshDocument, insertCitation: insertCitation, state: function () { return readState(); }};';
   vm.runInNewContext(source + setup, context, { filename: 'taskpane.js' });
   api.taskpane = context.__taskpane;
   api.settingsValue = function () { return settingsValue; };
@@ -291,4 +302,28 @@ test('online refresh failure keeps the old CSL snapshot and reports offline fall
   assert.equal(app.state().items['record-1'].author[0].family, 'Author');
   assert.match(app.nodes.status.textContent, /Folio 当前不可用，已使用文档中保存的书目信息/);
   assert.match(app.nodes.status.textContent, /Cannot reach Folio/);
+});
+
+test('ribbon refresh completes after citation and bibliography writes', async function () {
+  var state = documentState.addCitation(documentState.emptyState(), [{ id: 'alpha', csl: alpha }], function () { return 'citation-1'; });
+  var app = makeTaskpane(state, [makeControl('folio-cite:citation-1', 'Old citation')]);
+  var completed = 0;
+  app.taskpane.refreshCommand({ completed: function () { completed += 1; } });
+  assert.equal(completed, 0);
+  await tick();
+  await tick();
+  assert.equal(completed, 1);
+  assert.equal(app.controls.filter(function (control) { return control.tag === 'folio-bibliography:v1'; }).length, 1);
+  assert.match(app.nodes.status.textContent, /刷新/);
+});
+
+test('ribbon refresh ends its command when Word sync fails', async function () {
+  var app = makeTaskpane(documentState.emptyState(), [], { syncFailure: { run: 1, call: 1 } });
+  var completed = 0;
+  app.taskpane.refreshCommand({ completed: function () { completed += 1; } });
+  await tick();
+  await tick();
+  assert.equal(completed, 1);
+  assert.match(app.nodes.status.textContent, /Word sync failed/);
+  assert.equal(app.nodes.status.className, 'status error');
 });

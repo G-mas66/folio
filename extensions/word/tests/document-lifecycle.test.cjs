@@ -33,6 +33,24 @@ function render(state, style) {
   return citationEngine.renderDocument(state, style, isGb ? styles.gb : styles.apa, isGb ? styles.zh : styles.en);
 }
 
+test('conference bibliography retains compound surnames and publication details', function () {
+  var record = {
+    id: 'unet', type: 'paper-conference',
+    title: 'UNet++: A Nested U-Net Architecture for Medical Image Segmentation',
+    author: [{ family: 'Zhou', given: 'Zongwei' }, { family: 'Rahman Siddiquee', given: 'Md Mahfuzur' }, { family: 'Tajbakhsh', given: 'Nima' }, { family: 'Liang', given: 'Jianming' }],
+    'container-title': 'Deep Learning in Medical Image Analysis and Multimodal Learning for Clinical Decision Support',
+    publisher: 'Springer International Publishing', 'publisher-place': 'Cham', page: '3-11',
+    issued: { 'date-parts': [[2018]] }, DOI: '10.1007/978-3-030-00889-5_1'
+  };
+  var state = documentState.addCitation(documentState.emptyState(), [{ id: record.id, csl: record }], function () { return 'conference'; });
+  var entry = render(state, 'gb-t-7714-2015-numeric').bibliography.entries[0];
+  assert.match(entry, /RAHMAN SIDDIQUEE M M/);
+  assert.match(entry, /\[C(?:\/OL)?\]/);
+  assert.doesNotMatch(entry, /\[A/);
+  assert.match(entry, /Cham: Springer International Publishing, 2018: 3[-–]11/);
+  assert.match(entry, /Deep Learning in Medical Image Analysis/);
+});
+
 test('reopened multi-citation document follows Word content-control order', function () {
   var state = add(add(documentState.emptyState(), 'alpha', 'first'), 'beta', 'second');
   var settingsAfterSave = JSON.stringify(state);

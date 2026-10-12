@@ -12,6 +12,8 @@ backend/build-pdf-engine/
 backend/build-macos/
 backend/build-pdf-engine-macos/
 backend/dist/
+extensions/word/native/win-x86/
+extensions/word/native/win-x64/
 backend/pdf-engine-source/
 __pycache__/
 *.py[cod]

@@ -2,6 +2,7 @@
 
 (() => {
   const MAX_PDF_BYTES = 25 * 1024 * 1024;
+  const MAX_EXPORT_BYTES = 512 * 1024;
   const MAX_CANDIDATES = 20;
   const DOI_PATTERN = /\b10\.\d{4,9}\/[\w.()/:;-]+/i;
 
@@ -43,6 +44,7 @@
   function parseAuthor(name) {
     const value = cleanText(name);
     if (!value) return null;
+    if (value.startsWith('{{') && value.endsWith('}}')) return { literal: cleanText(value.slice(2, -2)) };
     const comma = value.match(/^([^,]+),\s*(.+)$/);
     if (comma) return { given: cleanText(comma[2]), family: cleanText(comma[1]) };
     const pieces = value.split(' ');
@@ -79,6 +81,103 @@
     return match ? match[0].replace(/[.,;]+$/, '') : '';
   }
 
+  function jsonLdValues(document) {
+    const values = [];
+    for (const node of Array.from(document.querySelectorAll('script[type="application/ld+json"]')).slice(0, 30)) {
+      try {
+        const parsed = JSON.parse(node.textContent || '');
+        const queue = Array.isArray(parsed) ? parsed.slice(0, 100) : [parsed];
+        for (const value of queue) {
+          if (!value || typeof value !== 'object') continue;
+          values.push(value);
+          if (Array.isArray(value['@graph'])) values.push(...value['@graph'].filter((item) => item && typeof item === 'object').slice(0, 100));
+        }
+      } catch {}
+    }
+    return values;
+  }
+
+  function jsonLdArticle(document) {
+    return jsonLdValues(document).find((value) => {
+      const types = Array.isArray(value['@type']) ? value['@type'] : [value['@type']];
+      return types.some((type) => /article|chapter|thesis|creativework/i.test(String(type || '')))
+        && (value.headline || value.name || value.identifier || value.author);
+    }) || {};
+  }
+
+  function jsonLdName(value) {
+    if (typeof value === 'string') return cleanText(value);
+    if (Array.isArray(value)) return jsonLdName(value[0]);
+    return cleanText(value?.name || value?.alternateName || value?.headline || '');
+  }
+
+  function jsonLdAuthors(values) {
+    const authors = Array.isArray(values) ? values : values ? [values] : [];
+    return authors.map((author) => {
+      if (typeof author === 'string') return parseAuthor(author);
+      if (!author || typeof author !== 'object') return null;
+      const name = jsonLdName(author);
+      const type = String(author['@type'] || '').toLowerCase();
+      if (type === 'organization') {
+        return name ? { literal: name } : null;
+      }
+      const given = cleanText(author.givenName || author.given || '');
+      const family = cleanText(author.familyName || author.family || '');
+      return given || family ? { given, family } : (name ? parseAuthor(name) : null);
+    }).filter(Boolean).slice(0, 100);
+  }
+
+  function dedupeAuthors(authors) {
+    const seen = new Set();
+    return authors.filter((author) => {
+      const key = [author.literal || '', author.given || '', author.family || ''].join('\u0000').toLowerCase();
+      if (!key.replace(/\u0000/g, '')) return false;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 100);
+  }
+
+  function citationExports(document, baseUrl) {
+    const exports = [];
+    const seen = new Set();
+    for (const link of Array.from(document.querySelectorAll('a[href], link[href]')).slice(0, 300)) {
+      const raw = link.getAttribute('href') || '';
+      const safe = safeUrl(raw, baseUrl);
+      if (!safe || seen.has(safe)) continue;
+      const text = cleanText((link.textContent || '') + ' ' + (link.getAttribute('aria-label') || '') + ' ' + (link.getAttribute('title') || '')).toLowerCase();
+      const parsed = new URL(safe);
+      const hint = (parsed.pathname + parsed.search).toLowerCase();
+      let format = '';
+      if (/\.bib(?:tex)?(?:$|[?#])|bibtex|bib\s*tex/.test(hint + ' ' + text)) format = 'bibtex';
+      else if (/\.ris(?:$|[?#])|\bris\b|endnote/.test(hint + ' ' + text)) format = 'ris';
+      if (!format) continue;
+      seen.add(safe);
+      exports.push({ url: safe, format });
+      if (exports.length >= 5) break;
+    }
+    return exports;
+  }
+
+  function publisherAdapter(pageUrl) {
+    let host = '';
+    let path = '';
+    try {
+      const parsed = new URL(pageUrl);
+      host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+      path = parsed.pathname;
+    } catch {}
+    if (host === 'arxiv.org' || host === 'export.arxiv.org') {
+      const version = /v(\d+)(?:\.pdf)?(?:$|\/)/i.exec(path)?.[1] || '';
+      return { containerTitle: 'arXiv', publisher: 'arXiv', version: version ? 'v' + version : '' };
+    }
+    if (host === 'link.springer.com' || host.endsWith('.springer.com')) return { publisher: 'Springer Nature' };
+    if (host === 'ieeexplore.ieee.org') return { publisher: 'IEEE' };
+    if (host === 'dl.acm.org') return { publisher: 'Association for Computing Machinery' };
+    if (host === 'sciencedirect.com' || host.endsWith('.sciencedirect.com')) return { publisher: 'Elsevier' };
+    return {};
+  }
+
   function pdfCandidates(document, baseUrl, candidates = []) {
     const values = new Set();
     for (const value of candidates) {
@@ -99,30 +198,49 @@
 
   function extractPageMetadata(document, pageUrl) {
     const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute('href') || '';
-    const authors = metaValues(document, ['citation_author', 'dc.creator', 'dc.contributor.author', 'author']);
+    const jsonLd = jsonLdArticle(document);
+    const authors = metaValues(document, ['citation_author', 'citation_authors', 'dc.creator', 'dc.contributor.author', 'author']);
     const title = metaValue(document, ['citation_title', 'dc.title', 'og:title', 'twitter:title'])
+      || cleanText(jsonLd.headline || jsonLd.name || '')
       || cleanText(document.title).replace(/\s+[|–—-]\s+Google Scholar$/i, '');
     const dateValues = metaValues(document, ['citation_publication_date', 'citation_date', 'dc.date', 'date', 'article:published_time']);
-    const doiValue = metaValue(document, ['citation_doi', 'dc.identifier', 'prism.doi', 'doi']);
+    if (!dateValues.length && (jsonLd.datePublished || jsonLd.dateCreated)) dateValues.push(jsonLd.datePublished || jsonLd.dateCreated);
+    const jsonLdIdentifiers = Array.isArray(jsonLd.identifier) ? jsonLd.identifier : [jsonLd.identifier];
+    const jsonLdDoi = jsonLdIdentifiers.map((value) => typeof value === 'string' ? value : value?.value || value?.propertyID || value?.name || '').join(' ');
+    const doiValue = metaValue(document, ['citation_doi', 'dc.identifier', 'prism.doi', 'doi']) || jsonLdDoi;
     const prismUrl = metaValue(document, ['prism.url']);
-    const articleUrl = safeUrl(canonical, pageUrl) || safeUrl(prismUrl, pageUrl) || safeUrl(pageUrl);
+    const jsonLdUrl = typeof jsonLd.mainEntityOfPage === 'string' ? jsonLd.mainEntityOfPage : jsonLd.mainEntityOfPage?.['@id'];
+    const articleUrl = safeUrl(canonical, pageUrl) || safeUrl(jsonLdUrl, pageUrl) || safeUrl(prismUrl, pageUrl) || safeUrl(pageUrl);
     const pdfValues = metaValues(document, ['citation_pdf_url', 'pdf_url']);
-    const journalTitle = metaValue(document, ['citation_journal_title']);
-    const conferenceTitle = metaValue(document, ['citation_conference_title']);
-    const otherContainer = metaValue(document, ['dc.source', 'prism.publicationName']);
-    const containerTitle = conferenceTitle || journalTitle || otherContainer;
-    const volume = metaValue(document, ['citation_volume', 'prism.volume']);
-    const issue = metaValue(document, ['citation_issue', 'prism.number']);
-    const firstPage = metaValue(document, ['citation_firstpage', 'citation_start_page', 'prism.startingPage']);
-    const lastPage = metaValue(document, ['citation_lastpage', 'citation_end_page', 'prism.endingPage']);
+    const journalTitle = metaValue(document, ['citation_journal_title', 'prism.publicationName']);
+    const conferenceTitle = metaValue(document, ['citation_conference_title', 'citation_inbook_title']);
+    const jsonLdContainer = jsonLdName(jsonLd.isPartOf || jsonLd.publication || jsonLd.book);
+    const otherContainer = metaValue(document, ['dc.source', 'citation_series_title']);
+    const adapter = publisherAdapter(articleUrl || pageUrl);
+    const containerTitle = conferenceTitle || journalTitle || otherContainer || jsonLdContainer || adapter.containerTitle || '';
+    const volume = metaValue(document, ['citation_volume', 'prism.volume']) || jsonLd.volumeNumber || '';
+    const issue = metaValue(document, ['citation_issue', 'prism.number']) || jsonLd.issueNumber || '';
+    const firstPage = metaValue(document, ['citation_firstpage', 'citation_start_page', 'prism.startingPage']) || jsonLd.pageStart || '';
+    const lastPage = metaValue(document, ['citation_lastpage', 'citation_end_page', 'prism.endingPage']) || jsonLd.pageEnd || '';
+    const publisher = metaValue(document, ['citation_publisher', 'dc.publisher', 'prism.publisher']) || jsonLdName(jsonLd.publisher) || adapter.publisher || '';
+    const publisherPlace = metaValue(document, ['citation_publication_place', 'citation_place_of_publication', 'dc.publisher.place', 'dc.coverage.spatial'])
+      || jsonLdName(jsonLd.locationCreated || jsonLd.contentLocation || jsonLd.location);
+    const versionLabel = metaValue(document, ['citation_version', 'version', 'prism.version']) || adapter.version || (jsonLd.version ? String(jsonLd.version) : '');
     const bodyText = document.body?.innerText || document.body?.textContent || '';
     const doi = doiFrom(doiValue) || doiFrom(bodyText);
     const pageYear = yearFrom(dateValues);
-    const itemType = conferenceTitle ? 'paper-conference' : containerTitle ? 'journal-article' : 'article';
-    const pdfs = pdfCandidates(document, articleUrl || pageUrl, pdfValues);
+    const jsonTypes = Array.isArray(jsonLd['@type']) ? jsonLd['@type'].join(' ') : String(jsonLd['@type'] || '');
+    const itemType = /conference|event/i.test(jsonTypes) || conferenceTitle ? 'paper-conference'
+      : /bookchapter|chapter/i.test(jsonTypes) ? 'chapter'
+        : /\bbook\b/i.test(jsonTypes) ? 'book'
+          : containerTitle ? 'journal-article' : 'article';
+    const pdfs = pdfCandidates(document, articleUrl || pageUrl, [...pdfValues, jsonLd.encoding?.contentUrl || jsonLd.associatedMedia?.contentUrl || '']);
+    const parsedMetaAuthors = parseAuthors(authors);
+    const parsedJsonAuthors = jsonLdAuthors(jsonLd.author);
+    const mergedAuthors = dedupeAuthors(parsedMetaAuthors.length ? parsedMetaAuthors : parsedJsonAuthors);
     return {
       title,
-      authors: parseAuthors(authors),
+      authors: mergedAuthors,
       year: pageYear,
       container_title: containerTitle,
       doi,
@@ -133,8 +251,79 @@
       issue,
       pages: firstPage && lastPage ? firstPage + '-' + lastPage : (firstPage || lastPage),
       item_type: itemType,
+      publisher,
+      publisher_place: publisherPlace,
+      version_label: versionLabel,
+      citation_exports: citationExports(document, articleUrl || pageUrl),
       source: 'browser',
     };
+  }
+
+  function cslYear(record) {
+    const parts = record?.issued?.['date-parts']?.[0] || record?.['original-date']?.['date-parts']?.[0] || [];
+    return Number.isInteger(Number(parts[0])) ? Number(parts[0]) : null;
+  }
+
+  function candidateFromCsl(record, sourceCitation = '', source = 'bibtex') {
+    const value = record && typeof record === 'object' ? record : {};
+    const authors = Array.isArray(value.author) ? value.author.map((author) => ({
+      ...(author.literal ? { literal: cleanText(author.literal) } : {}),
+      ...(author.given ? { given: cleanText(author.given) } : {}),
+      ...(author.family ? { family: cleanText(author.family) } : {}),
+    })).filter((author) => author.literal || author.given || author.family) : [];
+    const container = value['container-title'] || value['collection-title'] || value['event-title'] || '';
+    const itemType = value.type === 'article-journal' ? 'journal-article' : value.type || 'article';
+    const url = safeUrl(value.URL || value.url || '');
+    const doi = doiFrom(value.DOI || value.doi || '');
+    return {
+      title: cleanText(value.title || ''),
+      authors,
+      year: cslYear(value),
+      container_title: cleanText(Array.isArray(container) ? container[0] : container),
+      doi,
+      url,
+      pdf_url: '',
+      pdf_candidates: [],
+      volume: cleanText(value.volume || ''),
+      issue: cleanText(value.issue || ''),
+      pages: cleanText(value.page || ''),
+      item_type: itemType,
+      publisher: cleanText(value.publisher || ''),
+      publisher_place: cleanText(value['publisher-place'] || ''),
+      version_label: cleanText(value.version || value['version-label'] || ''),
+      source_citation: sourceCitation,
+      csl: value,
+      source,
+      citation_exports: [],
+    };
+  }
+
+  function cslRecord(item) {
+    if (item?.csl && typeof item.csl === 'object' && !Array.isArray(item.csl)) return item.csl;
+    const type = item?.item_type === 'journal-article' ? 'article-journal'
+      : item?.item_type === 'paper-conference' ? 'paper-conference'
+        : item?.item_type || 'article-journal';
+    const authors = Array.isArray(item?.authors) ? item.authors.map((author) => ({
+      ...(author.literal ? { literal: cleanText(author.literal) } : {}),
+      ...(author.given ? { given: cleanText(author.given) } : {}),
+      ...(author.family ? { family: cleanText(author.family) } : {}),
+    })).filter((author) => author.literal || author.given || author.family) : [];
+    const record = {
+      type,
+      title: cleanText(item?.title || ''),
+      author: authors,
+    };
+    if (item?.container_title) record['container-title'] = cleanText(item.container_title);
+    if (item?.doi) record.DOI = cleanText(item.doi);
+    if (item?.url) record.URL = safeUrl(item.url);
+    if (item?.year) record.issued = { 'date-parts': [[Number(item.year)]] };
+    for (const [source, target] of [
+      ['volume', 'volume'], ['issue', 'issue'], ['pages', 'page'], ['publisher', 'publisher'],
+      ['publisher_place', 'publisher-place'], ['version_label', 'version'],
+    ]) {
+      if (item?.[source]) record[target] = cleanText(item[source]);
+    }
+    return record;
   }
 
   function extractScholarResults(document) {
@@ -274,13 +463,64 @@
     }
   }
 
+  async function downloadCitationExport(url, { fetchImpl = globalThis.fetch, timeoutMs = 15000 } = {}) {
+    const safe = safeUrl(url);
+    if (!safe) throw new Error('BibTeX/RIS 链接不安全或无效。');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetchImpl(safe, {
+        method: 'GET', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer',
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error('文献导出下载失败（HTTP ' + response.status + '）。');
+      const length = Number(response.headers.get('content-length') || 0);
+      if (Number.isFinite(length) && length > MAX_EXPORT_BYTES) throw new Error('BibTeX/RIS 文件超过 512 KiB 限制。');
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('无法读取文献导出文件。');
+      const chunks = [];
+      let size = 0;
+      try {
+        while (true) {
+          const part = await reader.read();
+          if (part.done) break;
+          size += part.value.byteLength;
+          if (size > MAX_EXPORT_BYTES) {
+            await reader.cancel();
+            throw new Error('BibTeX/RIS 文件超过 512 KiB 限制。');
+          }
+          chunks.push(part.value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      if (!size) throw new Error('文献导出文件为空。');
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return new TextDecoder('utf-8').decode(bytes);
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error('文献导出下载超时，请稍后重试。');
+      if (error instanceof TypeError) throw new Error('文献导出请求失败。若链接会跳转，请打开来源页面后重试。');
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   const api = {
     MAX_PDF_BYTES,
+    MAX_EXPORT_BYTES,
     MAX_CANDIDATES,
     cleanText,
     safeUrl,
     parseAuthors,
     doiFrom,
+    candidateFromCsl,
+    cslRecord,
     extractPageMetadata,
     extractScholarResults,
     extractPage,
@@ -288,6 +528,7 @@
     fileNameFromUrl,
     encodeBase64,
     downloadPdf,
+    downloadCitationExport,
   };
   globalThis.FolioCapture = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

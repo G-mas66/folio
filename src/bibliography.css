@@ -1,5 +1,18 @@
 .bibliography-toolbar, .bibliography-item, .bibliography-item-actions { display: flex; gap: 12px; align-items: center; }
 .bibliography-toolbar { margin-bottom: 20px; }
+.bibliography-workspace { display: flex; min-height: 100%; }
+.bibliography-sidebar { flex: 0 0 220px; padding: 24px 16px; }
+.bibliography-sidebar h2 { margin: 0 10px 16px; font-size: 15px; }
+.bibliography-folder { display: flex; align-items: center; gap: 9px; width: 100%; border: 0; padding: 11px 12px; border-radius: 7px; background: transparent; color: var(--ink); text-align: left; cursor: pointer; font: inherit; }
+.bibliography-folder.selected { background: var(--paper); box-shadow: inset 0 0 0 1px var(--line); }
+.bibliography-folder svg { width: 18px; height: 18px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.5; }
+.bibliography-folder span { overflow-wrap: anywhere; }
+.bibliography-panel { flex: 1; min-width: 0; }
+.bibliography-folder-picker { display: grid; gap: 4px; font-size: 12px; }
+.bibliography-folder-picker select { max-width: 180px; background: var(--paper); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 7px; }
+.citation-preview-text { line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; }
+.supplement-field { display: flex; gap: 9px; align-items: flex-start; margin: 14px 0; }
+.supplement-field > span { display: grid; gap: 5px; overflow-wrap: anywhere; }
 .bibliography-toolbar input { flex: 1; min-width: 160px; }
 .bibliography-list { display: grid; gap: 14px; }
 .bibliography-panel .bibliography-item { display: flex; justify-content: space-between; }

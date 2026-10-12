@@ -93,6 +93,58 @@ test('page extraction reads common citation metadata while leaving absent fields
   assert.equal(result.pages, '');
 });
 
+test('page extraction preserves structured authors, publisher data, arXiv versions, and citation export links', () => {
+  const jsonLd = {
+    '@type': 'ScholarlyArticle',
+    headline: 'A Structured Article',
+    author: { '@type': 'Person', givenName: 'Md Mahfuzur', familyName: 'Rahman Siddiquee' },
+    datePublished: '2024-05-01',
+    publisher: { '@type': 'Organization', name: 'Example Press' },
+    locationCreated: { '@type': 'Place', name: 'Oxford' },
+    isPartOf: { '@type': 'Periodical', name: 'Journal of Metadata' },
+    volumeNumber: '12',
+    pageStart: '101',
+    pageEnd: '118',
+    version: '3',
+  };
+  const exports = [
+    link('/export.bib', 'Download BibTeX'),
+    link('/export.ris', 'RIS'),
+  ];
+  const document = {
+    title: 'Article page',
+    body: { textContent: '' },
+    querySelectorAll(selector) {
+      if (selector.startsWith('meta')) return [];
+      if (selector === 'script[type="application/ld+json"]') return [{ textContent: JSON.stringify(jsonLd) }];
+      if (selector === 'a[href], link[href]') return exports;
+      return [];
+    },
+    querySelector: () => null,
+  };
+  const result = FolioCapture.extractPageMetadata(document, 'https://publisher.example/article/42');
+  assert.deepEqual(result.authors, [{ given: 'Md Mahfuzur', family: 'Rahman Siddiquee' }]);
+  assert.equal(result.title, 'A Structured Article');
+  assert.equal(result.container_title, 'Journal of Metadata');
+  assert.equal(result.publisher, 'Example Press');
+  assert.equal(result.publisher_place, 'Oxford');
+  assert.equal(result.pages, '101-118');
+  assert.equal(result.version_label, '3');
+  assert.deepEqual(result.citation_exports, [
+    { url: 'https://publisher.example/export.bib', format: 'bibtex' },
+    { url: 'https://publisher.example/export.ris', format: 'ris' },
+  ]);
+
+  const empty = {
+    title: '', body: { textContent: '' },
+    querySelectorAll: () => [], querySelector: () => null,
+  };
+  const arxiv = FolioCapture.extractPageMetadata(empty, 'https://arxiv.org/abs/2401.12345v2');
+  assert.equal(arxiv.container_title, 'arXiv');
+  assert.equal(arxiv.publisher, 'arXiv');
+  assert.equal(arxiv.version_label, 'v2');
+});
+
 test('PRISM URL is an article link fallback and never a PDF candidate', () => {
   const metas = [meta('prism.url', 'https://publisher.example/article/123')];
   const document = {
@@ -205,4 +257,22 @@ test('PDF download refuses redirects and suggests opening the final PDF URL', as
     /直接打开最终 PDF 地址后重试/,
   );
   assert.deepEqual(requests, [{ url: 'https://example.org/paper.pdf', redirect: 'error' }]);
+});
+
+test('citation export download uses no cookies and enforces its streaming size limit', async () => {
+  let options;
+  const text = '@article{sample, title={A citation}}';
+  const downloaded = await FolioCapture.downloadCitationExport('https://publisher.example/export.bib', {
+    fetchImpl: async (_url, requestOptions) => {
+      options = requestOptions;
+      return new Response(text, { status: 200 });
+    },
+  });
+  assert.equal(downloaded, text);
+  assert.equal(options.credentials, 'omit');
+  assert.equal(options.redirect, 'error');
+
+  await assert.rejects(FolioCapture.downloadCitationExport('https://publisher.example/large.ris', {
+    fetchImpl: async () => new Response('x'.repeat(FolioCapture.MAX_EXPORT_BYTES + 1), { status: 200 }),
+  }), /超过 512 KiB/);
 });

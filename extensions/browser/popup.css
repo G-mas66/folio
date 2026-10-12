@@ -38,8 +38,6 @@ main { padding: 12px; }
 label { color: #42534a; font-size: 11px; font-weight: 600; }
 input, select { min-height: 34px; padding: 7px 9px; border: 1px solid #d6dfd8; border-radius: 6px; background: #fff; color: inherit; }
 input:focus, select:focus { outline: 2px solid #91b79b; outline-offset: 1px; }
-#pair-form { display: grid; gap: 7px; margin-top: 13px; }
-#pair-form .primary { margin-top: 3px; }
 .candidate-list { display: grid; gap: 8px; max-height: 265px; overflow: auto; }
 .candidate { padding: 10px; border: 1px solid #e3e9e4; border-radius: 8px; background: #fcfdfb; }
 .candidate.selected { border-color: #9cbea5; background: #f5faf5; }
@@ -54,11 +52,17 @@ input:focus, select:focus { outline: 2px solid #91b79b; outline-offset: 1px; }
 .empty { padding: 14px 6px; color: #68766e; text-align: center; font-size: 11px; }
 .controls { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; margin-top: 12px; }
 .controls select { min-width: 0; }
+.citation-controls { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 8px; margin-top: 8px; }
+.citation-controls select { min-width: 0; min-height: 30px; padding: 5px 7px; font-size: 11px; }
 .message { margin: 9px 0 0; color: #41594a; font-size: 11px; line-height: 1.45; }
 .message.error { color: #9b3939; }
 .capture-results { display: grid; gap: 5px; margin-top: 8px; }
 .capture-result { padding: 7px 8px; border-radius: 6px; background: #f4f7f4; color: #405348; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
 .capture-result.error { background: #fff3ed; color: #8b4c2d; }
+.capture-result p { margin: 0; }
+.capture-result .quiet { margin-top: 6px; }
+.citation-preview { margin-top: 6px !important; padding: 6px 7px; border-left: 2px solid #a9c5b0; background: #fff; color: #526259; white-space: pre-wrap; }
+.export-button { display: block; margin: 7px 0 0 22px; padding: 5px 7px; border: 1px solid #d6dfd8; border-radius: 6px; background: #fff; color: #315440; font-size: 10px; }
 .search-row { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
 .search-results { max-height: 160px; overflow: auto; }
 .search-item { padding: 8px 1px; border-bottom: 1px solid #edf0ed; }

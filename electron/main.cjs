@@ -12,7 +12,8 @@ const { classifyUpdateError, createUpdateChecker, updateCheckErrorMessage } = re
 const { checkForUpdatesWithApiFallback } = require('./update-api.cjs');
 const { appInfoFields, requestUninstall, submitFeedback } = require('./app-actions.cjs');
 const { releaseNotesText, selectMacUpdate } = require('./update-service.cjs');
-const { createPluginBridge } = require('./plugin-bridge.cjs');
+const { createPluginBridge, createNativeMessagingBridge } = require('./plugin-bridge.cjs');
+const { registerBrowserHost } = require('./browser-install.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
 const legacyWindowsRoot = 'D:\\个人工作台';
@@ -65,6 +66,8 @@ let backendToken;
 let backendBase;
 let pluginBridge;
 let pluginBridgeError = '';
+let nativeBridge;
+let browserHostState = { installed: false, message: '浏览器自动连接尚未启动。' };
 let wordHost;
 let pluginShutdownComplete = false;
 let pluginShutdownPending = false;
@@ -389,6 +392,9 @@ async function startBackend() {
       ? path.join(process.resourcesPath, 'pdf-engine-assets', 'babeldoc')
       : path.join(projectRoot, 'backend', 'pdf_engine_assets', 'babeldoc'),
     WORKBENCH_PDF_ENGINE_HOME: path.join(dataRoot, '.pdf-engine-home'),
+    WORKBENCH_CITATION_EXECUTABLE: process.execPath,
+    WORKBENCH_CITATION_SCRIPT: app.isPackaged ? path.join(process.resourcesPath, 'citation', 'electron', 'citation-cli.cjs') : path.join(projectRoot, 'electron', 'citation-cli.cjs'),
+    WORKBENCH_CITATION_STYLES: app.isPackaged ? path.join(process.resourcesPath, 'plugins', 'word', 'styles') : path.join(projectRoot, 'extensions', 'word', 'styles'),
   };
   if (app.isPackaged) {
     backend = spawn(path.join(process.resourcesPath, 'backend', process.platform === 'win32' ? 'workbench-service.exe' : 'workbench-service'), [], {
@@ -430,10 +436,25 @@ function waitForBackendExit(child, timeoutMs = 15000) {
 
 async function startPluginBridge() {
   try {
-    if (!pluginBridge) pluginBridge = createPluginBridge({ dataDir: uiDataRoot, getBackendBase: () => backendBase, getBackendToken: () => backendToken });
+    if (!pluginBridge) pluginBridge = createPluginBridge({ dataDir: uiDataRoot, getBackendBase: () => backendBase, getBackendToken: () => backendToken, port: process.env.WORKBENCH_PLUGIN_PORT === undefined ? undefined : Number(process.env.WORKBENCH_PLUGIN_PORT) });
     await pluginBridge.start(); pluginBridgeError = '';
+  } catch (error) { pluginBridgeError = error.message || '旧版插件连接服务无法启动。'; }
+  try {
+    if (process.platform === 'win32') {
+      if (!nativeBridge) nativeBridge = createNativeMessagingBridge({ getBackendBase: () => backendBase, getBackendToken: () => backendToken,
+        pipeName: process.env.WORKBENCH_NATIVE_PIPE_NAME, secretPath: process.env.WORKBENCH_NATIVE_SECRET_PATH });
+      await nativeBridge.start();
+      if (process.env.WORKBENCH_NATIVE_REGISTRATION !== '0') {
+        browserHostState = await registerBrowserHost({
+          executable: app.isPackaged ? path.join(process.resourcesPath, 'backend', 'folio-browser-native-host.exe') : path.join(projectRoot, 'backend', 'dist', 'folio-browser-native-host.exe'),
+          originsFile: app.isPackaged ? path.join(process.resourcesPath, 'plugins', 'browser', 'native-host-allowed-origins.json') : path.join(projectRoot, 'extensions', 'browser', 'native-host-allowed-origins.json'),
+          directory: path.join(uiDataRoot, 'browser-native-host'),
+          development: !app.isPackaged || process.argv.includes('--folio-development-extensions'),
+        });
+      }
+    }
   }
-  catch (error) { pluginBridgeError = error.message || '插件连接服务无法启动。'; }
+  catch (error) { browserHostState = { installed: false, message: error.message || '浏览器自动连接无法启动。' }; }
   return { ...(pluginBridge?.getStatus() || { running: false, host: '127.0.0.1', port: 37861 }), error: pluginBridgeError };
 }
 
@@ -693,10 +714,10 @@ ipcMain.handle('workbench:plugin-connection', async (event, action) => {
   if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('无效的插件连接请求。');
   if (!['status', 'start', 'token', 'rotate'].includes(action)) throw new Error('无效的插件连接操作。');
   if (!pluginBridge || action === 'start') await startPluginBridge();
-  await startWordPluginHost();
+  if (action === 'token' || action === 'rotate') await startWordPluginHost();
   if (!pluginBridge) throw new Error(pluginBridgeError || '插件连接服务无法启动。');
   if (action === 'rotate') await pluginBridge.rotateToken();
-  return { ...pluginBridge.getStatus(), error: pluginBridgeError, word: wordHostState, ...(action === 'token' || action === 'rotate' ? { token: pluginBridge.getToken() } : {}) };
+  return { ...pluginBridge.getStatus(), error: pluginBridgeError, browser: browserHostState, word: wordHostState, ...(action === 'token' || action === 'rotate' ? { token: pluginBridge.getToken() } : {}) };
 });
 ipcMain.handle('workbench:open-plugin-folder', async (event, kind) => {
   if (BrowserWindow.fromWebContents(event.sender) !== mainWindow || !['browser', 'word'].includes(kind)) throw new Error('无效的插件安装文件请求。');
@@ -704,6 +725,14 @@ ipcMain.handle('workbench:open-plugin-folder', async (event, kind) => {
   const error = await shell.openPath(directory);
   if (error) throw new Error(error);
   return true;
+});
+ipcMain.handle('workbench:word-plugin', async (event, action) => {
+  if (BrowserWindow.fromWebContents(event.sender) !== mainWindow || !['status', 'install', 'repair', 'uninstall'].includes(action)) throw new Error('无效的 Word 插件操作。');
+  const installer = require('./word-install.cjs');
+  const options = { bundledRoot: app.isPackaged ? path.join(process.resourcesPath, 'plugins', 'word', 'native') : path.join(projectRoot, 'extensions', 'word', 'native'), localAppData: process.env.LOCALAPPDATA || app.getPath('appData') };
+  const methods = { status: 'getWordPluginStatus', install: 'installWordPlugin', repair: 'repairWordPlugin', uninstall: 'uninstallWordPlugin' };
+  if (action !== 'status') await startPluginBridge();
+  return installer[methods[action]](options);
 });
 ipcMain.handle('workbench:set-theme-preference', (event, preference) => {
   if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) throw new Error('无效的主题设置请求。');
@@ -897,7 +926,7 @@ if (!gotSingleInstanceLock) {
     if (locationStartupError) throw locationStartupError;
     await startBackend();
     await startPluginBridge();
-    await startWordPluginHost();
+    // The local Word add-in uses the authenticated native bridge.
     createMainWindow();
     if (app.isPackaged && ['win32', 'darwin'].includes(process.platform)) setTimeout(() => void checkForUpdatesInternal().catch(() => {}), 2000).unref();
   } catch (error) {
@@ -920,7 +949,7 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   if (pluginShutdownPending) return;
   pluginShutdownPending = true;
-  void Promise.all([stopBackendProcess(), pluginBridge?.stop(), wordHost?.stop()]).then(() => {
+  void Promise.all([stopBackendProcess(), pluginBridge?.stop(), nativeBridge?.stop(), wordHost?.stop()]).then(() => {
     pluginShutdownComplete = true;
     pluginShutdownPending = false;
     app.quit();

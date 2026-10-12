@@ -11,6 +11,7 @@ const root = path.resolve(__dirname, '..');
 const output = path.join(root, '.review', `research-plugins-${Date.now()}`);
 const data = path.join(output, 'data');
 const env = { ...process.env, WORKBENCH_DATA_DIR: data, WORKBENCH_CREDENTIAL_ROOT: data,
+  WORKBENCH_NATIVE_REGISTRATION: '0',
   WORKBENCH_LOCATION_CONFIG: path.join(output, 'location.json'), APPDATA: path.join(output, 'profile'),
   LOCALAPPDATA: path.join(output, 'local-profile'), USERPROFILE: path.join(output, 'user'),
   TEMP: path.join(output, 'temp'), TMP: path.join(output, 'temp'), PYTHONIOENCODING: 'utf-8' };

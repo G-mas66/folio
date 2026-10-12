@@ -39,6 +39,6 @@ SOFTWARE.
 
 ## Word citation add-in
 
-The bundled Word task pane includes citeproc-js (npm citeproc 2.4.63) by Frank Bennett, distributed under CPAL 1.0 with visible attribution, and core-js 3.50.0 under MIT. The original notices and full license texts are included under `plugins/word/`.
+The shared Folio citation renderer and bundled Word task pane include citeproc-js (npm citeproc 2.4.63) by Frank Bennett, distributed under CPAL 1.0 with visible attribution. The Word task pane also includes core-js 3.50.0 under MIT. The original notices and full license texts are included under `plugins/word/`.
 
 Bundled APA 7, GB/T 7714-2015 CSL styles and locale files retain their author notices and Creative Commons Attribution-ShareAlike 3.0 licenses. Their source attribution, license texts and usage details are provided in `plugins/word/THIRD-PARTY-NOTICES.md` and the files themselves.

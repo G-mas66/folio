@@ -17,6 +17,10 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Word plugin dependency install failed with exit code $LASTEXITCODE" }
   npm run build:plugins
   if ($LASTEXITCODE -ne 0) { throw "Plugin build failed with exit code $LASTEXITCODE" }
+  & (Join-Path $PSScriptRoot 'build-browser-native-host.ps1')
+  if ($LASTEXITCODE -ne 0) { throw "Browser native host build failed with exit code $LASTEXITCODE" }
+  & (Join-Path $ProjectRoot 'extensions/word/native/build.ps1')
+  if ($LASTEXITCODE -ne 0) { throw "Word native add-in build failed with exit code $LASTEXITCODE" }
   npm run build:ui
   if ($LASTEXITCODE -ne 0) { throw "UI build failed with exit code $LASTEXITCODE" }
   npm run build:backend

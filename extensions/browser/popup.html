@@ -16,18 +16,7 @@
   </header>
 
   <main>
-    <section id="pair-view" class="panel" hidden>
-      <h2>连接本机 Folio</h2>
-      <p class="muted">在 Folio 设置页复制浏览器插件配对凭证，再粘贴到这里。凭证保存在此浏览器的扩展存储中。</p>
-      <form id="pair-form">
-        <label for="pair-token">配对凭证</label>
-        <input id="pair-token" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 64 位配对凭证" required>
-        <button class="primary" type="submit">配对</button>
-      </form>
-      <p id="pair-error" class="message error" role="status" hidden></p>
-    </section>
-
-    <section id="app-view" hidden>
+    <section id="app-view">
       <section class="panel">
         <div class="section-heading">
           <div>
@@ -43,6 +32,13 @@
             <option value="">未分类</option>
           </select>
           <button id="capture-button" class="primary" type="button" disabled>收藏所选</button>
+        </div>
+        <div class="citation-controls">
+          <label for="citation-style">引用格式</label>
+          <select id="citation-style">
+            <option value="gb-t-7714-2015-numeric">GB/T 7714-2015（顺序编码）</option>
+            <option value="apa">APA</option>
+          </select>
         </div>
         <p id="page-message" class="message" role="status" hidden></p>
         <div id="capture-results" class="capture-results" aria-live="polite"></div>
@@ -64,7 +60,7 @@
 
       <footer class="footer">
         <span>PDF 仅在你选择后读取；单个文件上限 25 MiB。</span>
-        <button id="unpair-button" class="link-button" type="button">更换配对凭证</button>
+        <button id="reconnect-button" class="link-button" type="button">重试连接</button>
       </footer>
     </section>
   </main>

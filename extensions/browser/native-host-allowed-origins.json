@@ -1,0 +1,9 @@
+{
+  "development": [
+    "chrome-extension://gdiemkjipojgcalgibamhjaffbbnpfco/",
+    "chrome-extension://gimnkmpfcblogmkkamdlpejgleeiidpb/"
+  ],
+  "production": [
+    "chrome-extension://gimnkmpfcblogmkkamdlpejgleeiidpb/"
+  ]
+}

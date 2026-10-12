@@ -39,13 +39,15 @@ export function SettingsPanel({ theme, onThemeChange }: { theme: ThemePreference
   const [updateActionBusy, setUpdateActionBusy] = useState(false);
   const [updateCancelRequested, setUpdateCancelRequested] = useState(false);
   const [updateFailure, setUpdateFailure] = useState('');
-  const [pluginState, setPluginState] = useState<{ running: boolean; port: number; error?: string; token?: string; word?: { running: boolean; state: string; url: string; message: string } } | null>(null);
+  const [pluginState, setPluginState] = useState<{ running: boolean; port: number; error?: string; token?: string; browser?: { installed: boolean; message: string }; word?: { running: boolean; state: string; url: string; message: string } } | null>(null);
   const [pluginFailure, setPluginFailure] = useState('');
   const [pluginBusy, setPluginBusy] = useState(false);
+  const [wordPluginState, setWordPluginState] = useState<Awaited<ReturnType<typeof window.workbench.wordPlugin>> | null>(null);
 
   useEffect(() => {
     let active = true;
     void window.workbench.pluginConnection('status').then((value) => { if (active) setPluginState(value); }).catch((reason) => { if (active) setPluginFailure(errorMessage(reason)); });
+    void window.workbench.wordPlugin('status').then(value => { if (active) setWordPluginState(value); }).catch(reason => { if (active) setPluginFailure(errorMessage(reason)); });
     return () => { active = false; };
   }, []);
 
@@ -395,34 +397,30 @@ export function SettingsPanel({ theme, onThemeChange }: { theme: ThemePreference
       </section>}
       <section className="settings-card" aria-labelledby="plugin-connection-heading">
         <div><div className="eyebrow">收藏与引用</div><h2 id="plugin-connection-heading">浏览器与 Word 插件</h2>
-          <p className="field-help">Chrome、Edge 和 Word 插件通过配对凭证连接本机 Folio。请将凭证粘贴到插件的连接设置。</p></div>
+          <p className="field-help">Chrome／Edge 扩展会自动连接正在运行的 Folio，无需填写配对凭证。</p></div>
         <div className="update-actions">
-          <button className="secondary-button compact-button" type="button" disabled={pluginBusy} onClick={async () => {
-            setPluginBusy(true); setPluginFailure('');
-            try { setPluginState(await window.workbench.pluginConnection('token')); }
-            catch (reason) { setPluginFailure(errorMessage(reason)); }
-            finally { setPluginBusy(false); }
-          }}>查看配对凭证</button>
-          <button className="text-button" type="button" disabled={pluginBusy} onClick={async () => {
-            setPluginBusy(true); setPluginFailure('');
-            try { setPluginState(await window.workbench.pluginConnection('rotate')); }
-            catch (reason) { setPluginFailure(errorMessage(reason)); }
-            finally { setPluginBusy(false); }
-          }}>重置凭证</button>
-          {pluginState && (!pluginState.running || (pluginState.word && !pluginState.word.running)) && <button className="secondary-button compact-button" type="button" disabled={pluginBusy} onClick={async () => {
+          {pluginState && <button className="secondary-button compact-button" type="button" disabled={pluginBusy} onClick={async () => {
             setPluginBusy(true); setPluginFailure('');
             try { const state = await window.workbench.pluginConnection('start'); setPluginState((previous) => ({ ...previous, ...state })); }
             catch (reason) { setPluginFailure(errorMessage(reason)); }
             finally { setPluginBusy(false); }
           }}>重试连接服务</button>}
         </div>
-        {pluginState && <p className="field-help">{pluginState.running ? '本机连接服务已启动。' : pluginState.error || '本机连接服务尚未启动。'}重置后需要在各插件重新配对。</p>}
-        {pluginState?.word && <p className="field-help">{pluginState.word.message}</p>}
-        {pluginState?.token && <label className="field-label plugin-pairing-field">配对凭证<input aria-label="插件配对凭证" value={pluginState.token} readOnly onFocus={(event) => event.target.select()} /></label>}
+        {pluginState && <p className="field-help">{pluginState.running ? '本机连接服务已启动。' : pluginState.error || '本机连接服务尚未启动。'}</p>}
+        <h3>Word 本地插件</h3>
+        <p className="field-help">安装后，在 Word 的 Folio 选项卡按文件夹查找文献并插入引用。操作后请重新打开 Word。</p>
+        <div className="update-actions">{(['install', 'repair', 'uninstall'] as const).map(action => <button key={action} className={action === 'install' ? 'secondary-button compact-button' : 'text-button'} disabled={pluginBusy || (action !== 'install' && wordPluginState?.state === 'not_installed')} type="button" onClick={async () => {
+          setPluginBusy(true); setPluginFailure('');
+          try { setWordPluginState(await window.workbench.wordPlugin(action)); }
+          catch (reason) { setPluginFailure(errorMessage(reason)); }
+          finally { setPluginBusy(false); }
+        }}>{action === 'install' ? '安装 Word 插件' : action === 'repair' ? '修复 Word 插件' : '卸载 Word 插件'}</button>)}</div>
+        {wordPluginState && <p className="field-help" role="status">{wordPluginState.message}</p>}
+        {pluginState?.browser && <p className="field-help">{pluginState.browser.message}</p>}
         <div className="update-actions">{(['browser', 'word'] as const).map((kind) => <button className="text-button" key={kind} type="button" onClick={() => {
           void window.workbench.openPluginFolder(kind).catch((reason) => setPluginFailure(errorMessage(reason)));
         }}>{kind === 'browser' ? '打开浏览器插件安装文件' : '打开 Word 插件安装文件'}</button>)}</div>
-        <p className="field-help">浏览器插件在 Chrome 或 Edge 扩展管理页选择“加载已解压的扩展程序”。Word 插件的安装步骤见安装文件中的说明。</p>
+        <p className="field-help">浏览器插件在 Chrome 或 Edge 扩展管理页选择“加载已解压的扩展程序”，然后打开论文主页收藏。</p>
         {pluginFailure && <p className="notice error-notice" role="alert">{pluginFailure}</p>}
       </section>
       <div className="privacy-card">

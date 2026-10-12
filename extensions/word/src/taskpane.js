@@ -255,7 +255,7 @@ function refreshLiteratureSnapshots(state, callback) {
     callback(null, { updated: Object.keys(replacements).length, missing: missing });
   });
 }
-function refreshDocument(styleOverride, updateOnline) {
+function refreshDocument(styleOverride, updateOnline, onComplete) {
   var state = readState();
   if (styleOverride) state.style = styleOverride;
   var onlineReport = null;
@@ -265,10 +265,14 @@ function refreshDocument(styleOverride, updateOnline) {
     var controls = context.document.contentControls;
     controls.load('items/id,tag');
     return context.sync().then(function () {
-      controls.items.forEach(function (control) { control.getRange().load('text'); });
+      var ranges = controls.items.map(function (control) {
+        var range = control.getRange();
+        range.load('text');
+        return range;
+      });
       return context.sync().then(function () {
-        var snapshots = controls.items.map(function (control) {
-          return { tag: control.tag, text: control.getRange().text };
+        var snapshots = controls.items.map(function (control, index) {
+          return { tag: control.tag, text: ranges[index].text };
         });
         var citationsById = Object.create(null);
         state.citations.forEach(function (citation) { citationsById[citation.id] = citation; });
@@ -330,15 +334,23 @@ function refreshDocument(styleOverride, updateOnline) {
   }).then(function (refreshResult) {
     state = refreshResult.state;
     saveState(state, function (error) {
-      if (error) { status(error.message + ' Save the Word document.', true); return; }
+      if (error) {
+        status(error.message + ' Save the Word document.', true);
+        if (onComplete) onComplete(error);
+        return;
+      }
       var message = state.citations.length ? '引用和书目已按 ' + (state.style === 'apa' ? 'APA 7' : 'GB/T 7714-2015') + ' 刷新。请保存 Word 文档。' : '文档中没有 Folio 引用。';
       if (refreshResult.manualEditCount) message += ' 已保留 ' + refreshResult.manualEditCount + ' 处手动文字修改。';
       if (onlineFallback) message += ' Folio 当前不可用，已使用文档中保存的书目信息（' + onlineFallback + '）。';
       else if (onlineReport && onlineReport.updated) message += ' 已从 Folio 更新 ' + onlineReport.updated + ' 条书目快照。';
       if (onlineReport && onlineReport.missing) message += ' ' + onlineReport.missing + ' 条记录未能按稳定 ID 匹配，保留了原快照。';
       status(message, false);
+      if (onComplete) onComplete(null);
     });
-  }, function (error) { status(error.message || String(error), true); });
+  }, function (error) {
+    status(error.message || String(error), true);
+    if (onComplete) onComplete(error);
+  });
   }
   if (!updateOnline || !Object.keys(state.items).length) { refreshInWord(); return; }
   if (!token()) {
@@ -380,7 +392,20 @@ function insertCitation() {
     }, function (wordError) { status(wordError.message || String(wordError), true); });
   });
 }
+function folioRefreshDocument(event) {
+  function refresh(error) {
+    if (error) { status(error.message, true); event.completed(); return; }
+    refreshDocument(null, true, function () { event.completed(); });
+  }
+  if (styleText.apa && styleText.gb && styleText.en && styleText.zh) refresh(null);
+  else loadStyles(refresh);
+}
+window.folioRefreshDocument = folioRefreshDocument;
+if (typeof Office !== 'undefined' && Office.actions && Office.actions.associate) {
+  Office.actions.associate('folioRefreshDocument', folioRefreshDocument);
+}
 function initialize() {
+  if (window.location && /[?&]mode=commands(?:&|$)/.test(window.location.search)) return;
   if (!Office.context || Office.context.host !== Office.HostType.Word) {
     status('请在 Windows Word 中打开此加载项。', true);
     return;
@@ -408,6 +433,10 @@ function initialize() {
     byId('insert').disabled = false;
     byId('refresh').disabled = false;
     refreshDocument(null, false);
+    if (window.location && /[?&]section=style(?:&|$)/.test(window.location.search)) {
+      byId('style').scrollIntoView();
+      byId('style').focus();
+    }
   });
 }
 

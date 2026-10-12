@@ -1,24 +1,22 @@
 {
   "manifest_version": 3,
   "name": "Folio 文献收藏",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "description": "将网页论文和 PDF 收藏到本机 Folio。",
   "minimum_chrome_version": "109",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAimKaGytr/g5v4RA4h2UNW+Pa5NAXNpBOUDs/iTb+aNbtKJzTd9ezZordvite9kWXUQKQyOFP04UTLh25HPHyRFGq4eG8ZxEKzCUq1qNIOKjIyOaWmU5lZ3YB5XVNUuGKTzR7Gis7ErDzXyNrzg2Q3Ow3Cg35ahktP0JjBVnGpjs33sX7smNXl28msYpHsAooVCEg70/Rx+rcydy/U5DvbTQVCmAOSvnc1xpcYTS1NRPCbgcJlGkwUnBDcpPfEYARkBQZwcFhb9mrD3qOyzxGjiV/L7AeTVJ+bObCMnE8X0OCR8Fzo4GOJn/Jw/84VejPZ3NNar80xntJ0Xq0uARucwIDAQAB",
   "icons": {
     "256": "icons/folio-icon.png"
   },
   "permissions": [
     "activeTab",
+    "nativeMessaging",
     "scripting",
-    "storage"
+    "alarms"
   ],
   "optional_host_permissions": [
     "http://*/*",
     "https://*/*"
-  ],
-  "host_permissions": [
-    "http://127.0.0.1/*",
-    "http://localhost/*"
   ],
   "background": {
     "service_worker": "background.js"

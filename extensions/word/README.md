@@ -1,30 +1,40 @@
-# Folio Word 引用加载项
+# Folio Word
 
-此加载项可在 Word 中搜索 Folio 文献、插入 APA 7 或 GB/T 7714-2015（顺序编码制）引用，并按文档中的控件顺序刷新引用和书目。文档内保存 CSL 书目快照，因此切换格式和重新编号可以离线完成。点击“刷新文档引用”时，加载项会尝试按 Folio 返回的稳定文献 ID 更新快照；连接失败时会保留原快照并显示离线回退提示。
+Folio provides a Windows desktop Word COM add-in for searching the library and inserting APA 7 or GB/T 7714-2015 numeric citations. The add-in is installed per Windows user from Folio Settings; it does not use the Office Store, a shared folder, a certificate script, or Word's Trusted Locations.
 
-## 安装
+## Install and remove
 
-1. 启动 Folio 桌面工作台。打开“设置 → 浏览器与 Word 插件”，选择“查看配对凭证”，暂时复制显示的凭证。
-2. 在 PowerShell 中进入本目录，手动运行 `scripts/Install-WordDevCertificate.ps1`。如果执行策略阻止运行，可用 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-WordDevCertificate.ps1`。脚本会在当前 Windows 用户的 `%LOCALAPPDATA%\FolioWordAddin` 下准备 `localhost` HTTPS 证书，并询问是否信任。
-3. 只有在你决定信任此本机证书时，才在脚本提示处输入大写 `TRUST`。这会把证书导入当前 Windows 用户的 `Root` 信任存储。脚本不会由应用自动运行；不输入 `TRUST` 时，证书不会被导入，Word 加载项的本机 HTTPS 页面也无法正常打开。
-4. 将本目录中的 `manifest.xml` 复制到一个 Windows 文件共享目录，并取得该目录的 UNC 路径（例如 `\\server\share`）。只需共享 manifest 文件；加载项页面和图标仍由 Folio 本机 host 提供。
-5. 在 Word 桌面版打开“文件 → 选项 → 信任中心 → 信任中心设置 → 受信任的加载项目录”，添加该 UNC 路径并勾选“在菜单中显示”。确认后重启 Word。
-6. 在 Word 中选择“插入 → 我的加载项 → 共享文件夹”，打开 Folio 引用任务窗格，把第 1 步复制的凭证粘贴到“Folio 插件 token”并保存。
+1. In Folio, open **Settings → Browser and Word plugins** and choose **Install Word plugin**. The installer copies the native add-in to `%LOCALAPPDATA%\Folio\Word\native` and registers it for the current user in the 32-bit and 64-bit Word registry views.
+2. Close and reopen Word if it was already running. The **Folio** ribbon tab appears when Word loads the add-in.
+3. Use **Repair** from the same Settings page after closing Word. To uninstall, choose **Uninstall** there. If Word is open, close it and choose **Uninstall** again to remove the remaining local files.
 
-Folio 会在启动时提供加载项使用的本机 HTTPS host 和文献查询中继；普通安装不需要另装 Node.js，也不需要手动启动服务。若 Folio 设置页显示 Word 服务未就绪，在准备证书后重启 Folio，或使用“重试连接服务”。
+Install and uninstall change only Folio's per-user files and registry entries. They do not change macro policy, Trust Center settings, certificate stores, or Word documents. The add-in is unsigned; an organization policy that requires signed COM add-ins may block activation. A successful install status confirms registration, not that Word activated the add-in.
 
-## 使用
+## Use citations
 
-在 Folio 的书目中补充或修正文献后，回到 Word 点击“刷新文档引用”以按稳定文献 ID 更新文档快照。首次打开和切换引用格式只使用文档内快照，不联网。完成插入、刷新或换格式后，请保存 Word 文档。
+In Word, choose **Folio → Search and insert citation**. Select a folder and citation style, search the Folio library, and preview the citation before confirming. The style defaults to the current document's saved Folio style. New citations require a current confirmation for the selected style; the add-in checks the record again after the preview and stops if its metadata changed.
 
-引用和书目内容保存在当前 Word 文档；配对凭证保存在此 Word 加载项的本地配置中。重置 Folio 配对凭证后，请在任务窗格中更新保存的 token。
+The preview uses the citation engine's body citation and complete bibliography output. Missing optional metadata is shown as a warning for review. The citation is inserted at the current Word selection. **Refresh document citations** follows the order of Word's Folio content controls, updates snapshots only from records currently confirmed in the selected style, preserves manual text edits, and keeps an existing snapshot when a record is stale or unavailable.
 
-## 兼容性
+CSL snapshots and managed citation controls are stored in the document. Existing document text remains available when Folio is closed, but inserting, refreshing, or changing the rendered style requires Folio to be running. Save the Word document after inserting or refreshing.
 
-清单声明最低要求为 WordApi 1.1。当前自动化测试使用 Word API 模拟，没有在 Word 2021 COM 中完成保存/重开验收，也没有运行 Office.js 加载项本身或验证共享目录侧加载流程；Microsoft 365、Word 2024、2021、2019 和 2016 等版本的加载项兼容性仍待逐版实机验证。
+The native add-in cannot automatically migrate citation state stored by the older Office.js task pane. If a document has Folio-tagged controls but no native snapshot, the add-in stops before changing it and explains the limitation. Keep the original document; to use the native add-in, work on a copy and convert the old Folio controls to ordinary text before starting a new native citation set.
 
-## 开发构建
+## Compatibility and development
 
-在 Folio 源代码检出目录运行 `npm --prefix extensions/word ci`，然后运行 `npm run build:plugins` 生成 `extensions/word/dist`。Folio 开发版从该目录启动加载项 host。
+The native add-in targets Windows desktop Word and builds separate 32-bit and 64-bit .NET Framework assemblies. This workspace has not verified activation or insertion/save/reopen in a live Word host. The local reflection and pipe tests validate the built DLL and protocol, not Word's COM activation or document editing behavior.
 
-第三方依赖及随附 CSL 格式文件的归属和许可证见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+Build the native assemblies with `extensions/word/native/build.ps1`. Run `extensions/word/tests/native-smoke.ps1` for the DLL interface, named-pipe RPC, and bibliography-sanitizer smoke checks. Run `npm --prefix extensions/word test` for the Word extension tests.
+
+## Legacy Office.js development workflow
+
+These steps apply only to the older Office.js task pane for development or compatibility testing. They are not required by the native Settings installer and still require manual setup:
+
+1. This token step applies only to an older development build that still exposes the Office.js pairing-credential UI. The current native plugin Settings page does not provide that legacy token entry point.
+2. From PowerShell, run `extensions/word/scripts/Install-WordDevCertificate.ps1`. The script creates a localhost HTTPS certificate. Typing `TRUST` at its prompt imports that certificate into the current user's Root store; skipping the prompt leaves it untrusted.
+3. Place `extensions/word/manifest.xml` in a Windows file share and add its UNC path under Word's **Trust Center → Trusted Add-in Catalogs**. Restart Word.
+4. In Word, add the manifest from **Insert → My Add-ins → Shared Folder**, open the Folio task pane, and paste the copied token.
+
+The Office.js task pane uses the legacy localhost HTTPS service and token flow. Its certificate and catalog setup are explicit developer steps; the Folio Settings installer does not run them.
+
+Third-party dependencies and CSL style licenses are listed in [THIRD-PARTY-NOTICES.md](../../THIRD-PARTY-NOTICES.md).

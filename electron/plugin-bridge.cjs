@@ -3,18 +3,29 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
+const net = require('node:net');
 const path = require('node:path');
 
 const HOST = '127.0.0.1';
 const PORT = 37861;
 const MAX_BODY_BYTES = 36 * 1024 * 1024;
+const MAX_NATIVE_MESSAGE_BYTES = 1024 * 1024;
+const MAX_PDF_BYTES = 25 * 1024 * 1024;
+const DEFAULT_NATIVE_SECRET_PATH = path.join(
+  process.env.LOCALAPPDATA || path.join(require('node:os').homedir(), 'AppData', 'Local'),
+  'Folio',
+  'browser-bridge.secret',
+);
+const NATIVE_PIPE = process.platform === 'win32'
+  ? '\\\\.\\pipe\\folio-browser-bridge-v1'
+  : path.join(require('node:os').tmpdir(), 'folio-browser-bridge-v1.sock');
 const ALLOWED_CAPTURE_FIELDS = new Set([
   'title', 'authors', 'year', 'container_title', 'doi', 'url', 'pdf_url',
-  'volume', 'issue', 'pages', 'item_type', 'paper_id', 'folder_id', 'source',
-  'pdf_content_base64', 'pdf_name',
+  'volume', 'issue', 'pages', 'item_type', 'paper_id', 'folder_id', 'source', 'source_url',
+  'pdf_content_base64', 'pdf_name', 'csl', 'source_citation', 'version_label',
+  'publisher', 'publisher_place', 'edition', 'series', 'series_number', 'issn', 'isbn',
 ]);
 const WORD_ORIGIN = 'https://localhost:37862';
-const EXTENSION_ORIGIN = /^chrome-extension:\/\/[a-p]{32}$/;
 
 class BridgeError extends Error {
   constructor(status, message) {
@@ -24,7 +35,7 @@ class BridgeError extends Error {
 }
 
 function allowedOrigin(origin) {
-  return origin === WORD_ORIGIN || EXTENSION_ORIGIN.test(origin || '');
+  return origin === WORD_ORIGIN;
 }
 
 function tokenFile(dataDir) {
@@ -57,6 +68,33 @@ function loadOrCreateToken(filename) {
   const token = crypto.randomBytes(32).toString('hex');
   saveToken(filename, token);
   return token;
+}
+
+function loadOrCreateNativeSecret(filename) {
+  try {
+    const info = fs.lstatSync(filename);
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error('本机浏览器桥凭证文件无效。');
+    const secret = fs.readFileSync(filename, 'utf8').trim();
+    if (/^[a-f0-9]{64}$/.test(secret)) return secret;
+    throw new Error('本机浏览器桥凭证文件无效。');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+
+  const secret = crypto.randomBytes(32).toString('hex');
+  fs.mkdirSync(path.dirname(filename), { recursive: true });
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filename, 'wx', 0o600);
+    fs.writeFileSync(descriptor, `${secret}\n`, 'utf8');
+  } catch (error) {
+    if (error.code === 'EEXIST') return loadOrCreateNativeSecret(filename);
+    throw error;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+  try { fs.chmodSync(filename, 0o600); } catch {}
+  return secret;
 }
 
 function safeBackendBase(getBackendBase) {
@@ -388,4 +426,334 @@ function createPluginBridge({ dataDir, getBackendBase, getBackendToken, port = P
   return { start, stop, getStatus: status, getToken, rotateToken };
 }
 
-module.exports = { createPluginBridge, MAX_BODY_BYTES };
+function plainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isCitationStyle(value) {
+  return value === 'apa' || value === 'gb-t-7714-2015-numeric';
+}
+
+function createNativeMessagingBridge({
+  getBackendBase,
+  getBackendToken,
+  pipeName = NATIVE_PIPE,
+  secretPath = DEFAULT_NATIVE_SECRET_PATH,
+  fetchImpl = globalThis.fetch,
+}) {
+  if (typeof getBackendBase !== 'function' || typeof getBackendToken !== 'function') throw new TypeError('backend getters are required');
+  if (typeof fetchImpl !== 'function') throw new TypeError('fetch is required');
+  if (typeof pipeName !== 'string' || !pipeName) throw new TypeError('pipeName is required');
+  if (typeof secretPath !== 'string' || !secretPath) throw new TypeError('secretPath is required');
+
+  const secret = loadOrCreateNativeSecret(secretPath);
+  let server = null;
+  let starting = null;
+  let stopped = false;
+  const sockets = new Set();
+  const upstreamRequests = new Set();
+
+  function status() {
+    return { running: Boolean(server?.listening), pipeName };
+  }
+
+  function reply(socket, payload) {
+    const bytes = Buffer.from(JSON.stringify(payload), 'utf8');
+    if (bytes.length > MAX_NATIVE_MESSAGE_BYTES) {
+      return writeFrame(socket, { ok: false, error: '本机响应内容过大。' });
+    }
+    const length = Buffer.allocUnsafe(4);
+    length.writeUInt32LE(bytes.length);
+    socket.write(Buffer.concat([length, bytes]));
+  }
+
+  function writeFrame(socket, payload) {
+    const bytes = Buffer.from(JSON.stringify(payload), 'utf8');
+    const length = Buffer.allocUnsafe(4);
+    length.writeUInt32LE(bytes.length);
+    socket.write(Buffer.concat([length, bytes]));
+  }
+
+  async function backendRequest(route, body = undefined, timeoutMs = 15000) {
+    let base;
+    let internalToken;
+    try {
+      base = safeBackendBase(getBackendBase);
+      internalToken = getBackendToken();
+    } catch {
+      throw new BridgeError(503, '本机文献服务暂不可用。');
+    }
+    if (typeof internalToken !== 'string' || !internalToken) throw new BridgeError(503, '本机文献服务暂不可用。');
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    timeout.unref?.();
+    upstreamRequests.add(controller);
+    try {
+      const upstream = await fetchImpl(`${base}${route}`, {
+        method: body === undefined ? 'GET' : 'POST',
+        headers: {
+          Authorization: `Bearer ${internalToken}`,
+          Accept: 'application/json',
+          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        redirect: 'error',
+        signal: controller.signal,
+      });
+      const bytes = await readResponse(upstream);
+      let payload;
+      try { payload = bytes.length ? JSON.parse(bytes.toString('utf8')) : {}; }
+      catch { throw new BridgeError(502, '本机文献服务返回了无效响应。'); }
+      if (!upstream.ok) {
+        const message = typeof payload?.detail === 'string' ? payload.detail : '本机文献服务处理失败。';
+        return { ok: false, error: message, status: upstream.status, detail: payload?.detail };
+      }
+      return { ok: true, result: payload };
+    } catch (error) {
+      if (error instanceof BridgeError) return { ok: false, error: error.message, status: error.status };
+      if (stopped) return { ok: false, error: '本机连接服务已停止。', status: 503 };
+      if (controller.signal.aborted) return { ok: false, error: '本机文献服务处理超时，请检查收藏列表后重试。', status: 504 };
+      return { ok: false, error: '本机文献服务暂不可用。', status: 502 };
+    } finally {
+      clearTimeout(timeout);
+      upstreamRequests.delete(controller);
+    }
+  }
+
+  function captureBody(message) {
+    const item = plainObject(message.item) ? message.item : {};
+    const unknown = Object.keys(item).filter((key) => !ALLOWED_CAPTURE_FIELDS.has(key) || ['folder_id', 'pdf_content_base64', 'pdf_name'].includes(key));
+    if (unknown.length) throw new BridgeError(422, '请求包含不支持的书目字段。');
+    const body = Object.fromEntries(Object.entries(item).filter(([key, value]) => ALLOWED_CAPTURE_FIELDS.has(key) && value !== undefined && value !== null));
+    body.source = item.source === 'scholar' ? 'scholar' : 'browser';
+    if (typeof message.folderId === 'string' && message.folderId) body.folder_id = message.folderId;
+    return body;
+  }
+
+  async function dispatch(message, captures) {
+    try {
+      if (!plainObject(message) || typeof message.type !== 'string') throw new BridgeError(400, '扩展请求无效。');
+      if (message.type === 'FOLIO_STATUS') return { ok: true, result: { connected: true } };
+      if (message.type === 'FOLIO_FOLDERS') return backendRequest('/folders');
+      if (message.type === 'FOLIO_GET_RECORD') {
+        const id = String(message.recordId ?? '');
+        if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new BridgeError(422, '书目编号无效。');
+        return backendRequest(`/literature/${encodeURIComponent(id)}`);
+      }
+      if (message.type === 'FOLIO_SEARCH') {
+        const query = typeof message.query === 'string' ? message.query.trim().slice(0, 300) : '';
+        const params = new URLSearchParams({ q: query });
+        if (typeof message.folderId === 'string' && message.folderId) params.set('folder_id', message.folderId);
+        if (isCitationStyle(message.confirmedStyle)) params.set('confirmed_style', message.confirmedStyle);
+        return backendRequest(`/literature?${params.toString()}`);
+      }
+      if (message.type === 'FOLIO_PREVIEW') {
+        if (!plainObject(message.record) || !isCitationStyle(message.style)) throw new BridgeError(422, '引用预览参数无效。');
+        return backendRequest('/literature/preview', { record: message.record, style: message.style });
+      }
+      if (message.type === 'FOLIO_CONFIRM') {
+        const id = String(message.recordId ?? '');
+        if (!/^[A-Za-z0-9_-]{1,128}$/.test(id) || !isCitationStyle(message.style)
+            || typeof message.fingerprint !== 'string' || !/^[a-f0-9]{32,128}$/i.test(message.fingerprint)) {
+          throw new BridgeError(422, '引用确认参数无效。');
+        }
+        return backendRequest(`/literature/${encodeURIComponent(id)}/citations`, {
+          style: message.style,
+          fingerprint: message.fingerprint,
+        });
+      }
+      if (message.type === 'FOLIO_RENDER_DOCUMENT') {
+        const state = message.state;
+        if (!plainObject(state) || state.version !== 1 || !plainObject(state.items) || !Array.isArray(state.citations)
+            || state.citations.length > 500 || Object.keys(state.items).length > 200
+            || Buffer.byteLength(JSON.stringify(state), 'utf8') > 900 * 1024
+            || Object.entries(state.items).some(([id, record]) => !/^[A-Za-z0-9_-]{1,128}$/.test(id)
+              || !plainObject(record) || String(record.id || '') !== id)
+            || state.citations.some((citation) => !plainObject(citation)
+              || typeof citation.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(citation.id)
+              || !Array.isArray(citation.items) || citation.items.length > 200
+              || citation.items.some((item) => !plainObject(item) || typeof item.id !== 'string'
+                || !Object.hasOwn(state.items, item.id)
+                || (item.locator !== undefined && (typeof item.locator !== 'string' || item.locator.length > 100))
+                || (item.label !== undefined && (typeof item.label !== 'string' || item.label.length > 100))))) {
+          throw new BridgeError(422, 'Word 引用文档状态无效或过大。');
+        }
+        if (!isCitationStyle(message.style)) throw new BridgeError(422, '引用格式无效。');
+        return backendRequest('/literature/render-document', { state, style: message.style }, 120000);
+      }
+      if (message.type === 'FOLIO_PARSE') {
+        if (!['bibtex', 'ris', 'csl-json'].includes(message.format) || typeof message.data !== 'string' || message.data.length > MAX_BODY_BYTES) {
+          throw new BridgeError(422, '书目文件内容无效或过大。');
+        }
+        return backendRequest('/literature/parse', { format: message.format, data: message.data }, 120000);
+      }
+      if (message.type === 'FOLIO_RESOLVE') {
+        const doi = typeof message.doi === 'string' ? message.doi.trim().slice(0, 300) : '';
+        if (!doi) throw new BridgeError(422, 'DOI 无效。');
+        return backendRequest('/literature/resolve', { doi }, 120000);
+      }
+      if (message.type === 'FOLIO_SUPPLEMENT_PREVIEW' || message.type === 'FOLIO_SUPPLEMENT_APPLY') {
+        const id = String(message.recordId ?? '');
+        if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new BridgeError(422, '书目编号无效。');
+        if (message.type === 'FOLIO_SUPPLEMENT_PREVIEW') {
+          return backendRequest(`/literature/${encodeURIComponent(id)}/supplement/preview`, {});
+        }
+        if (!Array.isArray(message.fields) || message.fields.length > 32 || message.fields.some((field) => typeof field !== 'string' || field.length > 128)) {
+          throw new BridgeError(422, '补全字段无效。');
+        }
+        return backendRequest(`/literature/${encodeURIComponent(id)}/supplement/apply`, {
+          fields: message.fields,
+          ...(typeof message.source_fingerprint === 'string' ? { source_fingerprint: message.source_fingerprint } : {}),
+        });
+      }
+      if (message.type === 'FOLIO_CAPTURE') {
+        const body = captureBody(message);
+        const bodyBytes = Buffer.byteLength(JSON.stringify(body), 'utf8');
+        if (bodyBytes > MAX_BODY_BYTES) throw new BridgeError(413, '请求超过 36 MiB 限制。');
+        return backendRequest('/literature/capture', body, 120000);
+      }
+      if (message.type === 'FOLIO_CAPTURE_BEGIN') {
+        if (captures.size >= 2) throw new BridgeError(429, '已有 PDF 收藏任务正在处理。');
+        const body = captureBody(message);
+        const captureId = crypto.randomBytes(16).toString('hex');
+        captures.set(captureId, { body, chunks: [], nextIndex: 0, size: 0, createdAt: Date.now() });
+        return { ok: true, result: { captureId } };
+      }
+      if (message.type === 'FOLIO_CAPTURE_PDF_CHUNK') {
+        const pending = captures.get(message.captureId);
+        if (!pending || Date.now() - pending.createdAt > 120000) {
+          captures.delete(message.captureId);
+          throw new BridgeError(410, 'PDF 收藏任务已过期，请重试。');
+        }
+        if (!Number.isInteger(message.index) || message.index !== pending.nextIndex
+            || typeof message.chunk !== 'string' || message.chunk.length > 512 * 1024
+            || message.chunk.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(message.chunk)) {
+          captures.delete(message.captureId);
+          throw new BridgeError(422, 'PDF 分段内容无效，请重试。');
+        }
+        pending.size += message.chunk.length;
+        if (pending.size > Math.ceil(MAX_PDF_BYTES / 3) * 4) {
+          captures.delete(message.captureId);
+          throw new BridgeError(413, 'PDF 超过 25 MiB 限制。');
+        }
+        pending.chunks.push(message.chunk);
+        pending.nextIndex += 1;
+        return { ok: true, result: { received: pending.nextIndex } };
+      }
+      if (message.type === 'FOLIO_CAPTURE_FINISH') {
+        const pending = captures.get(message.captureId);
+        captures.delete(message.captureId);
+        if (!pending || Date.now() - pending.createdAt > 120000 || pending.nextIndex === 0) {
+          throw new BridgeError(410, 'PDF 收藏任务已过期，请重试。');
+        }
+        if (typeof message.pdfName === 'string') pending.body.pdf_name = message.pdfName.slice(0, 255);
+        pending.body.pdf_content_base64 = pending.chunks.join('');
+        const bodyBytes = Buffer.byteLength(JSON.stringify(pending.body), 'utf8');
+        if (bodyBytes > MAX_BODY_BYTES) throw new BridgeError(413, '请求超过 36 MiB 限制。');
+        return backendRequest('/literature/capture', pending.body, 120000);
+      }
+      throw new BridgeError(400, '不支持的扩展请求。');
+    } catch (error) {
+      return { ok: false, error: error instanceof BridgeError ? error.message : '本机连接请求失败。', status: error instanceof BridgeError ? error.status : 500 };
+    }
+  }
+
+  function accept(socket) {
+    sockets.add(socket);
+    const client = { captures: new Map(), authenticated: false };
+    let buffer = Buffer.alloc(0);
+    let chain = Promise.resolve();
+    socket.setNoDelay(true);
+    socket.on('data', (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      while (buffer.length >= 4) {
+        const length = buffer.readUInt32LE(0);
+        if (length > MAX_NATIVE_MESSAGE_BYTES) {
+          socket.destroy();
+          return;
+        }
+        if (buffer.length < length + 4) return;
+        const bytes = buffer.subarray(4, length + 4);
+        buffer = buffer.subarray(length + 4);
+        chain = chain.then(async () => {
+          let message;
+          try { message = JSON.parse(bytes.toString('utf8')); }
+          catch { return reply(socket, { ok: false, error: '扩展请求 JSON 无效。', status: 400 }); }
+          if (!client.authenticated) {
+            const suppliedValue = plainObject(message) && typeof message.secret === 'string' ? message.secret : '';
+            const supplied = Buffer.from(/^[a-f0-9]{64}$/.test(suppliedValue) ? suppliedValue : '0'.repeat(64), 'utf8');
+            const expected = Buffer.from(secret, 'utf8');
+            const valid = plainObject(message) && message.type === 'FOLIO_NATIVE_AUTH'
+              && crypto.timingSafeEqual(supplied, expected) && suppliedValue.length === 64;
+            if (!valid) {
+              const response = { ok: false, error: '本机浏览器连接未经授权。', status: 403 };
+              if (plainObject(message) && Object.hasOwn(message, 'id')) response.id = message.id;
+              reply(socket, response);
+              socket.end();
+              return;
+            }
+            client.authenticated = true;
+            return reply(socket, { ok: true, result: { authenticated: true }, id: message.id });
+          }
+          const response = await dispatch(message, client.captures);
+          if (plainObject(message) && Object.hasOwn(message, 'id')) response.id = message.id;
+          return reply(socket, response);
+        }).catch(() => {
+          if (!socket.destroyed) reply(socket, { ok: false, error: '本机连接请求失败。', status: 500 });
+        });
+      }
+    });
+    socket.on('close', () => {
+      sockets.delete(socket);
+      client.captures.clear();
+    });
+    socket.on('error', () => {});
+  }
+
+  async function start() {
+    if (server?.listening && !stopped) return status();
+    if (starting && !stopped) return starting;
+    stopped = false;
+    const operation = new Promise((resolve, reject) => {
+      const candidate = net.createServer(accept);
+      server = candidate;
+      candidate.once('error', (error) => {
+        if (server === candidate) server = null;
+        if (starting === operation) starting = null;
+        reject(error);
+      });
+      candidate.listen(pipeName, () => {
+        if (process.platform !== 'win32') {
+          try { fs.chmodSync(pipeName, 0o600); } catch {}
+        }
+        if (starting === operation) starting = null;
+        resolve(status());
+      });
+    });
+    starting = operation;
+    return operation;
+  }
+
+  async function stop() {
+    stopped = true;
+    for (const controller of upstreamRequests) controller.abort();
+    for (const socket of sockets) socket.destroy();
+    const candidate = server;
+    server = null;
+    if (candidate) await new Promise((resolve) => {
+      try {
+        candidate.close(() => resolve());
+        candidate.closeAllConnections?.();
+      } catch { resolve(); }
+    });
+    if (starting) await starting.catch(() => {});
+    if (process.platform !== 'win32') {
+      try { fs.unlinkSync(pipeName); } catch {}
+    }
+  }
+
+  return { start, stop, getStatus: status };
+}
+
+module.exports = { createPluginBridge, createNativeMessagingBridge, MAX_BODY_BYTES, MAX_NATIVE_MESSAGE_BYTES };

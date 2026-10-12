@@ -8,6 +8,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { createPluginBridge } = require('../../../electron/plugin-bridge.cjs');
 
+const wordOrigin = 'https://localhost:37862';
 const extensionOrigin = 'chrome-extension://' + 'a'.repeat(32);
 
 async function listen(server) {
@@ -70,7 +71,7 @@ function requestUrl(bridge, route) {
 
 function headers(token = '') {
   return {
-    Origin: extensionOrigin,
+    Origin: wordOrigin,
     ...(token ? { Authorization: 'Bearer ' + token } : {}),
   };
 }
@@ -85,7 +86,7 @@ test('bridge enforces its route, origin, token, and capture-field allowlists', a
   await bridge.start();
   const health = await fetch(requestUrl(bridge, '/health'), { headers: headers() });
   assert.equal(health.status, 200);
-  assert.equal(health.headers.get('access-control-allow-origin'), extensionOrigin);
+  assert.equal(health.headers.get('access-control-allow-origin'), wordOrigin);
 
   const unauthorized = await fetch(requestUrl(bridge, '/v1/folders'), { headers: headers() });
   assert.equal(unauthorized.status, 401);
@@ -128,6 +129,12 @@ test('bridge enforces its route, origin, token, and capture-field allowlists', a
     headers: { Origin: 'https://attacker.example', Authorization: 'Bearer ' + token },
   });
   assert.equal(badOrigin.status, 403);
+  const extensionOriginResponse = await fetch(requestUrl(bridge, '/v1/folders'), {
+    headers: { Origin: extensionOrigin, Authorization: 'Bearer ' + token },
+  });
+  assert.equal(extensionOriginResponse.status, 403);
+  const noToken = await fetch(requestUrl(bridge, '/v1/folders'));
+  assert.equal(noToken.status, 401);
 
   const replacement = bridge.rotateToken();
   assert.notEqual(replacement, token);
