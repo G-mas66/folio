@@ -86,6 +86,10 @@ test('popup reviews DOI metadata before save, keeps the source/PDF, retries PDF,
   const calls = [];
   const captureCalls = [];
   const permissionRequests = [];
+  const pageScriptCalls = [];
+  const pageFetchRequests = [];
+  const grantedOrigins = new Set();
+  const pagePdfBytes = Buffer.from('%PDF-1.7\npage fixture', 'utf8');
   let pdfImportAttempt = 0;
   const savedCsl = {
     id: 'stable-record-42', type: 'article-journal', title: 'Authoritative DOI title',
@@ -144,7 +148,7 @@ test('popup reviews DOI metadata before save, keeps the source/PDF, retries PDF,
     },
     tabs: {
       query: async () => [{ id: 12, title: 'A page with an author name', url: 'https://publisher.example/article/42' }],
-      sendMessage: async () => ({ kind: 'page', candidates: [{
+      sendMessage: async () => ({ kind: 'scholar', candidates: [{
         title: 'Homepage title',
         authors: [{ given: 'Md Mahfuzur Rahman', family: 'Siddiquee' }],
         year: 2023,
@@ -162,13 +166,42 @@ test('popup reviews DOI metadata before save, keeps the source/PDF, retries PDF,
           DOI: '10.5555/folio.compound', URL: 'https://publisher.example/article/42',
           'custom-field': 'preserved from source CSL',
         },
+      }, {
+        title: 'Second selected paper', authors: [{ given: 'Grace', family: 'Hopper' }],
+        year: 2022, container_title: 'Another Journal', url: 'https://other-publisher.example/article/7',
+        pdf_url: 'https://other-publisher.example/article-7.pdf',
+        pdf_candidates: ['https://other-publisher.example/article-7.pdf'], item_type: 'journal-article',
+        source: 'scholar', csl: { type: 'article-journal', title: 'Second selected paper' },
       }] }),
     },
-    scripting: { executeScript: async () => {} },
-    permissions: { request: async (request) => { permissionRequests.push(request); return true; } },
+    scripting: {
+      executeScript: async (details) => {
+        if (!details.func) return [];
+        pageScriptCalls.push(details);
+        const result = await details.func(...details.args);
+        return [{ frameId: 0, result }];
+      },
+    },
+    permissions: {
+      request: async (request) => {
+        permissionRequests.push({ request, captureCount: captureCalls.length });
+        for (const origin of request.origins || []) grantedOrigins.add(origin);
+        return true;
+      },
+      contains: async ({ origins }) => origins.every((origin) => grantedOrigins.has(origin)),
+    },
   };
   document.querySelector('#citation-style').value = 'apa';
-  const context = { document, chrome, FolioCapture: require('../shared.js'), URL, setTimeout, clearTimeout };
+  const context = {
+    document, chrome, FolioCapture: require('../shared.js'), URL, setTimeout, clearTimeout,
+    AbortController, btoa, location: { origin: 'https://publisher.example' },
+    fetch: async (url, options) => {
+      pageFetchRequests.push({ url, options });
+      const response = new Response(pagePdfBytes, { status: 200, headers: { 'content-type': 'application/pdf' } });
+      Object.defineProperty(response, 'url', { value: url });
+      return response;
+    },
+  };
   vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '../popup.js'), 'utf8'), context);
   await waitForUi();
   await waitForUi();
@@ -176,11 +209,13 @@ test('popup reviews DOI metadata before save, keeps the source/PDF, retries PDF,
   const folderSelect = document.querySelector('#folder-select');
   folderSelect.value = 'folder-1';
   const candidateList = document.querySelector('#candidate-list');
+  await findByText(document.querySelector('#page-caption'), '全选').click();
+  await waitForUi();
   await findByText(candidateList, '获取 BIBTEX').click();
   await waitForUi();
   assert.ok(candidateList.textContent.includes('BibTeX candidate'));
   assert.ok(candidateList.textContent.includes('Homepage title'), 'BibTeX is added as a separate candidate');
-  assert.ok(permissionRequests.some((request) => request.origins?.includes('https://publisher.example/*')));
+  assert.ok(permissionRequests.some(({ request }) => request.origins?.includes('https://publisher.example/*')));
   assert.equal(calls.find((call) => call.type === 'FOLIO_IMPORT_EXPORT').format, 'bibtex');
   const captureButton = document.querySelector('#capture-button');
   assert.equal(captureButton.disabled, true, 'DOI candidates must be reviewed before saving');
@@ -195,12 +230,29 @@ test('popup reviews DOI metadata before save, keeps the source/PDF, retries PDF,
   await findByText(candidateList, '采用查到的元数据').click();
   assert.equal(captureButton.disabled, false);
 
+  permissionRequests.length = 0;
   await captureButton.click();
   await waitForUi();
+  assert.equal(permissionRequests.length, 1, 'one permission request covers all selected PDF origins');
+  assert.deepEqual(Array.from(permissionRequests[0].request.origins), [
+    'https://publisher.example/*', 'https://other-publisher.example/*',
+  ]);
+  assert.equal(permissionRequests[0].captureCount, 0, 'permission is requested before asynchronous capture begins');
   const firstCapture = captureCalls[0];
   assert.equal(firstCapture.folderId, 'folder-1');
   assert.equal(firstCapture.pdfUrl, 'https://publisher.example/article-42.pdf');
   assert.equal(firstCapture.fetchPdf, true);
+  assert.equal('referrer' in firstCapture, false, 'the page URL is not forwarded as a worker referrer');
+  assert.equal(firstCapture.pdfBase64, pagePdfBytes.toString('base64'));
+  assert.equal(pageScriptCalls.length, 1, 'same-origin PDFs are fetched in the active page context');
+  assert.equal(pageScriptCalls[0].world, 'MAIN');
+  assert.equal(pageScriptCalls[0].target.tabId, 12);
+  assert.deepEqual(pageFetchRequests.map(({ url }) => url), ['https://publisher.example/article-42.pdf']);
+  assert.equal(pageFetchRequests[0].options.credentials, 'same-origin');
+  assert.equal(pageFetchRequests[0].options.redirect, 'error');
+  assert.equal(captureCalls[1].pdfUrl, 'https://other-publisher.example/article-7.pdf');
+  assert.equal(captureCalls[1].fetchPdf, true);
+  assert.equal(captureCalls[1].pdfBase64, undefined, 'cross-origin candidates stay on the permissioned worker path');
   assert.deepEqual(firstCapture.item.authors, [{ given: 'Md Mahfuzur', family: 'Rahman Siddiquee' }]);
   assert.equal(firstCapture.item.doi, '10.5555/folio.compound');
   assert.equal(firstCapture.item.url, 'https://publisher.example/article/42');
@@ -212,8 +264,10 @@ test('popup reviews DOI metadata before save, keeps the source/PDF, retries PDF,
   assert.ok(retry);
   await retry.click();
   await waitForUi();
-  assert.equal(captureCalls.length, 2);
-  assert.equal(captureCalls[1].item.doi, '10.5555/folio.compound');
+  assert.equal(captureCalls.length, 3);
+  assert.deepEqual(Array.from(permissionRequests[1].request.origins), ['https://publisher.example/*']);
+  assert.equal(permissionRequests[1].captureCount, 2, 'retry requests permission from its own click gesture');
+  assert.equal(captureCalls[2].item.doi, '10.5555/folio.compound');
 
   const confirm = findByText(document.querySelector('#capture-results'), '确认此引用格式');
   assert.ok(confirm, 'a separate action is required to confirm the preview');

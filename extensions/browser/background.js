@@ -74,10 +74,7 @@ function nativeRequest(message, timeoutMs = 15000) {
 }
 
 function permissionOrigin(url) {
-  const safe = FolioCapture.safeUrl(url);
-  if (!safe) return '';
-  const parsed = new URL(safe);
-  return parsed.protocol + '//' + parsed.hostname + '/*';
+  return FolioCapture.pdfPermissionOrigins(url)[0] || '';
 }
 
 async function captureWithoutPdf(message, pdfError = '') {
@@ -99,10 +96,22 @@ async function capture(message) {
   }
 
   let pdf;
-  try {
-    pdf = await FolioCapture.downloadPdf(pdfUrl);
-  } catch (error) {
-    return captureWithoutPdf(message, errorMessage(error));
+  if (typeof message.pdfBase64 === 'string') {
+    try {
+      FolioCapture.validatePdfBase64(message.pdfBase64);
+      pdf = {
+        base64: message.pdfBase64,
+        name: FolioCapture.fileNameFromUrl(pdfUrl, message.item?.title || ''),
+      };
+    } catch (error) {
+      return captureWithoutPdf(message, errorMessage(error));
+    }
+  } else {
+    try {
+      pdf = await FolioCapture.downloadPdf(pdfUrl);
+    } catch (error) {
+      return captureWithoutPdf(message, errorMessage(error));
+    }
   }
 
   let captureId = '';

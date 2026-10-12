@@ -27,6 +27,8 @@ export function BibliographyPanel({ onOpenPaper, folders, folderFilter, onSelect
   const [draft, setDraft] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
   const [revision, setRevision] = useState(0);
+  const [removeRecord, setRemoveRecord] = useState<Record | null>(null);
+  const [deleteError, setDeleteError] = useState('');
   const [citationRecord, setCitationRecord] = useState<Record | null>(null);
   const [citationStyle, setCitationStyle] = useState('gb-t-7714-2015-numeric');
   const [preview, setPreview] = useState<CitationPreview | null>(null);
@@ -114,6 +116,17 @@ export function BibliographyPanel({ onOpenPaper, folders, folderFilter, onSelect
     finally { setSaving(false); }
   }
 
+  async function deleteLiterature() {
+    if (!removeRecord) return;
+    setSaving(true); setDeleteError('');
+    try {
+      await api(`/literature/${removeRecord.id}`, 'DELETE');
+      setRemoveRecord(null); setRevision(value => value + 1); onRecordsChanged();
+      setNotice('已删除这条书目及其引用确认快照；关联 PDF、文件夹、其他版本和 Word 文档快照均已保留。');
+    } catch (reason) { setDeleteError(errorMessage(reason)); }
+    finally { setSaving(false); }
+  }
+
   async function confirmCitation() {
     if (!citationRecord || !preview) return;
     setSaving(true); setCitationError('');
@@ -195,6 +208,7 @@ export function BibliographyPanel({ onOpenPaper, folders, folderFilter, onSelect
         <button className="secondary-button compact-button" type="button" disabled={saving || !item.doi} onClick={() => void findSupplement(item)}>补全信息</button>
         <button className="secondary-button compact-button" type="button" onClick={() => edit(item)}>编辑信息</button>
         <button className="text-button" type="button" onClick={() => { setEditionSource(item); setEditionDoi(''); setEdition(null); setEditionPreview(null); setEditionError(''); }}>添加其他版本</button>
+        <button className="text-button bibliography-delete-button" type="button" disabled={saving} onClick={() => { setDeleteError(''); setRemoveRecord(item); }}>删除</button>
         {item.paper_id && <button className="primary-button compact-button" type="button" onClick={() => onOpenPaper(item.paper_id!)}>打开 PDF</button>}</div>
     </article>)}</div>
     {draft && selected && <div className="dialog-backdrop" onClick={() => { if (!saving) { setDraft(null); setSelected(null); } }}>
@@ -238,6 +252,13 @@ export function BibliographyPanel({ onOpenPaper, folders, folderFilter, onSelect
       {edition && <><h3>{String(edition.record.title || '')}</h3><p>DOI：{String(edition.record.DOI || '')}</p><p className="citation-preview-text">{editionPreview?.bibliography_text}</p><p className="field-help">请核对题名、作者和出版版本是否对应。收藏后可继续编辑与确认引用。</p></>}
       {editionError && <p className="form-error" role="alert">{editionError}</p>}
       <div className="bibliography-item-actions"><button className="secondary-button" disabled={saving} onClick={() => setEditionSource(null)}>取消</button><button className="primary-button" disabled={saving || !edition} onClick={() => void saveEdition()}>单独收藏此版本</button></div>
+    </section></div>}
+    {removeRecord && <div className="dialog-backdrop" onClick={() => { if (!saving) setRemoveRecord(null); }}><section className="title-dialog bibliography-editor" role="dialog" aria-modal="true" aria-labelledby="delete-literature-title" onClick={event => event.stopPropagation()}>
+      <h2 id="delete-literature-title">删除书目？</h2><p>{removeRecord.title || '未填写题名'}</p>
+      <p className="field-help">此操作只删除当前书目和它的引用确认快照。关联 PDF、文件夹、同一 PDF 的其他版本书目，以及 Word 文档中已保存的引用快照都会保留。此操作无法撤销。</p>
+      {deleteError && <p className="form-error" role="alert">{deleteError}</p>}
+      <div className="bibliography-item-actions"><button className="secondary-button" type="button" disabled={saving} onClick={() => setRemoveRecord(null)}>取消</button>
+        <button className="primary-button bibliography-confirm-delete" type="button" disabled={saving} onClick={() => void deleteLiterature()}>{saving ? '删除中…' : '确认删除书目'}</button></div>
     </section></div>}
   </section></div>;
 }

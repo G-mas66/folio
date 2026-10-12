@@ -396,13 +396,85 @@ function pdfOrigins(items) {
   const origins = new Set();
   for (const item of items) {
     if (!item.pdfUrl) continue;
-    const safe = FolioCapture.safeUrl(item.pdfUrl);
-    if (safe) {
-      const url = new URL(safe);
-      origins.add(url.protocol + '//' + url.hostname + '/*');
-    }
+    for (const origin of FolioCapture.pdfPermissionOrigins(item.pdfUrl)) origins.add(origin);
   }
   return Array.from(origins);
+}
+
+async function downloadPdfFromActivePage(pdfUrl) {
+  if (!Number.isInteger(activeTab?.id) || activeTab.id < 0) return null;
+  const safePageUrl = FolioCapture.safeUrl(activeTab.url || '');
+  const safePdfUrl = FolioCapture.safeUrl(pdfUrl);
+  if (!safePageUrl || !safePdfUrl || new URL(safePageUrl).origin !== new URL(safePdfUrl).origin) return null;
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: activeTab.id },
+    world: 'MAIN',
+    func: async (url, maxBytes, timeoutMs) => {
+      const target = new URL(url);
+      if (!['http:', 'https:'].includes(target.protocol) || target.origin !== location.origin) {
+        throw new Error('PDF 来源与当前页面不同。');
+      }
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(target.href, {
+          method: 'GET', credentials: 'same-origin', redirect: 'error', signal: controller.signal,
+        });
+        if (!response.ok) throw new Error('PDF 下载失败（HTTP ' + response.status + '）。');
+        if (response.redirected || response.url !== target.href) throw new Error('PDF 链接发生了重定向。');
+        const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+        if (contentType.startsWith('text/html')) throw new Error('服务器返回网页而不是 PDF。');
+        const length = Number(response.headers.get('content-length') || 0);
+        if (Number.isFinite(length) && length > maxBytes) throw new Error('PDF 超过 25 MiB 限制。');
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error('无法读取 PDF 数据。');
+        const chunks = [];
+        let size = 0;
+        try {
+          while (true) {
+            const part = await reader.read();
+            if (part.done) break;
+            size += part.value.byteLength;
+            if (size > maxBytes) {
+              await reader.cancel();
+              throw new Error('PDF 超过 25 MiB 限制。');
+            }
+            chunks.push(part.value);
+          }
+        } finally {
+          reader.releaseLock();
+        }
+        if (!size) throw new Error('PDF 文件为空。');
+        const bytes = new Uint8Array(size);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        if (!String.fromCharCode(...bytes.subarray(0, Math.min(size, 1024))).includes('%PDF-')) {
+          throw new Error('下载内容不是 PDF。');
+        }
+        let base64 = '';
+        for (let start = 0; start < bytes.length; start += 24576) {
+          let binary = '';
+          const part = bytes.subarray(start, Math.min(start + 24576, bytes.length));
+          for (let offset = 0; offset < part.length; offset += 8192) {
+            binary += String.fromCharCode(...part.subarray(offset, Math.min(offset + 8192, part.length)));
+          }
+          base64 += btoa(binary);
+        }
+        return base64;
+      } catch (error) {
+        if (controller.signal.aborted) throw new Error('PDF 下载超时，请稍后重试。');
+        throw error;
+      } finally {
+        clearTimeout(timeout);
+      }
+    },
+    args: [safePdfUrl, FolioCapture.MAX_PDF_BYTES, 30000],
+  });
+  const base64 = results?.[0]?.result;
+  return typeof base64 === 'string' && base64 ? { base64 } : null;
 }
 
 function addCaptureResult(item, text, isError = false) {
@@ -451,18 +523,29 @@ function addCitationPreview(row, savedItem, preview, style) {
   row.append(confirm);
 }
 
-async function captureOne(item, { requestPdfPermission = false } = {}) {
+async function captureOne(item, { grantedPdfOrigins = new Set(), requestPdfPermission = false } = {}) {
   const pdfUrl = item.pdfUrl || '';
   let fetchPdf = Boolean(pdfUrl);
-  if (requestPdfPermission && fetchPdf) {
+  if (fetchPdf && requestPdfPermission) {
     const origins = pdfOrigins([item]);
-    fetchPdf = Boolean(origins.length && await chrome.permissions.request({ origins }));
+    try {
+      fetchPdf = Boolean(origins.length && await chrome.permissions.request({ origins }));
+    } catch {
+      fetchPdf = false;
+    }
+  } else if (fetchPdf) {
+    fetchPdf = pdfOrigins([item]).some((origin) => grantedPdfOrigins.has(origin));
+  }
+  let pagePdf;
+  if (fetchPdf) {
+    try { pagePdf = await downloadPdfFromActivePage(pdfUrl); } catch {}
   }
   return rpc('FOLIO_CAPTURE', {
     item: captureRecord(item),
     folderId: $('#folder-select').value,
     pdfUrl,
     fetchPdf,
+    ...(pagePdf ? { pdfBase64: pagePdf.base64 } : {}),
   });
 }
 
@@ -484,10 +567,21 @@ async function captureSelected() {
   $('#capture-button').disabled = true;
   $('#capture-results').replaceChildren();
   const style = $('#citation-style').value;
+  const pdfOriginsToRequest = pdfOrigins(selected);
+  if (pdfOriginsToRequest.length) {
+    setPageMessage('将只为所选 PDF 来源请求网站权限；拒绝后仍会保存书目。');
+    try { await chrome.permissions.request({ origins: pdfOriginsToRequest }); } catch {}
+  }
+  const grantedPdfOrigins = new Set();
+  for (const origin of pdfOriginsToRequest) {
+    try {
+      if (await chrome.permissions.contains({ origins: [origin] })) grantedPdfOrigins.add(origin);
+    } catch {}
+  }
   for (const [index, item] of selected.entries()) {
     setPageMessage('正在收藏 ' + (index + 1) + ' / ' + selected.length + '…');
     try {
-      const result = await captureOne(item, { requestPdfPermission: true });
+      const result = await captureOne(item, { grantedPdfOrigins });
       const pdf = result.pdf_import || {};
       let status = result.duplicate_record ? '书目已合并到已有记录' : '书目已保存';
       if (pdf.status === 'imported') status += ' · PDF 已导入';

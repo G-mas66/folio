@@ -171,7 +171,8 @@
       const version = /v(\d+)(?:\.pdf)?(?:$|\/)/i.exec(path)?.[1] || '';
       return { containerTitle: 'arXiv', publisher: 'arXiv', version: version ? 'v' + version : '' };
     }
-    if (host === 'link.springer.com' || host.endsWith('.springer.com')) return { publisher: 'Springer Nature' };
+    if (host === 'link.springer.com' || host.endsWith('.springer.com')
+        || host === 'link.springernature.com' || host.endsWith('.springernature.com')) return { publisher: 'Springer Nature' };
     if (host === 'ieeexplore.ieee.org') return { publisher: 'IEEE' };
     if (host === 'dl.acm.org') return { publisher: 'Association for Computing Machinery' };
     if (host === 'sciencedirect.com' || host.endsWith('.sciencedirect.com')) return { publisher: 'Elsevier' };
@@ -194,6 +195,15 @@
       }
     }
     return Array.from(values).slice(0, 5);
+  }
+
+  function springerPdfFallback(doi, pageUrl) {
+    let host = '';
+    try { host = new URL(pageUrl).hostname.toLowerCase(); } catch {}
+    if (host !== 'link.springer.com' || !doi) return '';
+    const url = new URL('https://link.springer.com/openurl/pdf');
+    url.searchParams.set('id', 'doi:' + doi);
+    return url.href;
   }
 
   function extractPageMetadata(document, pageUrl) {
@@ -235,6 +245,10 @@
         : /\bbook\b/i.test(jsonTypes) ? 'book'
           : containerTitle ? 'journal-article' : 'article';
     const pdfs = pdfCandidates(document, articleUrl || pageUrl, [...pdfValues, jsonLd.encoding?.contentUrl || jsonLd.associatedMedia?.contentUrl || '']);
+    if (!pdfs.length) {
+      const fallbackPdf = springerPdfFallback(doi, articleUrl || pageUrl);
+      if (fallbackPdf) pdfs.push(fallbackPdf);
+    }
     const parsedMetaAuthors = parseAuthors(authors);
     const parsedJsonAuthors = jsonLdAuthors(jsonLd.author);
     const mergedAuthors = dedupeAuthors(parsedMetaAuthors.length ? parsedMetaAuthors : parsedJsonAuthors);
@@ -376,12 +390,25 @@
   function pdfUrlFromTab(tabUrl) {
     let url;
     try { url = new URL(tabUrl); } catch { return ''; }
+    const pdfPath = /\.pdf$/i.test(url.pathname)
+      || /\/(?:content\/pdf|doi\/pdf(?:plus)?|openurl\/pdf)(?:\/|$)/i.test(url.pathname);
     if (url.protocol === 'http:' || url.protocol === 'https:') {
-      return /\.pdf$/i.test(url.pathname) ? safeUrl(url.href) : '';
+      return pdfPath ? safeUrl(url.href) : '';
     }
     const source = url.searchParams.get('src') || url.searchParams.get('file') || '';
     const safe = safeUrl(source);
-    return safe && /\.pdf(?:$|[?#])/i.test(safe) ? safe : '';
+    if (!safe) return '';
+    let sourceUrl;
+    try { sourceUrl = new URL(safe); } catch { return ''; }
+    return /\.pdf$/i.test(sourceUrl.pathname)
+      || /\/(?:content\/pdf|doi\/pdf(?:plus)?|openurl\/pdf)(?:\/|$)/i.test(sourceUrl.pathname) ? safe : '';
+  }
+
+  function pdfPermissionOrigins(url) {
+    const safe = safeUrl(url);
+    if (!safe) return [];
+    const parsed = new URL(safe);
+    return [parsed.protocol + '//' + parsed.hostname + '/*'];
   }
 
   function fileNameFromUrl(url, title = '') {
@@ -407,20 +434,52 @@
     return output;
   }
 
+  function validatePdfBase64(value) {
+    const maxChars = Math.ceil(MAX_PDF_BYTES / 3) * 4;
+    if (typeof value !== 'string' || !value || value.length > maxChars || value.length % 4) {
+      throw new Error('PDF 数据无效或超过 25 MiB 限制。');
+    }
+    const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+    const dataLength = value.length - padding;
+    if ((padding === 1 && dataLength % 4 !== 3) || (padding === 2 && dataLength % 4 !== 2)) {
+      throw new Error('PDF 数据无效或超过 25 MiB 限制。');
+    }
+    for (let index = 0; index < dataLength; index += 1) {
+      const code = value.charCodeAt(index);
+      if (!((code >= 65 && code <= 90) || (code >= 97 && code <= 122)
+          || (code >= 48 && code <= 57) || code === 43 || code === 47)) {
+        throw new Error('PDF 数据无效或超过 25 MiB 限制。');
+      }
+    }
+    const size = value.length / 4 * 3 - padding;
+    if (!size || size > MAX_PDF_BYTES) throw new Error('PDF 数据为空或超过 25 MiB 限制。');
+    let prefix = '';
+    try { prefix = atob(value.slice(0, Math.min(1368, value.length))); } catch {}
+    if (!prefix.includes('%PDF-')) throw new Error('下载内容不是 PDF。');
+    return size;
+  }
+
   async function downloadPdf(url, { fetchImpl = globalThis.fetch, timeoutMs = 30000 } = {}) {
     const safe = safeUrl(url);
     if (!safe) throw new Error('PDF 链接不安全或无效。');
+    const requestOrigin = new URL(safe).origin;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetchImpl(safe, {
         method: 'GET',
-        credentials: 'omit',
+        credentials: 'include',
         redirect: 'error',
         referrerPolicy: 'no-referrer',
         signal: controller.signal,
       });
+      const finalUrl = safeUrl(response.url || safe);
+      if (response.redirected || !finalUrl || finalUrl !== safe || new URL(finalUrl).origin !== requestOrigin) {
+        throw new Error('PDF 链接发生了重定向。为避免自动请求到未经你选择的主机，Folio 不会跟随；请在浏览器中打开最终 PDF 地址后重试。');
+      }
       if (!response.ok) throw new Error('PDF 下载失败（HTTP ' + response.status + '）。');
+      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      if (contentType.startsWith('text/html')) throw new Error('服务器返回网页而不是 PDF。请确认浏览器中的机构登录和访问权限，或换用可访问的 PDF 链接。');
       const length = Number(response.headers.get('content-length') || 0);
       if (Number.isFinite(length) && length > MAX_PDF_BYTES) throw new Error('PDF 超过 25 MiB 限制。');
       const reader = response.body?.getReader();
@@ -449,14 +508,14 @@
         offset += chunk.byteLength;
       }
       const prefix = String.fromCharCode(...bytes.subarray(0, Math.min(bytes.length, 1024)));
-      if (!prefix.includes('%PDF-')) throw new Error('下载内容不是 PDF。');
+      if (!prefix.includes('%PDF-')) throw new Error('下载内容不是 PDF。请确认登录/访问权限和 PDF 链接。');
       return {
         base64: encodeBase64(bytes),
-        name: fileNameFromUrl(response.url || safe),
+        name: fileNameFromUrl(finalUrl),
       };
     } catch (error) {
       if (controller.signal.aborted) throw new Error('PDF 下载超时，请稍后重试。');
-      if (error instanceof TypeError) throw new Error('PDF 请求失败。若链接会跳转，请直接打开最终 PDF 地址后重试。');
+      if (error instanceof TypeError) throw new Error('PDF 请求失败（网络、跨域或重定向限制）。如果链接会跳转，请在浏览器中打开最终 PDF 地址后重试。');
       throw error;
     } finally {
       clearTimeout(timeout);
@@ -525,8 +584,10 @@
     extractScholarResults,
     extractPage,
     pdfUrlFromTab,
+    pdfPermissionOrigins,
     fileNameFromUrl,
     encodeBase64,
+    validatePdfBase64,
     downloadPdf,
     downloadCitationExport,
   };

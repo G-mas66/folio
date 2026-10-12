@@ -35,6 +35,37 @@ function nativeSearch(secret) {
   });
 }
 
+function nativePdfImport(secret, bytes) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(pipeName);
+    const timer = setTimeout(() => { socket.destroy(); reject(new Error('Native PDF import timed out')); }, 120000);
+    const base64 = bytes.toString('base64');
+    let buffer = Buffer.alloc(0), captureId = '', offset = 0, index = 0;
+    const send = value => { const body = Buffer.from(JSON.stringify(value)); const header = Buffer.alloc(4); header.writeUInt32LE(body.length); socket.write(Buffer.concat([header, body])); };
+    const nextChunk = () => {
+      if (offset < base64.length) {
+        const chunk = base64.slice(offset, offset + 64 * 1024);
+        offset += chunk.length;
+        send({ id: 'chunk', type: 'FOLIO_CAPTURE_PDF_CHUNK', captureId, index: index++, chunk });
+      } else send({ id: 'finish', type: 'FOLIO_CAPTURE_FINISH', captureId, pdfName: 'native-regression.pdf' });
+    };
+    socket.on('error', error => { clearTimeout(timer); socket.destroy(); reject(error); });
+    socket.on('connect', () => send({ id: 'auth', type: 'FOLIO_NATIVE_AUTH', secret }));
+    socket.on('data', data => {
+      buffer = Buffer.concat([buffer, data]);
+      while (buffer.length >= 4 && buffer.length >= buffer.readUInt32LE(0) + 4) {
+        const size = buffer.readUInt32LE(0), result = JSON.parse(buffer.subarray(4, size + 4));
+        buffer = buffer.subarray(size + 4);
+        if (!result.ok) { clearTimeout(timer); socket.destroy(); reject(new Error(JSON.stringify(result))); return; }
+        if (result.id === 'auth') send({ id: 'begin', type: 'FOLIO_CAPTURE_BEGIN', item: { title: 'Native PDF regression', source: 'browser' } });
+        else if (result.id === 'begin') { captureId = result.result.captureId; nextChunk(); }
+        else if (result.id === 'chunk') nextChunk();
+        else { clearTimeout(timer); socket.end(); resolve(result.result); }
+      }
+    });
+  });
+}
+
 (async () => {
   const application = await _electron.launch({ executablePath: process.env.FOLIO_REVIEW_EXECUTABLE || path.join(root, 'node_modules/electron/dist/electron.exe'),
     args: process.env.FOLIO_REVIEW_EXECUTABLE ? [] : ['.'], cwd: root, env, timeout: 60000 });
@@ -66,14 +97,37 @@ function nativeSearch(secret) {
     assert.equal((await nativeSearch('0'.repeat(64))).status, 403);
     const search = await nativeSearch(fs.readFileSync(secretPath, 'utf8').trim());
     assert.equal(search.ok, true); assert.equal(search.result.items[0].id, item.id);
+    let importedRecord;
+    if (process.env.FOLIO_REVIEW_PDF) {
+      const imported = await nativePdfImport(fs.readFileSync(secretPath, 'utf8').trim(), fs.readFileSync(process.env.FOLIO_REVIEW_PDF));
+      assert.equal(imported.pdf_import.status, 'imported', JSON.stringify(imported));
+      assert.ok(imported.item.paper_id);
+      const paper = await call(`/papers/${imported.item.paper_id}`);
+      assert.ok(paper.id || paper.paper?.id);
+      importedRecord = imported.item;
+    }
     const word = await page.evaluate(() => window.workbench.wordPlugin('status'));
     assert.equal(word.state, 'not_installed');
     await page.getByRole('tab', { name: '书目', exact: true }).click();
     await page.getByRole('heading', { name: 'UNet++ acceptance fixture', exact: true }).waitFor();
-    await page.getByRole('button', { name: '引用', exact: true }).click();
+    await page.locator('article').filter({ has: page.getByRole('heading', { name: 'UNet++ acceptance fixture', exact: true }) }).getByRole('button', { name: '引用', exact: true }).click();
     await page.getByText('正文引用', { exact: true }).waitFor();
     await page.screenshot({ path: path.join(output, 'citation.png') });
-    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ ok: true, actualElectron: true, actualBackend: true, actualRenderer: true, workflows: ['folder', 'preview-confirm', 'stale', 'offline-snapshot', 'native-auth-search', 'word-status', 'citation-ui'] }, null, 2));
+    if (importedRecord) {
+      await page.getByRole('button', { name: '关闭', exact: true }).click();
+      const card = page.locator('article').filter({ has: page.getByRole('heading', { name: 'Native PDF regression', exact: true }) });
+      await card.getByRole('button', { name: '删除', exact: true }).click();
+      await page.getByRole('dialog', { name: '删除书目？' }).getByRole('button', { name: '取消', exact: true }).click();
+      assert.equal(await card.count(), 1);
+      await card.getByRole('button', { name: '删除', exact: true }).click();
+      await page.getByRole('button', { name: '确认删除书目', exact: true }).click();
+      await card.waitFor({ state: 'detached' });
+      const retained = await call(`/papers/${importedRecord.paper_id}`);
+      assert.ok(retained.id);
+      assert.ok(!(await call('/literature')).items.some(record => record.id === importedRecord.id));
+      await page.screenshot({ path: path.join(output, 'deleted-pdf-retained.png') });
+    }
+    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ ok: true, actualElectron: true, actualBackend: true, actualRenderer: true, workflows: ['folder', 'preview-confirm', 'stale', 'offline-snapshot', 'native-auth-search', 'word-status', 'citation-ui', ...(importedRecord ? ['native-pdf-import', 'delete-book-keep-pdf'] : [])] }, null, 2));
     console.log(output);
   } finally { await application.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

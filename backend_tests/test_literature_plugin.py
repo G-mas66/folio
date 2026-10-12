@@ -335,6 +335,36 @@ class LiteraturePluginContract(unittest.TestCase):
         self.assertIsNone(deleted_pdf_record["paper_id"])
         self.assertEqual(deleted_pdf_record["folder_id"], folder_a)
 
+    def test_delete_literature_keeps_linked_pdf_folder_and_other_version(self):
+        folder_id = self.add_folder("Versions")
+        paper_id = self.add_paper(b"%PDF-1.7\npreprint and published version")
+        with connect() as db:
+            db.execute("UPDATE papers SET folder_id = ? WHERE id = ?", (folder_id, paper_id))
+        preprint = self.capture({"paper_id": paper_id, "doi": "10.5555/preprint-delete", "title": "Preprint"}).json()["item"]
+        published = self.capture({"paper_id": paper_id, "doi": "10.5555/published-keep", "title": "Published version"}).json()["item"]
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with connect() as db:
+            db.execute(
+                "INSERT INTO literature_citations(record_id, style, fingerprint, csl_snapshot_json, citation_html, citation_text, bibliography_html, bibliography_text, bibliography_body_html, bibliography_body_text, confirmed_at) "
+                "VALUES (?, 'apa', ?, '{}', '', '', '', '', '', '', ?)",
+                (preprint["id"], "a" * 64, timestamp),
+            )
+
+        deleted = self.request("DELETE", f"/literature/{preprint['id']}")
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertTrue(deleted.json()["deleted"])
+        self.assertEqual(self.request("GET", f"/literature/{preprint['id']}").status_code, 404)
+        kept = self.request("GET", f"/literature/{published['id']}")
+        self.assertEqual(kept.status_code, 200, kept.text)
+        self.assertEqual(kept.json()["paper_id"], paper_id)
+        self.assertEqual(kept.json()["folder_id"], folder_id)
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM papers WHERE id = ?", (paper_id,)).fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM folders WHERE id = ?", (folder_id,)).fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM literature_citations WHERE record_id = ?", (preprint["id"],)).fetchone()[0], 0)
+        missing = self.request("DELETE", f"/literature/{preprint['id']}")
+        self.assertEqual(missing.status_code, 404)
+
     def test_legacy_migration_preserves_ids_links_and_manual_fields(self):
         paper_id = self.add_paper(b"%PDF-1.7\nlegacy paper")
         record_id = "stable-existing-literature-id"

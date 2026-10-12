@@ -874,6 +874,15 @@ def register(app, authorize: Callable[..., Any], import_pdf: Callable[[str, str 
         ensure_tables()
         return _record(_get_record(record_id))
 
+    @app.delete("/literature/{record_id}", dependencies=[Depends(authorize)])
+    def delete_literature(record_id: str):
+        ensure_tables()
+        with connect() as db:
+            cursor = db.execute("DELETE FROM literature_records WHERE id = ?", (record_id,))
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code=404, detail="找不到这条书目。")
+        return {"deleted": True}
+
     @app.patch("/literature/{record_id}", dependencies=[Depends(authorize)])
     async def patch_literature(record_id: str, request: Request):
         ensure_tables()

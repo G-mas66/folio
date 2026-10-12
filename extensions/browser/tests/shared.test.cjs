@@ -145,6 +145,19 @@ test('page extraction preserves structured authors, publisher data, arXiv versio
   assert.equal(arxiv.version_label, 'v2');
 });
 
+test('Springer DOI pages get the documented PDF OpenURL candidate when no direct PDF is exposed', () => {
+  const metas = [meta('citation_title', 'ACC-UNet'), meta('citation_doi', '10.1007/978-3-031-43898-1_66')];
+  const document = {
+    title: 'ACC-UNet | Springer Nature Link',
+    body: { textContent: '' },
+    querySelectorAll: (selector) => selector.startsWith('meta') ? metas : [],
+    querySelector: () => null,
+  };
+  const result = FolioCapture.extractPageMetadata(document, 'https://link.springer.com/chapter/10.1007/978-3-031-43898-1_66');
+  assert.equal(result.pdf_url, 'https://link.springer.com/openurl/pdf?id=doi%3A10.1007%2F978-3-031-43898-1_66');
+  assert.deepEqual(result.pdf_candidates, [result.pdf_url]);
+});
+
 test('PRISM URL is an article link fallback and never a PDF candidate', () => {
   const metas = [meta('prism.url', 'https://publisher.example/article/123')];
   const document = {
@@ -188,8 +201,10 @@ test('Scholar extraction returns multiple selectable records and associated PDF 
   assert.equal(found[0].pdf_url, 'https://example.org/one.pdf');
 });
 
-test('PDF tab detection supports direct URLs and the built-in viewer source', () => {
+test('PDF tab detection supports direct URLs, Springer PDF endpoints, and the built-in viewer source', () => {
   assert.equal(FolioCapture.pdfUrlFromTab('https://example.org/files/paper.PDF?download=1'), 'https://example.org/files/paper.PDF?download=1');
+  assert.equal(FolioCapture.pdfUrlFromTab('https://link.springer.com/content/pdf/10.1007/978-3-031-43898-1_66'), 'https://link.springer.com/content/pdf/10.1007/978-3-031-43898-1_66');
+  assert.equal(FolioCapture.pdfUrlFromTab('https://link.springer.com/openurl/pdf?id=doi%3A10.1007%2F978-3-031-43898-1_66'), 'https://link.springer.com/openurl/pdf?id=doi%3A10.1007%2F978-3-031-43898-1_66');
   assert.equal(
     FolioCapture.pdfUrlFromTab('chrome-extension://viewer/index.html?src=' + encodeURIComponent('https://example.org/files/paper.pdf')),
     'https://example.org/files/paper.pdf',
@@ -200,6 +215,22 @@ test('PDF tab detection supports direct URLs and the built-in viewer source', ()
 test('base64 encoding handles multi-block files without changing bytes', () => {
   const bytes = Uint8Array.from({ length: 50000 }, (_, index) => index % 251);
   assert.equal(FolioCapture.encodeBase64(bytes), Buffer.from(bytes).toString('base64'));
+});
+
+test('PDF data returned from the page context is validated before worker transfer', () => {
+  const bytes = Buffer.from('%PDF-1.7\nfixture', 'utf8');
+  assert.equal(FolioCapture.validatePdfBase64(bytes.toString('base64')), bytes.length);
+  for (const value of ['', 'not base64', Buffer.from('<html>login</html>').toString('base64')]) {
+    assert.throws(() => FolioCapture.validatePdfBase64(value), /PDF/);
+  }
+});
+
+test('page-context PDF validation accepts the full 25 MiB limit without regex backtracking or recursion', () => {
+  const encodedLength = Math.ceil(FolioCapture.MAX_PDF_BYTES / 3) * 4;
+  const maximum = 'JVBERi0' + 'A'.repeat(encodedLength - 9) + '==';
+  assert.equal(maximum.length, encodedLength);
+  assert.equal(FolioCapture.validatePdfBase64(maximum), FolioCapture.MAX_PDF_BYTES);
+  assert.throws(() => FolioCapture.validatePdfBase64('A'.repeat(encodedLength + 4)), /25 MiB/);
 });
 
 test('PDF download checks Content-Length before reading the response body', async () => {
@@ -244,19 +275,58 @@ test('PDF download aborts when the read times out', async () => {
   );
 });
 
-test('PDF download refuses redirects and suggests opening the final PDF URL', async () => {
-  const requests = [];
+test('PDF download keeps source cookies, sends no referrer from the extension worker, and refuses redirects', async () => {
+  let request;
   await assert.rejects(
     FolioCapture.downloadPdf('https://example.org/paper.pdf', {
       fetchImpl: async (url, options) => {
-        requests.push({ url, redirect: options.redirect });
-        if (options.redirect === 'error') throw new TypeError('Failed to fetch');
-        return new Response('%PDF-1.7', { status: 200 });
+        request = { url, ...options };
+        throw new TypeError('Failed to fetch');
       },
     }),
-    /直接打开最终 PDF 地址后重试/,
+    /重定向|打开最终 PDF/,
   );
-  assert.deepEqual(requests, [{ url: 'https://example.org/paper.pdf', redirect: 'error' }]);
+  assert.equal(request.url, 'https://example.org/paper.pdf');
+  assert.equal(request.credentials, 'include');
+  assert.equal(request.redirect, 'error');
+  assert.equal(request.referrer, undefined);
+  assert.equal(request.referrerPolicy, 'no-referrer');
+});
+
+test('PDF download rejects unsafe or cross-origin response URLs and HTML login pages', async () => {
+  for (const finalUrl of ['http://127.0.0.1/admin', 'https://other.example/paper.pdf']) {
+    await assert.rejects(FolioCapture.downloadPdf('https://example.org/paper.pdf', {
+      fetchImpl: async () => ({
+        ok: true, status: 200, url: finalUrl, redirected: true,
+        headers: { get: () => null },
+      }),
+    }), /重定向/);
+  }
+  await assert.rejects(FolioCapture.downloadPdf('https://example.org/paper.pdf', {
+    fetchImpl: async () => new Response('<html>institution login</html>', {
+      status: 200,
+      headers: { 'content-type': 'text/html' },
+    }),
+  }), /不是 PDF|登录/);
+});
+
+test('PDF download does not allow callers to set a page referrer from the extension worker', async () => {
+  let request;
+  await assert.rejects(FolioCapture.downloadPdf('https://pdf-host.example/paper.pdf', {
+    referrer: 'https://pdf-host.example/article/42',
+    fetchImpl: async (_url, options) => {
+      request = options;
+      throw new TypeError('blocked');
+    },
+  }), /PDF 请求失败/);
+  assert.equal(request.credentials, 'include');
+  assert.equal(request.referrer, undefined);
+  assert.equal(request.referrerPolicy, 'no-referrer');
+});
+
+test('PDF request-origin helper refuses unsafe URLs and narrows permissions to the selected source', () => {
+  assert.deepEqual(FolioCapture.pdfPermissionOrigins('https://publisher.example/paper.pdf'), ['https://publisher.example/*']);
+  assert.deepEqual(FolioCapture.pdfPermissionOrigins('http://127.0.0.1/paper.pdf'), []);
 });
 
 test('citation export download uses no cookies and enforces its streaming size limit', async () => {

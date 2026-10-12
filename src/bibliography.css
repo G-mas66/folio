@@ -25,4 +25,12 @@
 .bibliography-editor { width: min(580px, calc(100vw - 48px)); max-height: calc(100vh - 48px); overflow: auto; }
 .bibliography-editor .field-label { display: grid; gap: 6px; margin: 12px 0; }
 .bibliography-editor textarea { resize: vertical; width: 100%; box-sizing: border-box; }
+.bibliography-delete-button { color: #a33630; }
+.bibliography-delete-button:hover:not(:disabled) { color: #7f201c; }
+.bibliography-confirm-delete { background: #a33630; }
+.bibliography-confirm-delete:hover:not(:disabled) { background: #7f201c; }
+:root[data-theme="dark"] .bibliography-delete-button { color: #f1a9a2; }
+:root[data-theme="dark"] .bibliography-delete-button:hover:not(:disabled) { color: #ffbbb3; }
+:root[data-theme="dark"] .bibliography-confirm-delete { background: #963b35; }
+:root[data-theme="dark"] .bibliography-confirm-delete:hover:not(:disabled) { background: #a94a43; }
 @media (max-width: 800px) { .bibliography-item { align-items: flex-start; flex-direction: column; } }
