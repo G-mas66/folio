@@ -6,7 +6,9 @@
 
 一个桌面文献阅读工作台。英文 PDF 导入后先完成全文翻译，中文文献直接阅读原始 PDF；在同一窗口中结合 AI 问答、笔记和批注理解文献。
 
-**当前版本：Windows x64 1.1.0；macOS arm64 / x64 1.0.4 · Electron + React + Python**
+**当前版本：Windows x64 1.4.2；macOS arm64 / x64 1.0.4 · Electron + React + Python**
+
+Windows 1.4.2：紧凑文献列表，单击查看右侧封面和中英文标题、作者等详情，双击阅读；新增收藏入口，修复旋转 PDF 翻译版式校验和浏览器插件连接。见 [发布说明](docs/Folio-1.4.2-Windows发布说明.md)。
 
 Windows 1.1 新增：标记按页码与页面位置排序；选中文字右键「AI 批注」先输入问题，再编辑并确认保存；「向 AI 提问」关联当前选区；聊天可准备批注和追加笔记建议，定位与内容确认后保存。模型旁提供思考模式与推理强度，显示服务实际返回的思考内容或摘要。见 [1.1 开发方案](docs/Folio-1.1.0-开发方案.md)与 [Windows 验收记录](docs/Folio-1.1.0-Windows-验收报告.md)。
 
@@ -35,11 +37,11 @@ Windows 1.1 新增：标记按页码与页面位置排序；选中文字右键�
 
 ## 界面预览
 
-文献库与阅读截图记录 0.14.0-beta.3 的界面，使用合成测试文献；设置截图中的 API Key 输入框为空。
+以下文献库截图来自 Windows 1.4.2，使用合成测试文献。其他截图记录较早版本；设置截图中的 API Key 输入框为空。
 
 **浅色主题文献库与分类**
 
-![Folio 浅色主题文献库与合成文献缩略图](docs/screenshots/library-light.png)
+![Folio 紧凑文献库与右侧详情](docs/screenshots/1.4.2/library-light.png)
 
 **深色主题阅读与 AI 助手**
 
@@ -70,11 +72,11 @@ Windows 1.1 新增：标记按页码与页面位置排序；选中文字右键�
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | [Folio-1.1.0-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v1.1.0/Folio-1.1.0-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
+| Windows x64 | [Folio-1.4.2-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v1.4.2/Folio-1.4.2-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
 | Mac · Apple Silicon | [Folio-1.0.4-macOS-arm64.zip](https://github.com/G-mas66/folio/releases/download/v1.0.4/Folio-1.0.4-macOS-arm64.zip) | 解压，将 `.app` 拖入「应用程序」 |
 | Mac · Intel | [Folio-1.0.4-macOS-x64.zip](https://github.com/G-mas66/folio/releases/download/v1.0.4/Folio-1.0.4-macOS-x64.zip) | 解压，将 `.app` 拖入「应用程序」 |
 
-发布页附有各平台验收报告及校验清单：[Windows 1.1.0](https://github.com/G-mas66/folio/releases/download/v1.1.0/SHA256SUMS.txt)、[macOS 1.0.4](https://github.com/G-mas66/folio/releases/download/v1.0.4/SHA256SUMS-macOS.txt)。
+发布页附有校验清单：[Windows 1.4.2](https://github.com/G-mas66/folio/releases/download/v1.4.2/SHA256SUMS.txt)、[macOS 1.0.4](https://github.com/G-mas66/folio/releases/download/v1.0.4/SHA256SUMS-macOS.txt)。
 
 macOS 1.0.4 的双架构构建、打包应用和公开下载检查见[Mac 验收记录](docs/Folio-1.0.4-macOS-验收报告.md)。Windows 1.0.4 的翻译限流修复、反馈表单与发布检查见[验收记录](docs/Folio-1.0.4-验收报告.md)；PDF 标记与助手布局的详细回归见 [1.0.1 验收记录](docs/Folio-1.0.1-验收报告.md)。
 

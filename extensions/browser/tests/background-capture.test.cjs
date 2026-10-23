@@ -6,15 +6,24 @@ const path = require('node:path');
 const vm = require('node:vm');
 const test = require('node:test');
 
-function createBackground() {
+function createBackground(disconnectReason = '') {
   const runtimeListeners = [];
   const nativeMessages = [];
   let nativeMessageListener;
+  let nativeDisconnectListener;
   const nativePort = {
     onMessage: { addListener(listener) { nativeMessageListener = listener; } },
-    onDisconnect: { addListener() {} },
+    onDisconnect: { addListener(listener) { nativeDisconnectListener = listener; } },
     postMessage(message) {
       nativeMessages.push(message);
+      if (disconnectReason) {
+        queueMicrotask(() => {
+          chrome.runtime.lastError = { message: disconnectReason };
+          nativeDisconnectListener();
+          delete chrome.runtime.lastError;
+        });
+        return;
+      }
       const results = {
         FOLIO_STATUS: { connected: true },
         FOLIO_CAPTURE_BEGIN: { captureId: 'capture-1' },
@@ -77,4 +86,14 @@ test('background validates page-context PDF bytes before sending native chunks',
   });
   assert.equal(rejected.result.pdf_import.status, 'failed');
   assert.deepEqual(Array.from(nativeMessages, ({ type }) => type), ['FOLIO_CAPTURE']);
+});
+
+test('forbidden native connection explains extension identity repair to the popup', async () => {
+  const { listener } = createBackground('Access to the specified native messaging host is forbidden.');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const response = await send(listener, { type: 'FOLIO_STATUS' });
+  assert.equal(response.ok, false);
+  assert.match(response.error, /浏览器未获准连接 Folio/);
+  assert.match(response.error, /扩展 ID：extension-id/);
+  assert.match(response.error, /更新并重启 Folio/);
 });

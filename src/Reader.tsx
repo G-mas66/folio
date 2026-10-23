@@ -116,7 +116,7 @@ function saveReaderLayout(layout: ReaderLayoutState) {
   try { localStorage.setItem(readerLayoutKey, JSON.stringify(layout)); } catch { /* local preferences are optional */ }
 }
 
-export function Reader({ paperId, active, libraryNavigation }: { paperId: string; active: boolean; libraryNavigation: ReactNode }) {
+export function Reader({ paperId, active, libraryNavigation, openRequest }: { paperId: string; active: boolean; libraryNavigation: ReactNode; openRequest?: { kind: PdfKind; sequence: number } }) {
   const [paper, setPaper] = useState<Paper | null>(null);
   const [pages, setPages] = useState<Page[]>([]);
   const [segments, setSegments] = useState<Segment[]>([]);
@@ -164,6 +164,12 @@ export function Reader({ paperId, active, libraryNavigation }: { paperId: string
   const [pageNumber, setPageNumber] = useState(1);
   const [mode, setMode] = useState<'bilingual' | 'mono' | 'original'>('bilingual');
   const pdfKind: PdfKind = mode === 'original' ? 'original' : mode === 'mono' ? 'mono' : 'dual';
+  const lastOpenRequestRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!active || !paper || !openRequest || lastOpenRequestRef.current === openRequest.sequence) return;
+    lastOpenRequestRef.current = openRequest.sequence;
+    setMode(paper.source_language === 'zh' || openRequest.kind === 'original' ? 'original' : openRequest.kind === 'mono' ? 'mono' : 'bilingual');
+  }, [active, paper?.id, paper?.source_language, openRequest]);
   const [searchText, setSearchText] = useState('');
   const [searchNotice, setSearchNotice] = useState('');
   const [failure, setFailure] = useState('');

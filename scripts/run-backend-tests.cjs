@@ -30,6 +30,8 @@ const modules = [
   'review.test_reasoning_protocol', 'backend_tests.test_agent_actions',
   'backend_tests.test_research_skills',
   'backend_tests.test_literature_plugin', 'backend_tests.test_research_agent',
+  'backend_tests.test_paper_favorites',
+  'backend_tests.test_pdf_output_validation',
 ];
 const env = {
   ...process.env,

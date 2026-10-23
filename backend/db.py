@@ -77,6 +77,7 @@ def initialize() -> None:
                 dual_pdf_file_name TEXT NOT NULL DEFAULT '',
                 pdf_progress INTEGER NOT NULL DEFAULT 0,
                 model_override TEXT NOT NULL DEFAULT '',
+                is_favorite INTEGER NOT NULL DEFAULT 0,
                 folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL
             );
             CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -241,6 +242,7 @@ def initialize() -> None:
             ("model_override", "TEXT NOT NULL DEFAULT ''"),
             ("source_language", "TEXT NOT NULL DEFAULT 'unknown'"),
             ("folder_id", "TEXT REFERENCES folders(id) ON DELETE SET NULL"),
+            ("is_favorite", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if name not in columns:
                 db.execute(f"ALTER TABLE papers ADD COLUMN {name} {definition}")

@@ -43,6 +43,30 @@ def emit(event: dict) -> None:
     print(json.dumps(event, ensure_ascii=False), flush=True)
 
 
+def normalized_pdf_input(source: Path, output: Path) -> Path:
+    import pymupdf
+
+    with pymupdf.open(source) as document:
+        if not any(page.rotation for page in document):
+            return source
+        # BabelDOC misplaces content on rotated pages. Bake the rotation into a
+        # temporary input while preserving the original's visible page layout.
+        # The backend removes the entire engine output directory after this
+        # process exits, when BabelDOC's input handles have been released.
+        temporary = output / ".input"
+        temporary.mkdir(parents=True, exist_ok=True)
+        normalized = temporary / source.name
+        for page in document:
+            if page.rotation:
+                crop = page.cropbox
+                page.set_cropbox(page.mediabox)
+                rotated_crop = crop * page.rotation_matrix
+                page.remove_rotation()
+                page.set_cropbox(rotated_crop)
+        document.save(normalized)
+        return normalized
+
+
 async def translate(source: Path, output: Path) -> None:
     from pdf2zh_next.config.model import BasicSettings, PDFSettings, SettingsModel, TranslationSettings
     from pdf2zh_next.config.translate_engine_model import SiliconFlowFreeSettings
@@ -142,7 +166,7 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=True)
     prepare_runtime(home, assets)
     try:
-        asyncio.run(translate(source, output))
+        asyncio.run(translate(normalized_pdf_input(source, output), output))
     except Exception as error:
         emit({"type": "error", "message": str(error)[:1000]})
         return 1

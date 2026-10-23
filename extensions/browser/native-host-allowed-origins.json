@@ -4,6 +4,7 @@
     "chrome-extension://gimnkmpfcblogmkkamdlpejgleeiidpb/"
   ],
   "production": [
+    "chrome-extension://gdiemkjipojgcalgibamhjaffbbnpfco/",
     "chrome-extension://gimnkmpfcblogmkkamdlpejgleeiidpb/"
   ]
 }

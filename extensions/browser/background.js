@@ -22,6 +22,13 @@ function scheduleReconnect() {
   chrome.alarms?.create('folio-native-status', { periodInMinutes: 0.5 });
 }
 
+function nativeConnectionError(reason) {
+  if (/Access to the specified native messaging host is forbidden/i.test(reason)) {
+    return `浏览器未获准连接 Folio（扩展 ID：${chrome.runtime.id}）。请更新并重启 Folio 桌面版，再重试连接；如仍失败，请核对已安装的扩展是否来自 Folio 安装包。`;
+  }
+  return reason;
+}
+
 function connectNative() {
   if (nativePort) return nativePort;
   let port;
@@ -40,7 +47,7 @@ function connectNative() {
     else request.reject(new Error(errorMessage(response.error)));
   });
   port.onDisconnect.addListener(() => {
-    const reason = chrome.runtime.lastError?.message || 'Folio 浏览器桥已断开。';
+    const reason = nativeConnectionError(chrome.runtime.lastError?.message || 'Folio 浏览器桥已断开。');
     if (nativePort === port) nativePort = null;
     for (const [id, request] of pendingRequests) {
       pendingRequests.delete(id);

@@ -3,6 +3,7 @@
 const $ = (selector) => document.querySelector(selector);
 let activeTab;
 let candidates = [];
+let pageMessageSource = '';
 
 function rpc(type, values = {}) {
   return chrome.runtime.sendMessage({ type, ...values }).then((reply) => {
@@ -17,7 +18,8 @@ function setBadge(text, kind = '') {
   badge.className = 'badge' + (kind ? ' ' + kind : '');
 }
 
-function setPageMessage(text, isError = false) {
+function setPageMessage(text, isError = false, source = '') {
+  pageMessageSource = source;
   const message = $('#page-message');
   message.textContent = text;
   message.classList.toggle('error', isError);
@@ -684,9 +686,10 @@ async function reconnect() {
     await rpc('FOLIO_STATUS');
     await loadFolders();
     setBadge('已连接', 'good');
+    if (pageMessageSource === 'connection') setPageMessage('');
   } catch (error) {
     setBadge('未连接', 'bad');
-    setPageMessage(error.message, true);
+    setPageMessage(error.message, true, 'connection');
   }
 }
 

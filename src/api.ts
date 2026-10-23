@@ -19,6 +19,7 @@ export type Paper = {
   pdf_progress: number;
   model_override: string;
   folder_id: string | null;
+  is_favorite: boolean;
   diagnostics: { page: number; status: string; text_chars: number }[];
   api_tokens: number | null;
 };

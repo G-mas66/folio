@@ -178,6 +178,7 @@ def paper_view(paper) -> dict[str, Any]:
         "pdf_progress": paper["pdf_progress"],
         "model_override": paper["model_override"],
         "folder_id": paper["folder_id"],
+        "is_favorite": bool(paper["is_favorite"]),
         "diagnostics": diagnostics, "api_tokens": usage,
     }
 
@@ -398,20 +399,31 @@ def paper_status(paper_id: str) -> str | None:
 def validate_pdf_outputs(original: Path, mono: Path, dual: Path, expected_pages: int) -> None:
     from pypdf import PdfReader
 
+    def visible_size(page) -> tuple[float, float]:
+        # BabelDOC composes side-by-side pages using PyMuPDF's rotated page.rect.
+        media, crop = page.mediabox, page.cropbox
+        unit = float(page.user_unit)
+        width = (min(media.right, crop.right) - max(media.left, crop.left)) * unit
+        height = (min(media.top, crop.top) - max(media.bottom, crop.bottom)) * unit
+        if not all(math.isfinite(value) and value > 0 for value in (unit, width, height)):
+            raise ValueError("PDF 页面可见尺寸无效。")
+        return (height, width) if page.rotation % 180 else (width, height)
+
     try:
         source_pages = PdfReader(original, strict=True).pages
         mono_pages = PdfReader(mono, strict=True).pages
         dual_pages = PdfReader(dual, strict=True).pages
-        if len(source_pages) != expected_pages or not mono_pages or not dual_pages:
+        # This engine replaces page contents in place and emits one dual page per source page.
+        if expected_pages <= 0 or any(len(pages) != expected_pages for pages in (source_pages, mono_pages, dual_pages)):
             raise ValueError("生成的 PDF 页数无效。")
         for source, chinese in zip(source_pages, mono_pages):
-            sw, sh = float(source.mediabox.width), float(source.mediabox.height)
-            mw, mh = float(chinese.mediabox.width), float(chinese.mediabox.height)
-            if min(sw, sh) <= 0 or abs(sw - mw) > 2 or abs(sh - mh) > 2:
+            sw, sh = visible_size(source)
+            mw, mh = visible_size(chinese)
+            if abs(sw - mw) > 2 or abs(sh - mh) > 2:
                 raise ValueError("中文 PDF 页面尺寸检查失败。")
         for source, bilingual in zip(source_pages, dual_pages):
-            sw, sh = float(source.mediabox.width), float(source.mediabox.height)
-            dw, dh = float(bilingual.mediabox.width), float(bilingual.mediabox.height)
+            sw, sh = visible_size(source)
+            dw, dh = visible_size(bilingual)
             if abs(sw * 2 - dw) > max(2, sw * 0.015) or abs(sh - dh) > 2:
                 raise ValueError("双语 PDF 并排版式或页面尺寸检查失败。")
         chinese_text = "".join(page.extract_text() or "" for page in mono_pages)
@@ -695,6 +707,10 @@ class FolderInput(BaseModel):
 
 class PaperFolderInput(BaseModel):
     folder_id: str | None = None
+
+
+class PaperFavoriteInput(BaseModel):
+    is_favorite: bool
 
 
 class ModelDiscoveryInput(BaseModel):
@@ -1344,11 +1360,13 @@ def get_usage():
 
 
 @app.get("/papers", dependencies=[Depends(authorize)])
-def list_papers(q: str = "", folder_id: str = "all"):
+def list_papers(q: str = "", folder_id: str = "all", favorite: bool = False):
     if folder_id not in {"all", "unfiled"}:
         require_folder(folder_id)
     conditions: list[str] = []
     parameters: list[str] = []
+    if favorite:
+        conditions.append("is_favorite = 1")
     if folder_id == "unfiled":
         conditions.append("folder_id IS NULL")
     elif folder_id != "all":
@@ -1378,6 +1396,14 @@ def import_papers(value: ImportInput):
 
 @app.get("/papers/{paper_id}", dependencies=[Depends(authorize)])
 def get_paper(paper_id: str):
+    return paper_view(require_paper(paper_id))
+
+
+@app.patch("/papers/{paper_id}/favorite", dependencies=[Depends(authorize)])
+def update_paper_favorite(paper_id: str, value: PaperFavoriteInput):
+    require_paper(paper_id)
+    with connect() as db:
+        db.execute("UPDATE papers SET is_favorite = ? WHERE id = ?", (int(value.is_favorite), paper_id))
     return paper_view(require_paper(paper_id))
 
 

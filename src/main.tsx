@@ -4,6 +4,7 @@ import { App } from './App';
 import './style.css';
 import './theme-transition.css';
 import './eye-comfort.css';
+import './compact-ui.css';
 
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

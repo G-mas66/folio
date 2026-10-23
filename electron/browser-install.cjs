@@ -13,10 +13,10 @@ async function registerBrowserHost({ executable, originsFile, directory, develop
   const configuration = JSON.parse(await fs.readFile(originsFile, 'utf8'));
   const origins = [...new Set(configuration[development ? 'development' : 'production'] || [])];
   if (origins.some(origin => !/^chrome-extension:\/\/[a-p]{32}\/$/.test(origin))) throw new Error('浏览器扩展身份配置无效。');
+  if (!origins.length) return { installed: false, message: '尚未配置受信扩展 ID，浏览器自动连接未注册。请安装完整的 Folio 发行包。' };
   await fs.mkdir(directory, { recursive: true });
   const manifest = path.join(directory, `${hostName}.json`);
   await fs.writeFile(manifest, JSON.stringify({ name: hostName, description: 'Folio 本机文献收藏连接', path: path.resolve(executable), type: 'stdio', allowed_origins: origins }, null, 2));
-  if (!origins.length) return { installed: false, message: '尚未配置商店扩展 ID，浏览器自动连接未注册。开发版可通过开发预览入口启动。' };
   for (const browser of ['Google\\Chrome', 'Microsoft\\Edge']) {
     await execute('reg.exe', ['add', `HKCU\\Software\\${browser}\\NativeMessagingHosts\\${hostName}`, '/ve', '/t', 'REG_SZ', '/d', manifest, '/f'], { windowsHide: true });
   }

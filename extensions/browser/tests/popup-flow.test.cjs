@@ -81,6 +81,71 @@ function findByText(root, text) {
 
 function waitForUi() { return new Promise((resolve) => setTimeout(resolve, 0)); }
 
+test('successful reconnect clears its previous error and preserves DOI, capture, and import errors', async () => {
+  const document = new FakeDocument();
+  let connected = false;
+  const chrome = {
+    runtime: {
+      async sendMessage(message) {
+        if (message.type === 'FOLIO_STATUS') return connected
+          ? { ok: true, result: { connected: true } }
+          : { ok: false, error: 'Access to the specified native messaging host is forbidden.' };
+        if (message.type === 'FOLIO_FOLDERS') return { ok: true, result: [] };
+        if (message.type === 'FOLIO_RESOLVE') return { ok: false, error: 'DOI service unavailable' };
+        if (message.type === 'FOLIO_CAPTURE') return { ok: false, error: 'Capture failed' };
+        if (message.type === 'FOLIO_IMPORT_EXPORT') return { ok: false, error: 'Export download failed' };
+        throw new Error('Unexpected RPC: ' + message.type);
+      },
+    },
+    tabs: {
+      query: async () => [{ id: 12, title: 'Paper', url: 'https://publisher.example/paper' }],
+      sendMessage: async () => ({ kind: 'page', candidates: [{
+        title: 'Paper', doi: '10.5555/paper', url: 'https://publisher.example/paper',
+        citation_exports: [{ url: 'https://publisher.example/export.bib', format: 'bibtex' }],
+      }] }),
+    },
+    scripting: { executeScript: async () => [] },
+    permissions: { request: async () => true },
+  };
+  vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '../popup.js'), 'utf8'), {
+    document, chrome, FolioCapture: require('../shared.js'), URL,
+  });
+  await waitForUi();
+  const pageMessage = document.querySelector('#page-message');
+  const badge = document.querySelector('#connection-state');
+  assert.match(pageMessage.textContent, /forbidden/);
+  assert.equal(pageMessage.hidden, false);
+
+  connected = true;
+  const reconnect = document.querySelector('#reconnect-button');
+  await reconnect.click();
+  await waitForUi();
+  assert.equal(badge.textContent, '已连接');
+  assert.equal(pageMessage.textContent, '');
+  assert.equal(pageMessage.hidden, true);
+  assert.equal(pageMessage.className.includes('error'), false);
+
+  const candidates = document.querySelector('#candidate-list');
+  await findByText(candidates, '核对 DOI 信息').click();
+  await waitForUi();
+  await reconnect.click();
+  await waitForUi();
+  assert.match(candidates.textContent, /DOI 查询失败：DOI service unavailable/);
+
+  await findByText(candidates, '仍用页面元数据收藏').click();
+  await document.querySelector('#capture-button').click();
+  await waitForUi();
+  await findByText(candidates, '获取 BIBTEX').click();
+  await waitForUi();
+  await reconnect.click();
+  await waitForUi();
+  assert.equal(badge.textContent, '已连接');
+  assert.match(document.querySelector('#capture-results').textContent, /收藏失败：Capture failed/);
+  assert.match(pageMessage.textContent, /读取 BibTeX\/RIS 失败：Export download failed/);
+  assert.equal(pageMessage.hidden, false);
+  assert.equal(pageMessage.className.includes('error'), true);
+});
+
 test('popup reviews DOI metadata before save, keeps the source/PDF, retries PDF, and confirms explicitly', async () => {
   const document = new FakeDocument();
   const calls = [];

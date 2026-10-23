@@ -1,16 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { api, errorMessage, Folder, Paper, UpdateState } from './api';
-import { loadPdfDocument } from './PdfPage';
+import type { PdfKind } from './PdfPage';
+import { PaperLibrary } from './PaperLibrary';
 import { Reader } from './Reader';
 import { SettingsPanel } from './SettingsPanel';
 import { BibliographyPanel } from './BibliographyPanel';
-import { getThumbnailCover, removeThumbnailCover, saveThumbnailCover } from './thumbnailCoverCache';
-
-const statusText: Record<string, string> = {
-  waiting_api: '待继续旧任务', needs_title: '待确认标题', queued: '排队中', translating: 'PDF 版式翻译中',
-  checking: '完成检查', completed: '可阅读', needs_ocr: '需要 OCR', needs_attention: '提取不完整',
-  error: '处理失败', stopped: '已暂停',
-};
+import { removeThumbnailCover } from './thumbnailCoverCache';
 
 const readerTabsKey = 'paper-workbench.reader-tabs.v1';
 const recentPaperIdsKey = 'folio.recent-papers.v1';
@@ -66,12 +61,15 @@ function Workbench() {
   const librarySearchRef = useRef<HTMLInputElement>(null);
   const focusLibrarySearchRef = useRef(false);
   const [readerTabs, setReaderTabs] = useState<string[]>([]);
+  const [readerOpenRequest, setReaderOpenRequest] = useState<{ paperId: string; kind: PdfKind; sequence: number } | null>(null);
   const readerTabsRef = useRef(readerTabs);
   readerTabsRef.current = readerTabs;
   const [readerPapers, setReaderPapers] = useState<Record<string, Paper>>({});
   const [tabsLoaded, setTabsLoaded] = useState(false);
   const [recentPaperIds, setRecentPaperIds] = useState<string[]>(readRecentPaperIds);
   const [papers, setPapers] = useState<Paper[]>([]);
+  const refreshSequenceRef = useRef(0);
+  const [favoritePending, setFavoritePending] = useState<string[]>([]);
   const [totalPaperCount, setTotalPaperCount] = useState<number | null>(null);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [folderFilter, setFolderFilter] = useState('all');
@@ -202,13 +200,16 @@ function Workbench() {
   }, [recentPaperIds]);
 
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequenceRef.current;
     try {
-      const query = new URLSearchParams({ folder_id: folderFilter === 'recent' ? 'all' : folderFilter });
+      const query = new URLSearchParams({ folder_id: ['recent', 'favorites'].includes(folderFilter) ? 'all' : folderFilter });
+      if (folderFilter === 'favorites') query.set('favorite', 'true');
       if (search) query.set('q', search);
       const [nextPapers, nextFolders] = await Promise.all([
         api<Paper[]>(`/papers?${query.toString()}`),
         api<Folder[]>('/folders'),
       ]);
+      if (sequence !== refreshSequenceRef.current) return;
       const visiblePapers = folderFilter === 'recent'
         ? nextPapers.filter((paper) => recentPaperIds.includes(paper.id)).sort((a, b) => recentPaperIds.indexOf(a.id) - recentPaperIds.indexOf(b.id))
         : nextPapers;
@@ -221,14 +222,16 @@ function Workbench() {
         return next;
       });
     } catch (e) {
-      setError(errorMessage(e));
+      if (sequence === refreshSequenceRef.current) setError(errorMessage(e));
     }
   }, [folderFilter, recentPaperIds, search]);
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
 
   useEffect(() => {
     void refresh();
     const timer = window.setInterval(() => void refresh(), 1500);
-    return () => window.clearInterval(timer);
+    return () => { window.clearInterval(timer); refreshSequenceRef.current += 1; };
   }, [refresh]);
 
   async function importFiles(paths: string[]) {
@@ -237,7 +240,7 @@ function Workbench() {
     setNotice('正在导入并检查 PDF…');
     setError('');
     try {
-      const folder_id = folderFilter !== 'all' && folderFilter !== 'unfiled' && folderFilter !== 'recent' ? folderFilter : null;
+      const folder_id = !['all', 'unfiled', 'recent', 'favorites'].includes(folderFilter) ? folderFilter : null;
       const result = await api<{ results: { duplicate: boolean; paper: Paper }[] }>('/papers/import', 'POST', { paths, folder_id });
       const added = result.results.filter((item) => !item.duplicate).length;
       const duplicates = result.results.length - added;
@@ -257,8 +260,8 @@ function Workbench() {
     await importFiles(paths);
   }
 
-  async function revealFile(paper: Paper) {
-    try { await window.workbench.revealPaperFile(paper.id, 'original'); }
+  async function revealFile(paper: Paper, kind: PdfKind = 'original') {
+    try { await window.workbench.revealPaperFile(paper.id, kind); }
     catch (error) { setError(errorMessage(error)); }
   }
 
@@ -283,6 +286,21 @@ function Workbench() {
     }
   }
 
+  async function toggleFavorite(paper: Paper) {
+    setFavoritePending((current) => [...current, paper.id]);
+    setError('');
+    try {
+      const updated = await api<Paper>(`/papers/${paper.id}/favorite`, 'PATCH', { is_favorite: !paper.is_favorite });
+      refreshSequenceRef.current += 1;
+      setReaderPapers((current) => current[paper.id] ? { ...current, [paper.id]: updated } : current);
+      await refreshRef.current();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setFavoritePending((current) => current.filter((id) => id !== paper.id));
+    }
+  }
+
   async function saveTitle(paper: Paper, english_title: string, chinese_title: string) {
     setError('');
     try {
@@ -298,8 +316,9 @@ function Workbench() {
     }
   }
 
-  function openReader(paper: Paper) {
+  function openReader(paper: Paper, kind?: PdfKind) {
     if (!paper.can_read) return;
+    if (kind) setReaderOpenRequest((current) => ({ paperId: paper.id, kind, sequence: (current?.sequence || 0) + 1 }));
     setRecentPaperIds((current) => [paper.id, ...current.filter((id) => id !== paper.id)]);
     setReaderPapers((current) => ({ ...current, [paper.id]: paper }));
     if (!readerTabsRef.current.includes(paper.id)) {
@@ -475,7 +494,7 @@ function Workbench() {
             if (!paper) return null;
             const title = paper.chinese_title || paper.english_title || paper.source_name;
             return <div className={`reader-tab ${activePanel === paperId ? 'selected' : ''}`} key={paperId}>
-              <button className="app-tab reader-tab-title" type="button" role="tab" aria-selected={activePanel === paperId} aria-controls={`reader-tab-panel-${paperId}`} data-testid={`paper-tab-${paperId}`} title={title} onClick={() => setActivePanel(paperId)}>{title}</button>
+              <button className="app-tab reader-tab-title" type="button" role="tab" aria-selected={activePanel === paperId} aria-controls={`reader-tab-panel-${paperId}`} data-testid={`paper-tab-${paperId}`} title={title} onClick={() => openReader(paper)}>{title}</button>
               <button className="reader-tab-close" type="button" aria-label={`关闭 ${title}`} data-testid={`close-tab-${paperId}`} title="关闭标签" onClick={() => void closeReaderTab(paperId)}>×</button>
             </div>;
           })}
@@ -500,8 +519,8 @@ function Workbench() {
           {activePanel === 'settings' && <SettingsPanel theme={themePreference} onThemeChange={setThemePreference} />}
         </section>
         <section className="app-panel settings-app-panel" id="bibliography-tab-panel" role="tabpanel" hidden={activePanel !== 'bibliography'}>
-          {activePanel === 'bibliography' && <BibliographyPanel folders={folders} folderFilter={folderFilter === 'recent' ? 'all' : folderFilter} onSelectFolder={setFolderFilter} onRecordsChanged={() => { void refresh(); }}
-            folderActions={<><button className="text-button" type="button" onClick={() => beginFolderDialog('create')}>新建文件夹</button>{!['all', 'unfiled', 'recent'].includes(folderFilter) && <><button className="text-button" type="button" onClick={() => beginFolderDialog('rename')}>重命名文件夹</button><button className="text-button delete-paper-button" type="button" onClick={() => void deleteFolder()}>删除文件夹</button></>}</>}
+          {activePanel === 'bibliography' && <BibliographyPanel folders={folders} folderFilter={['recent', 'favorites'].includes(folderFilter) ? 'all' : folderFilter} onSelectFolder={setFolderFilter} onRecordsChanged={() => { void refresh(); }}
+            folderActions={<><button className="text-button" type="button" onClick={() => beginFolderDialog('create')}>新建文件夹</button>{!['all', 'unfiled', 'recent', 'favorites'].includes(folderFilter) && <><button className="text-button" type="button" onClick={() => beginFolderDialog('rename')}>重命名文件夹</button><button className="text-button delete-paper-button" type="button" onClick={() => void deleteFolder()}>删除文件夹</button></>}</>}
             onOpenPaper={(id) => { void api<Paper>(`/papers/${id}`).then(openReader).catch((reason) => setError(errorMessage(reason))); }} />}
           {activePanel === 'bibliography' && folderDialog && <FolderDialog mode={folderDialog} value={folderName} onChange={setFolderName} onClose={() => setFolderDialog(null)} onSave={() => void saveFolder()} />}
         </section>
@@ -513,41 +532,21 @@ function Workbench() {
               <button className="text-button" aria-label="新建文件夹" onClick={() => beginFolderDialog('create')}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 6.5h7l2 2h8v11h-17v-13Zm8.5 5v6m-3-3h6" /></svg><span>新建文件夹</span></button>
               <button className="text-button" type="button" onClick={() => void openLibraryFolder()}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 7h6l2 2h9v11h-17v-13Z" /></svg><span>打开文献目录</span></button>
               <button className="text-button" type="button" aria-label="意见反馈" onClick={beginFeedback}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5.5h16v12H9l-5 3v-3Z" /><path d="M7 9h10M7 12.5h7" /></svg><span>意见反馈</span></button>
-              {folderFilter !== 'all' && folderFilter !== 'unfiled' && folderFilter !== 'recent' && <>
+              {!['all', 'unfiled', 'recent', 'favorites'].includes(folderFilter) && <>
                 <button className="text-button" aria-label="重命名文件夹" onClick={() => beginFolderDialog('rename')}>重命名</button>
                 <button className="text-button delete-paper-button" aria-label="删除文件夹" onClick={() => void deleteFolder()}>删除文件夹</button>
               </>}
             </div>
           </aside>
-          <main className="library-page">
-          <div className="page-heading">
-            <div>
-              <h1>文献库</h1>
-              <p><span className="paper-count">{papers.length} 篇文献</span><span aria-hidden="true"> · </span>PDF 原文与译文</p>
-            </div>
-            <button className="primary-button import-button" onClick={chooseFiles} disabled={busy}>＋ 导入 PDF</button>
-          </div>
-          <div className="library-toolbar">
-            <div className="search-wrap library-main-search"><SearchIcon /><input ref={librarySearchRef} aria-label="搜索文献" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索标题或原文件名" /></div>
-          </div>
-          {notice && <div className="notice success-notice" role="status">{notice}</div>}
-          {error && <div className="notice error-notice" role="alert">{error}</div>}
-          {papers.length === 0 ? (
-              <div className={dragging ? 'empty-state dragging' : 'empty-state'}>
-                <div className="empty-icon" aria-hidden="true">PDF</div>
-              <h2>{search ? '没有找到匹配的文献' : folderFilter === 'recent' ? '还没有最近阅读的文献' : folderFilter !== 'all' ? '此文件夹还没有文献' : '把论文放进你的工作台'}</h2>
-              <p>{search ? '试试更短的标题关键词。' : folderFilter === 'recent' ? '打开一篇可阅读的文献后，它会显示在这里。' : '选择一个或多个 PDF，也可以把文件拖到这里。'}</p>
-              {!search && folderFilter === 'all' && <button className="secondary-button" onClick={chooseFiles} disabled={busy}>选择 PDF 文件</button>}
-            </div>
-          ) : (
-            <section className={dragging ? 'paper-list dragging' : 'paper-list'} role="table" aria-label="文献列表">
-              <div className="paper-list-header" role="row"><span role="columnheader">文献</span><span role="columnheader">分类</span><span role="columnheader">状态</span><span role="columnheader">操作</span></div>
-              {papers.map((paper) => <PaperCard key={paper.id} paper={paper} folders={folders} onOpen={() => openReader(paper)} onAction={(action) => void paperAction(paper, action)} onEdit={() => setEditing(paper)} onDelete={() => void deletePaper(paper)} onReveal={() => void revealFile(paper)} onMove={(folderId) => void movePaper(paper, folderId)} onBibliography={() => {
-                void api('/literature/capture', 'POST', { paper_id: paper.id, title: titleFor(paper), source: 'local_pdf' }).then(() => setActivePanel('bibliography')).catch((reason) => setError(errorMessage(reason)));
-              }} />)}
-            </section>
-          )}
-          <div className="library-footer"><div><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M4 14v5h16v-5" /></svg><span>拖入 PDF 即可导入</span></div><div><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v11H3V7Z" /></svg><span>所有数据保存在本机</span></div></div>
+          <PaperLibrary papers={papers} folders={folders} folderFilter={folderFilter} search={search} onSearch={setSearch}
+            searchInputRef={librarySearchRef} active={activePanel === 'library'} busy={busy} notice={notice} error={error}
+            favoritePending={favoritePending} onChooseFiles={() => void chooseFiles()}
+            onOpen={openReader} onFavorite={(paper) => void toggleFavorite(paper)} onEdit={setEditing}
+            onDelete={(paper) => void deletePaper(paper)} onReveal={(paper, kind) => void revealFile(paper, kind)}
+            onMove={(paper, folderId) => void movePaper(paper, folderId)} onAction={(paper, action) => void paperAction(paper, action)}
+            onBibliography={(paper) => {
+              void api('/literature/capture', 'POST', { paper_id: paper.id, title: titleFor(paper), source: 'local_pdf' }).then(() => setActivePanel('bibliography')).catch((reason) => setError(errorMessage(reason)));
+            }} />
           {dragging && <div className="drop-overlay" aria-hidden="true"><div>松开即可导入 PDF</div></div>}
           {editing && <TitleDialog paper={editing} onClose={() => setEditing(null)} onSave={(english, chinese) => void saveTitle(editing, english, chinese)} />}
           {activePanel === 'library' && folderDialog && <FolderDialog mode={folderDialog} value={folderName} onChange={setFolderName} onClose={() => setFolderDialog(null)} onSave={() => void saveFolder()} />}
@@ -560,11 +559,10 @@ function Workbench() {
                 : '反馈服务已接收，感谢你的建议。');
             }}
           />}
-        </main>
         </div>
         </section>
         {tabsLoaded && readerTabs.map((paperId) => <section key={paperId} role="tabpanel" id={`reader-tab-panel-${paperId}`} className="app-panel reader-tab-panel" data-testid={`reader-tab-panel-${paperId}`} data-paper-id={paperId} hidden={activePanel !== paperId}>
-          {readerPapers[paperId] && <Reader paperId={paperId} active={activePanel === paperId} libraryNavigation={readerLibraryNavigation} />}
+          {readerPapers[paperId] && <Reader paperId={paperId} active={activePanel === paperId} libraryNavigation={readerLibraryNavigation} openRequest={readerOpenRequest?.paperId === paperId ? readerOpenRequest : undefined} />}
         </section>)}
       </div>
       {busy && <div className="busy-indicator" role="status">正在处理</div>}
@@ -588,6 +586,7 @@ function LibraryNavigation({ folderFilter, folders, search, unfiledCount, onSear
       <nav className="library-primary-nav" aria-label="文献导航">
         <button className={folderFilter === 'all' ? 'folder-nav-button selected' : 'folder-nav-button'} data-testid={`${testIdPrefix}folder-nav-all`} onClick={() => onSelectFilter('all')}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6.5 3.5h8l4 4v13h-12v-17Zm8 0v4h4m-8 4h4m-4 4h5" /></svg><span>全部文献</span></button>
         <button className={folderFilter === 'recent' ? 'folder-nav-button selected' : 'folder-nav-button'} data-testid={`${testIdPrefix}folder-nav-recent`} onClick={() => onSelectFilter('recent')}><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg><span>最近阅读</span></button>
+        <button className={folderFilter === 'favorites' ? 'folder-nav-button selected' : 'folder-nav-button'} data-testid={`${testIdPrefix}folder-nav-favorites`} onClick={() => onSelectFilter('favorites')}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z" /></svg><span>收藏文献</span></button>
       </nav>
       <div className="library-category-heading"><div className="sidebar-section-label">分类</div><button className="sidebar-add-folder" type="button" aria-label="新增分类" title="新建文件夹" onClick={onCreateFolder}>+</button></div>
       <nav className="folder-nav" aria-label="文件夹分类">
@@ -598,143 +597,6 @@ function LibraryNavigation({ folderFilter, folders, search, unfiledCount, onSear
   );
 }
 
-function PaperCard({ paper, folders, onOpen, onAction, onEdit, onDelete, onReveal, onMove, onBibliography }: {
-  paper: Paper; folders: Folder[]; onOpen: () => void; onAction: (action: 'stop' | 'continue' | 'retry') => void; onEdit: () => void; onDelete: () => void; onReveal: () => void; onMove: (folderId: string | null) => void; onBibliography: () => void;
-}) {
-  const progress = paper.pdf_progress || 0;
-  const canStop = ['queued', 'translating', 'waiting_api'].includes(paper.status);
-  const canContinue = paper.status === 'stopped';
-  const canRetry = ['error', 'waiting_api'].includes(paper.status);
-  const title = paper.chinese_title || paper.english_title || paper.source_name;
-  const folder = folders.find((item) => item.id === paper.folder_id);
-  return (
-    <article className="paper-card" role="row">
-      <div className="paper-document-column" role="cell">
-        <PaperThumbnail paper={paper} />
-        <div className="paper-main">
-          <div className="paper-title-row"><h2 title={title}>{title}</h2></div>
-          {paper.english_title && paper.chinese_title && paper.english_title !== paper.chinese_title && <div className="paper-subtitle">{paper.english_title}</div>}
-          <div className="paper-meta"><span>{paper.page_count} 页</span><span title={paper.source_name}>{paper.source_name}</span></div>
-        </div>
-      </div>
-      <div className="paper-category-cell" role="cell"><span className="paper-category-dot" style={{ backgroundColor: folder?.color || '#8a928d' }} aria-hidden="true" /><span>{folder?.name || '未分类'}</span></div>
-      <div className="paper-status-cell" role="cell">
-        <div className={`paper-status status-${paper.status}`}>
-          {paper.can_read && <svg className="paper-status-check" aria-hidden="true" viewBox="0 0 20 20"><path d="m4.5 10 3.2 3.2 7.8-7.1" /></svg>}
-          <span>{statusText[paper.status] || paper.status}</span>
-        </div>
-        {paper.status === 'translating' || paper.status === 'queued' || paper.status === 'checking' ? (
-          <div className="paper-progress"><div className="progress-track"><div className="progress-value" style={{ width: `${progress}%` }} /></div><span>{progress}%</span></div>
-        ) : null}
-        {paper.error && <p className="paper-error">{paper.error}</p>}
-        {paper.diagnostics.length > 0 && <ul className="diagnostics">{paper.diagnostics.map((item) => <li key={item.page}>第 {item.page} 页：{item.status === 'needs_ocr' ? '有图片但没有可提取文字，需 OCR' : '检测到页面内容，但没有提取到正文文字'}</li>)}</ul>}
-      </div>
-      <div className="paper-actions" role="cell">
-        {paper.can_read && <button className="paper-read-button" data-testid={`paper-read-${paper.id}`} onClick={onOpen}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M14 4h6v6m-9 5 9-9M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6" /></svg><span>阅读</span></button>}
-        <details className="paper-more-actions">
-          <summary aria-label="更多"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.4" /><circle cx="12" cy="12" r="1.4" /><circle cx="12" cy="19" r="1.4" /></svg><span className="visually-hidden">更多</span></summary>
-          <div className="paper-more-menu">
-            <label>分类<select aria-label="移动文献到文件夹" data-testid={`paper-folder-${paper.id}`} value={paper.folder_id || ''} onChange={(event) => onMove(event.target.value || null)}>
-              <option value="">未分类</option>
-              {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
-            </select></label>
-            <button className="text-button" onClick={onEdit}>编辑标题</button>
-            <button className="text-button" type="button" onClick={onBibliography}>书目信息</button>
-            <button className="text-button" type="button" onClick={onReveal}>打开文件位置</button>
-            {canStop && <button className="text-button" onClick={() => onAction('stop')}>暂停</button>}
-            {canContinue && <button className="text-button" onClick={() => onAction('continue')}>继续翻译</button>}
-            {canRetry && <button className="text-button" onClick={() => onAction('retry')}>重试</button>}
-            <button className="text-button delete-paper-button" onClick={onDelete}>删除</button>
-          </div>
-        </details>
-      </div>
-    </article>
-  );
-}
-
-function PaperThumbnail({ paper }: { paper: Paper }) {
-  const hostRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [cachedCover, setCachedCover] = useState(() => getThumbnailCover(paper.id));
-  const [visible, setVisible] = useState(false);
-  const [state, setState] = useState<'loading' | 'ready' | 'error'>(() => cachedCover ? 'ready' : 'loading');
-
-  useEffect(() => {
-    const host = hostRef.current;
-    if (!host || typeof IntersectionObserver === 'undefined') {
-      setVisible(true);
-      return;
-    }
-    const observer = new IntersectionObserver(([entry]) => {
-      if (!entry.isIntersecting) return;
-      setVisible(true);
-      observer.disconnect();
-    }, { rootMargin: '120px' });
-    observer.observe(host);
-    return () => observer.disconnect();
-  }, []);
-
-  useEffect(() => {
-    if (!visible || cachedCover) return;
-    let cancelled = false;
-    let loaded: Awaited<ReturnType<typeof loadPdfDocument>> | null = null;
-    let renderTask: { cancel: () => void; promise: Promise<void> } | null = null;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    void (async () => {
-      try {
-        loaded = await loadPdfDocument(paper.id, 'original');
-        if (cancelled) {
-          await loaded.destroy();
-          loaded = null;
-          return;
-        }
-        const page = await loaded.pdf.getPage(1);
-        const base = page.getViewport({ scale: 1 });
-        const scale = Math.min(176 / base.width, 232 / base.height);
-        const viewport = page.getViewport({ scale });
-        const outputScale = Math.min(window.devicePixelRatio || 1, 2);
-        const context = canvas.getContext('2d');
-        if (!context) throw new Error('无法绘制 PDF 首页。');
-        canvas.width = Math.ceil(viewport.width * outputScale);
-        canvas.height = Math.ceil(viewport.height * outputScale);
-        renderTask = page.render({ canvas, canvasContext: context, viewport, transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0] });
-        await renderTask.promise;
-        if (!cancelled) {
-          try { saveThumbnailCover(paper.id, canvas.toDataURL('image/png')); } catch { /* the canvas remains usable if caching fails */ }
-          setState('ready');
-        }
-      } catch {
-        if (!cancelled) setState('error');
-      } finally {
-        if (loaded) await loaded.destroy();
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      renderTask?.cancel();
-    };
-  }, [cachedCover, paper.id, visible]);
-
-  return (
-    <div ref={hostRef} className={`paper-thumbnail ${state === 'ready' ? 'loaded' : ''}`} role="img" aria-label={`${titleFor(paper)}首页缩略图`}>
-      <canvas ref={canvasRef} aria-hidden="true" style={cachedCover ? { visibility: 'hidden' } : undefined} />
-      {cachedCover && <img
-        src={cachedCover}
-        aria-hidden="true"
-        onError={() => {
-          removeThumbnailCover(paper.id);
-          setCachedCover(null);
-          setState('loading');
-        }}
-        style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', background: 'white', boxShadow: '0 2px 7px #0002' }}
-      />}
-      {state !== 'ready' && <span>{state === 'error' ? '预览不可用' : '载入首页'}</span>}
-    </div>
-  );
-}
 
 function titleFor(paper: Paper) {
   return paper.chinese_title || paper.english_title || paper.source_name;
