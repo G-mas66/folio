@@ -550,6 +550,8 @@ async def run_pdf_engine(paper_id: str, *, ocr_only: bool = False) -> tuple[str,
                 raise ValueError(str(event.get("message") or "PDF 翻译服务失败。")[:500])
             line_task = asyncio.create_task(process.stdout.readline())
         return_code = await process.wait()
+        if paper_status(paper_id) != "translating":
+            return None
         if return_code != 0 or not finished:
             raise ValueError("PDF 翻译引擎未能完成生成。")
         if ocr_only:

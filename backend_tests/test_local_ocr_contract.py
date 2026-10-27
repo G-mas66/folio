@@ -5,8 +5,9 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 from reportlab.pdfgen import canvas
@@ -130,6 +131,24 @@ class LocalOcrContract(unittest.TestCase):
         self.assertEqual(app.require_paper(self.paper_id)["status"], "stopped")
         self.assertEqual(list(self.original.parent.glob(".engine-*")), [])
         self.assertNotIn(self.paper_id, app.pdf_processes)
+
+    def test_stop_at_helper_eof_does_not_report_a_generation_failure(self):
+        async def stopped_eof():
+            app.store_status(self.paper_id, "stopped")
+            return b""
+
+        for ocr_only in (False, True):
+            with self.subTest(ocr_only=ocr_only), self.make_helper():
+                app.store_status(self.paper_id, "translating")
+                process = SimpleNamespace(
+                    returncode=-15, wait=AsyncMock(return_value=-15),
+                    stdout=SimpleNamespace(readline=AsyncMock(side_effect=stopped_eof)),
+                )
+                with patch.object(asyncio, "create_subprocess_exec", AsyncMock(return_value=process)):
+                    self.assertIsNone(asyncio.run(app.run_pdf_engine(self.paper_id, ocr_only=ocr_only)))
+                self.assertEqual(app.require_paper(self.paper_id)["status"], "stopped")
+                self.assertEqual(list(self.original.parent.glob(".engine-*")), [])
+                self.assertNotIn(self.paper_id, app.pdf_processes)
 
 
 if __name__ == "__main__":
