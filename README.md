@@ -6,9 +6,11 @@
 
 一个桌面文献阅读工作台。英文 PDF 导入后可阅读原文并进行全文翻译，中文文献直接阅读原始 PDF；在同一窗口中结合 AI 问答、笔记和批注理解文献。
 
-**当前版本：Windows x64 1.4.4；macOS arm64 / x64 1.0.4 · Electron + React + Python**
+**当前版本：Windows x64 1.4.4；macOS arm64 / x64 1.4.4 · Electron + React + Python**
 
 Windows 1.4.4：修复问文献时挂入无关网页来源的问题；只展示回答正文实际引用的网页，旧聊天记录读取时自动过滤未引用网页，并过滤明显偏离搜索关键词的结果。见 [发布说明](docs/Folio-1.4.4-Windows发布说明.md)。
+
+macOS 1.4.4：同步紧凑文献列表、右侧详情、收藏与最近阅读，以及问答网页来源修复。Apple Silicon 与 Intel 分别提供原生安装包；本地 OCR 目前仅支持 Windows。
 
 Windows 1.4.3：接入 Windows 本地免费中英文 OCR，为缺少文字层的页面生成识别副本；设置中可开关并选择语言。提取不完整或翻译未完成时仍可阅读原文，详情中可启动 OCR 后翻译。见 [发布说明](docs/Folio-1.4.3-Windows发布说明.md)。
 
@@ -77,12 +79,14 @@ Windows 1.1 新增：标记按页码与页面位置排序；选中文字右键�
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
 | Windows x64 | [Folio-1.4.4-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v1.4.4/Folio-1.4.4-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
-| Mac · Apple Silicon | [Folio-1.0.4-macOS-arm64.zip](https://github.com/G-mas66/folio/releases/download/v1.0.4/Folio-1.0.4-macOS-arm64.zip) | 解压，将 `.app` 拖入「应用程序」 |
-| Mac · Intel | [Folio-1.0.4-macOS-x64.zip](https://github.com/G-mas66/folio/releases/download/v1.0.4/Folio-1.0.4-macOS-x64.zip) | 解压，将 `.app` 拖入「应用程序」 |
+| Mac · Apple Silicon | [Folio-1.4.4-macOS-arm64.zip](https://github.com/G-mas66/folio/releases/download/v1.4.4/Folio-1.4.4-macOS-arm64.zip) | 解压，将 `.app` 拖入「应用程序」 |
+| Mac · Intel | [Folio-1.4.4-macOS-x64.zip](https://github.com/G-mas66/folio/releases/download/v1.4.4/Folio-1.4.4-macOS-x64.zip) | 解压，将 `.app` 拖入「应用程序」 |
 
-发布页附有校验清单：[Windows 1.4.4](https://github.com/G-mas66/folio/releases/download/v1.4.4/SHA256SUMS.txt)、[macOS 1.0.4](https://github.com/G-mas66/folio/releases/download/v1.0.4/SHA256SUMS-macOS.txt)。
+发布页附有校验清单：[Windows 1.4.4](https://github.com/G-mas66/folio/releases/download/v1.4.4/SHA256SUMS.txt)、[macOS 1.4.4](https://github.com/G-mas66/folio/releases/download/v1.4.4/SHA256SUMS-macOS.txt)。
 
-macOS 1.0.4 的双架构构建、打包应用和公开下载检查见[Mac 验收记录](docs/Folio-1.0.4-macOS-验收报告.md)。Windows 1.0.4 的翻译限流修复、反馈表单与发布检查见[验收记录](docs/Folio-1.0.4-验收报告.md)；PDF 标记与助手布局的详细回归见 [1.0.1 验收记录](docs/Folio-1.0.1-验收报告.md)。
+macOS 1.4.4 的双架构构建、打包应用和公开下载检查见[Mac 验收记录](docs/Folio-1.4.4-macOS-验收报告.md)。Windows 1.0.4 的翻译限流修复、反馈表单与发布检查见[验收记录](docs/Folio-1.0.4-验收报告.md)；PDF 标记与助手布局的详细回归见 [1.0.1 验收记录](docs/Folio-1.0.1-验收报告.md)。
+
+本次 Mac 包对应的[完整源码归档](https://github.com/G-mas66/folio/releases/download/v1.4.4/Folio-1.4.4-macOS-source.zip)包含 Mac 构建兼容与暂停问题修复；原 `v1.4.4` 标签保留为此前已发布的 Windows 构建源。
 
 现有 0.13.0 需要手动安装本版一次，之后 Windows 启动时会检查更新，也可在「设置 → 软件更新」手动检查。下载可以取消或重试，完成后由你点击「重启并安装」；退出应用不会自动安装。macOS 使用当前芯片架构的手动下载与替换方式。
 
@@ -188,7 +192,7 @@ npm run dist
 
 ### macOS 构建
 
-1.0.4 macOS 版支持 Apple Silicon arm64 和 Intel x64。GitHub Actions 的「macOS Test Builds」工作流只接受手动运行，使用标准 `macos-15` 与 `macos-15-intel` runner 原生构建，并运行后端契约测试和打包应用 smoke。默认仅在 Actions 日志中保留测试报告，不上传大型 Actions artifact；勾选 `create_draft_release` 会在重新构建并验证后，把 zip 安装包和逐架构 smoke 报告上传到当前版本发布页；版本尚未发布时创建草稿预发布。
+1.4.4 macOS 版支持 Apple Silicon arm64 和 Intel x64。GitHub Actions 的「macOS Test Builds」工作流只接受手动运行，使用标准 `macos-15` 与 `macos-15-intel` runner 原生构建，并运行后端契约测试和打包应用 smoke。默认仅在 Actions 日志中保留测试报告，不上传大型 Actions artifact；勾选 `create_draft_release` 会在重新构建并验证后，把 zip 安装包和逐架构 smoke 报告上传到当前版本发布页；版本尚未发布时创建草稿预发布。
 
 macOS 本地构建需要对应架构的 Mac、Xcode Command Line Tools、Node.js 22 和 Python 3.12：
 
@@ -197,7 +201,7 @@ npm ci
 MAC_ARCH=arm64 npm run dist:macos
 ```
 
-Intel Mac 将 `arm64` 改为 `x64`。产物位于 `dist/macos-test-1.0.4-<架构>/`。应用自带原生后端、PDF 翻译引擎、字体和布局模型，不需要用户安装 Python。macOS 包使用临时 ad-hoc 签名，没有 Developer ID 签名或公证；首次打开可能出现 Gatekeeper 提示，因此只作为测试包分发。macOS 更新不会自动替换应用，需要下载当前架构的 zip 并手动安装。
+Intel Mac 将 `arm64` 改为 `x64`。产物位于 `dist/macos-test-1.4.4-<架构>/`。应用自带原生后端、PDF 翻译引擎、字体和布局模型，不需要用户安装 Python。macOS 包使用临时 ad-hoc 签名，没有 Developer ID 签名或公证；首次打开可能出现 Gatekeeper 提示，因此只作为测试包分发。macOS 更新不会自动替换应用，需要下载当前架构的 zip 并手动安装。
 
 ### 开发运行
 
@@ -267,8 +271,8 @@ docs/                      方案、验收记录和界面截图
 
 ## 当前限制
 
-- Windows x64 与 macOS arm64/x64 当前为 1.0.4；macOS 使用临时 ad-hoc 签名，目前没有 Apple Developer ID 签名或公证；Linux 未验证。
-- 扫描件和无法提取正文的实质页面会阻止完成，当前没有单独 OCR 步骤。
+- Windows x64 与 macOS arm64/x64 当前为 1.4.4；macOS 使用临时 ad-hoc 签名，目前没有 Apple Developer ID 签名或公证；Linux 未验证。
+- Windows 可对缺少文字层的页面进行本地中英文 OCR；macOS 暂不支持本地 OCR，扫描页仍可能阻止全文提取或翻译完成。
 - 表格单元格、图片内文字和公式不会被完整翻译；复杂公式、跨页图表和特殊排版应检查输出。
 - 高亮、下划线、批注与句子翻译支持同一页内的可提取文字，不支持跨页选择或扫描图上的文字选择。
 - 旧版已保存的标记坐标不自动按文字搜索迁移；历史标记若仍有偏移，需要删除后重新标记。
