@@ -369,7 +369,18 @@ async function main() {
     assert.equal(crypto.createHash('sha256').update(fs.readFileSync(storedPdf)).digest('hex'), sourceHash, 'Import must preserve the synthetic source PDF bytes.');
     report.checks.chinese_import = { status: 'readable_without_translation', source_sha256: sourceHash };
 
-    await library.locator('.paper-card').filter({ hasText: path.basename(chinesePdf) }).getByRole('button', { name: '阅读', exact: true }).click();
+    const paperRow = library.getByTestId(`paper-row-${paper.id}`);
+    await paperRow.click();
+    await library.getByTestId('paper-inspector').waitFor();
+    await library.waitForFunction(() => document.querySelector('[data-testid="paper-inspector"] canvas')?.width > 0);
+    assert.equal(await library.getByTestId(`paper-tab-${paper.id}`).count(), 0, 'Selecting a paper must show details without opening a reader.');
+    await library.getByTestId(`paper-favorite-${paper.id}`).click();
+    await library.getByTestId(`paper-favorite-${paper.id}`).waitFor({ state: 'visible' });
+    await waitForPaper(library, items => items.find(item => item.id === paper.id)?.is_favorite === true);
+    await library.getByTestId('folder-nav-favorites').click();
+    await library.getByTestId(`paper-row-${paper.id}`).waitFor();
+    report.checks.compact_library = { selection_opens_details: true, cover_rendered: true, favorites_filter: 'passed' };
+    await library.getByTestId(`paper-read-${paper.id}`).click();
     const reader = library;
     readerPage = reader;
     await reader.waitForFunction(id => document.querySelector(`[data-testid="reader-tab-panel-${id}"] canvas`)?.width > 0, paper.id, { timeout: 30000 });
@@ -408,6 +419,10 @@ async function main() {
     const saved = await reader.evaluate(id => window.workbench.request({ path: `/papers/${id}/notes` }), paper.id);
     assert.equal(saved.text, note);
     report.checks.notes = 'saved_and_read_back';
+    await library.getByTestId('library-tab').click();
+    await library.getByTestId('folder-nav-recent').click();
+    await library.getByTestId(`paper-row-${paper.id}`).waitFor();
+    report.checks.recent_reading = 'passed';
     assert.deepEqual(browserErrors, []);
   } catch (error) {
     smokeFailure = error;

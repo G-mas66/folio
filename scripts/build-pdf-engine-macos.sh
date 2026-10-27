@@ -30,12 +30,15 @@ cp -R "$SITE_PACKAGES/babeldoc/." "$SOURCE_ROOT/babeldoc/"
 cp "$SITE_PACKAGES/pdf2zh_next-2.9.0.dist-info/licenses/LICENSE" "$SOURCE_ROOT/pdf2zh-next-LICENSE.txt"
 cp "$SITE_PACKAGES/babeldoc-0.6.2.dist-info/licenses/LICENSE" "$SOURCE_ROOT/babeldoc-LICENSE.txt"
 cp "$ROOT/backend/pdf_engine/entrypoint.py" "$SOURCE_ROOT/workbench-pdf-engine-entrypoint.py"
+cp "$ROOT/backend/pdf_engine/local_ocr.py" "$SOURCE_ROOT/local_ocr.py"
+cp "$ROOT/backend/ocr_windows.ps1" "$SOURCE_ROOT/ocr_windows.ps1"
 cat > "$SOURCE_ROOT/README.txt" <<'NOTICE'
 PDF translation helper source bundle
 
 pdf2zh-next 2.9.0 (GNU AGPL v3.0): ./pdf2zh_next and pdf2zh-next-LICENSE.txt
 BabelDOC 0.6.2 (GNU AGPL v3.0): ./babeldoc and babeldoc-LICENSE.txt
 The workbench integration entry point is workbench-pdf-engine-entrypoint.py.
+Local OCR integration sources are local_ocr.py and ocr_windows.ps1 (Windows only).
 NOTICE
 
 RUNTIME_BINARY_ARGUMENTS=()
