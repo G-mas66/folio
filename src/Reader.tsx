@@ -2692,14 +2692,16 @@ function Message({ message, onJump, onLoadAttachmentPreview }: {
   onLoadAttachmentPreview: (attachment: ChatAttachmentView) => Promise<string | null>;
 }) {
   const incomplete = message.role === 'assistant' && message.status && message.status !== 'completed';
+  const citedWebIds = new Set(Array.from(message.content.matchAll(/\[(W\d{1,10})\]/g), match => match[1]));
+  const webSources = (message.sources || []).filter(source => source.kind === 'web' && source.url && citedWebIds.has(source.id));
   return <div className={`chat-message ${message.role}`} data-chat-turn-id={message.role === 'user' ? message.id : undefined}>
     <div className="message-role">{message.role === 'user' ? '你' : 'Folio'}{incomplete ? ` · ${message.status === 'cancelled' ? '已停止，未完成' : message.status === 'interrupted' ? '窗口关闭时中断' : message.status === 'error' ? '未完成' : '处理中断'}` : ''}</div>
     {!!message.attachments?.length && <ChatAttachmentList attachments={message.attachments} onLoadPreview={onLoadAttachmentPreview} />}
     <div className="message-content"><MarkdownContent markdown={message.content} sources={message.sources} onJump={onJump} /></div>
     {message.error && <div className="message-incomplete-error">{message.error}</div>}
-    {(message.sources || []).some((source) => source.kind === 'web' && source.url) && <div className="web-source-list">
+    {!!webSources.length && <div className="web-source-list">
       <div>网页来源</div>
-      {(message.sources || []).filter((source) => source.kind === 'web' && source.url).map((source) => <button type="button" key={source.id} onClick={() => onJump(source)}>{source.title || source.url}</button>)}
+      {webSources.map((source) => <button type="button" key={source.id} onClick={() => onJump(source)}>{source.title || source.url}</button>)}
     </div>}
   </div>;
 }

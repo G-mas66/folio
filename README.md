@@ -6,7 +6,9 @@
 
 一个桌面文献阅读工作台。英文 PDF 导入后可阅读原文并进行全文翻译，中文文献直接阅读原始 PDF；在同一窗口中结合 AI 问答、笔记和批注理解文献。
 
-**当前版本：Windows x64 1.4.3；macOS arm64 / x64 1.0.4 · Electron + React + Python**
+**当前版本：Windows x64 1.4.4；macOS arm64 / x64 1.0.4 · Electron + React + Python**
+
+Windows 1.4.4：修复问文献时挂入无关网页来源的问题；只展示回答正文实际引用的网页，旧聊天记录读取时自动过滤未引用网页，并过滤明显偏离搜索关键词的结果。见 [发布说明](docs/Folio-1.4.4-Windows发布说明.md)。
 
 Windows 1.4.3：接入 Windows 本地免费中英文 OCR，为缺少文字层的页面生成识别副本；设置中可开关并选择语言。提取不完整或翻译未完成时仍可阅读原文，详情中可启动 OCR 后翻译。见 [发布说明](docs/Folio-1.4.3-Windows发布说明.md)。
 
@@ -74,11 +76,11 @@ Windows 1.1 新增：标记按页码与页面位置排序；选中文字右键�
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | [Folio-1.4.3-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v1.4.3/Folio-1.4.3-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
+| Windows x64 | [Folio-1.4.4-Windows-x64-Setup.exe](https://github.com/G-mas66/folio/releases/download/v1.4.4/Folio-1.4.4-Windows-x64-Setup.exe) | 运行安装程序，可选择安装目录 |
 | Mac · Apple Silicon | [Folio-1.0.4-macOS-arm64.zip](https://github.com/G-mas66/folio/releases/download/v1.0.4/Folio-1.0.4-macOS-arm64.zip) | 解压，将 `.app` 拖入「应用程序」 |
 | Mac · Intel | [Folio-1.0.4-macOS-x64.zip](https://github.com/G-mas66/folio/releases/download/v1.0.4/Folio-1.0.4-macOS-x64.zip) | 解压，将 `.app` 拖入「应用程序」 |
 
-发布页附有校验清单：[Windows 1.4.3](https://github.com/G-mas66/folio/releases/download/v1.4.3/SHA256SUMS.txt)、[macOS 1.0.4](https://github.com/G-mas66/folio/releases/download/v1.0.4/SHA256SUMS-macOS.txt)。
+发布页附有校验清单：[Windows 1.4.4](https://github.com/G-mas66/folio/releases/download/v1.4.4/SHA256SUMS.txt)、[macOS 1.0.4](https://github.com/G-mas66/folio/releases/download/v1.0.4/SHA256SUMS-macOS.txt)。
 
 macOS 1.0.4 的双架构构建、打包应用和公开下载检查见[Mac 验收记录](docs/Folio-1.0.4-macOS-验收报告.md)。Windows 1.0.4 的翻译限流修复、反馈表单与发布检查见[验收记录](docs/Folio-1.0.4-验收报告.md)；PDF 标记与助手布局的详细回归见 [1.0.1 验收记录](docs/Folio-1.0.1-验收报告.md)。
 
