@@ -413,9 +413,10 @@ async function main() {
 
     await reader.getByRole('tab', { name: '笔记', exact: true }).click();
     const note = `macOS smoke ${Date.now()}`;
-    await reader.getByLabel('阅读笔记').fill(note);
-    await reader.getByRole('button', { name: '保存笔记', exact: true }).click();
-    await reader.waitForFunction(() => document.querySelector('[data-testid="reader-note-save-status"]')?.textContent === '已保存');
+    await reader.getByRole('button', { name: '编辑', exact: true }).click();
+    await reader.getByTestId('reader-note-editor').fill(note);
+    await reader.getByRole('button', { name: '保存', exact: true }).click();
+    await reader.waitForFunction(async ({ id, note }) => (await window.workbench.request({ path: `/papers/${id}/notes` })).text === note, { id: paper.id, note }, { polling: 100 });
     const saved = await reader.evaluate(id => window.workbench.request({ path: `/papers/${id}/notes` }), paper.id);
     assert.equal(saved.text, note);
     report.checks.notes = 'saved_and_read_back';
