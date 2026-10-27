@@ -237,6 +237,7 @@ def initialize() -> None:
         columns = {row["name"] for row in db.execute("PRAGMA table_info(papers)").fetchall()}
         for name, definition in (
             ("mono_pdf_file_name", "TEXT NOT NULL DEFAULT ''"),
+            ("ocr_pdf_file_name", "TEXT NOT NULL DEFAULT ''"),
             ("dual_pdf_file_name", "TEXT NOT NULL DEFAULT ''"),
             ("pdf_progress", "INTEGER NOT NULL DEFAULT 0"),
             ("model_override", "TEXT NOT NULL DEFAULT ''"),
@@ -269,6 +270,8 @@ def initialize() -> None:
             ("settings", "model_options_json", "TEXT NOT NULL DEFAULT '[]'"),
             ("settings", "models_url", "TEXT NOT NULL DEFAULT ''"),
             ("settings", "web_search_enabled", "INTEGER NOT NULL DEFAULT 1"),
+            ("settings", "ocr_enabled", "INTEGER NOT NULL DEFAULT 1"),
+            ("settings", "ocr_language", "TEXT NOT NULL DEFAULT 'auto'"),
             ("analysis_runs", "model_snapshot", "TEXT NOT NULL DEFAULT ''"),
             ("analysis_runs", "protocol_snapshot", "TEXT NOT NULL DEFAULT ''"),
             ("analysis_runs", "thinking_snapshot", "TEXT NOT NULL DEFAULT 'default'"),

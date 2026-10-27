@@ -164,7 +164,7 @@ def paper_view(paper) -> dict[str, Any]:
         pdf_ready = bool(mono_path and mono_path.is_file() and dual_path and dual_path.is_file())
     diagnostics = [
         {"page": p["page_no"], "status": p["extraction_status"], "text_chars": p["text_chars"]}
-        for p in pages if p["extraction_status"] not in {"text", "blank"}
+        for p in pages if p["extraction_status"] not in {"text", "blank", "ocr"}
     ]
     return {
         "id": paper["id"], "source_name": paper["source_name"], "file_name": paper["file_name"],
@@ -173,6 +173,8 @@ def paper_view(paper) -> dict[str, Any]:
         "status": paper["status"], "error": paper["error"], "created_at": paper["created_at"],
         "last_page": paper["last_page"], "segment_total": total, "segment_done": done,
         "can_read": paper["status"] == "completed" and pdf_ready,
+        "can_read_original": bool(original_path and original_path.is_file()),
+        "ocr_pages": [p["page_no"] for p in pages if p["extraction_status"] == "ocr"],
         "source_language": language,
         "mono_pdf_file_name": paper["mono_pdf_file_name"], "dual_pdf_file_name": paper["dual_pdf_file_name"],
         "pdf_progress": paper["pdf_progress"],
@@ -214,14 +216,18 @@ async def tracked_to_thread(tracked_paper_id: str, function, *args, **kwargs):
 
 def schedule(paper_id: str) -> None:
     paper = require_paper(paper_id)
-    if paper["source_language"] == "zh":
-        complete_chinese_paper(paper_id)
-        return
     with connect() as db:
         blocking = db.execute(
             "SELECT COUNT(*) FROM pages WHERE paper_id = ? AND extraction_status IN ('needs_ocr', 'needs_attention')", (paper_id,)
         ).fetchone()[0]
         total = db.execute("SELECT COUNT(*) FROM segments WHERE paper_id = ?", (paper_id,)).fetchone()[0]
+        if blocking and ocr_preferences()["enabled"] and sys.platform == "win32":
+            db.execute("UPDATE papers SET status = 'queued', error = '', updated_at = ? WHERE id = ?", (now(), paper_id))
+            worker_wakeup.set()
+            return
+        if paper["source_language"] == "zh":
+            complete_chinese_paper(paper_id)
+            return
         if blocking or not total:
             status = "needs_attention" if blocking else "needs_ocr"
             db.execute("UPDATE papers SET status = ?, updated_at = ? WHERE id = ?", (status, now(), paper_id))
@@ -354,8 +360,8 @@ def import_pdf(source_value: str, folder_id: str | None = None) -> dict:
         shutil.copy2(source, folder / file_name)
         blockers = [p for p in extracted["pages"] if p["status"] in {"needs_ocr", "needs_attention"}]
         if blockers:
-            status = "needs_attention"
-            error = "以下页面含可见内容但未能完整提取，不能标记全文完成：" + "、".join(str(p["page_no"]) for p in blockers)
+            status = "queued" if ocr_preferences()["enabled"] and sys.platform == "win32" else "needs_attention"
+            error = "" if status == "queued" else "以下页面含可见内容但未能完整提取，不能标记全文完成：" + "、".join(str(p["page_no"]) for p in blockers)
         elif not extracted["segments"]:
             status, error = "needs_ocr", "未提取到可翻译的正文文字。"
         elif source_language == "zh":
@@ -467,7 +473,7 @@ async def terminate_pdf_process(process: asyncio.subprocess.Process) -> None:
             await process.wait()
 
 
-async def run_pdf_engine(paper_id: str) -> tuple[str, str] | None:
+async def run_pdf_engine(paper_id: str, *, ocr_only: bool = False) -> tuple[str, str] | None:
     paper = get_paper_row(paper_id)
     folder = paper_folder(paper_id)
     if not paper or folder is None:
@@ -485,9 +491,18 @@ async def run_pdf_engine(paper_id: str) -> tuple[str, str] | None:
     assets = os.environ.get("WORKBENCH_PDF_ENGINE_ASSETS", "").strip()
     if not assets:
         assets = str(Path(__file__).parent / "pdf_engine_assets" / "babeldoc")
-    command = [helper, entry, str(original), str(output), str(home)] if entry else [helper, str(original), str(output), str(home)]
+    cached_ocr = stored_file_path(paper, paper["ocr_pdf_file_name"])
+    source = cached_ocr if not ocr_only and cached_ocr and cached_ocr.is_file() else original
+    command = [helper, entry] if entry else [helper]
+    command += (["--ocr"] if ocr_only else []) + [str(source), str(output), str(home)]
     environment = os.environ.copy()
     environment["WORKBENCH_PDF_ENGINE_ASSETS"] = assets
+    environment["WORKBENCH_OCR_LANGUAGE"] = ocr_preferences()["language"]
+    environment["WORKBENCH_PDF_OCR_INPUT"] = "1" if source != original else "0"
+    if ocr_only:
+        with connect() as db:
+            missing = [row[0] for row in db.execute("SELECT page_no FROM pages WHERE paper_id = ? AND extraction_status IN ('needs_ocr', 'needs_attention') ORDER BY page_no", (paper_id,))]
+        environment["WORKBENCH_OCR_PAGES"] = json.dumps(missing)
     process: asyncio.subprocess.Process | None = None
     line_task: asyncio.Task | None = None
     finished: dict[str, Any] | None = None
@@ -525,6 +540,10 @@ async def run_pdf_engine(paper_id: str) -> tuple[str, str] | None:
                         "UPDATE papers SET pdf_progress = ?, updated_at = ? WHERE id = ? AND status = 'translating'",
                         (progress, now(), paper_id),
                     )
+            elif event.get("type") == "ocr_progress":
+                with connect() as db:
+                    db.execute("UPDATE papers SET error = ?, updated_at = ? WHERE id = ? AND status = 'translating'",
+                               (f"正在进行本地 OCR：第 {event['page']} 页（{event['completed']}/{event['total']}）", now(), paper_id))
             elif event.get("type") == "finish":
                 finished = event
             elif event.get("type") == "error":
@@ -533,6 +552,42 @@ async def run_pdf_engine(paper_id: str) -> tuple[str, str] | None:
         return_code = await process.wait()
         if return_code != 0 or not finished:
             raise ValueError("PDF 翻译引擎未能完成生成。")
+        if ocr_only:
+            result = Path(str(finished.get("ocr_pdf_path", ""))).resolve()
+            if result.parent != output.resolve() or not result.is_file():
+                raise ValueError("OCR 返回的 PDF 路径无效。")
+            extracted = await asyncio.to_thread(extract_pdf, result)
+            if extracted["page_count"] != paper["page_count"] or extracted["has_blocker"]:
+                raise ValueError("OCR 后仍有页面缺少文字，请检查识别语言或原文件；尚未标记为全文完成。")
+            if paper_status(paper_id) != "translating":
+                return None
+            name = f"ocr-{uuid.uuid4().hex[:12]}.pdf"
+            destination = folder / name
+            result.replace(destination)
+            recognized = set(finished["ocr_pages"])
+            try:
+                with connect() as db:
+                    cursor = db.execute("UPDATE papers SET ocr_pdf_file_name = ?, error = '', source_language = ?, english_title = CASE WHEN title_confident = 0 THEN ? ELSE english_title END, title_confident = CASE WHEN title_confident = 0 THEN ? ELSE title_confident END, updated_at = ? WHERE id = ? AND status = 'translating'",
+                                        (name, extracted["source_language"], extracted["english_title"], int(extracted["title_confident"]), now(), paper_id))
+                    if cursor.rowcount != 1:
+                        destination.unlink(missing_ok=True)
+                        return None
+                    for page in extracted["pages"]:
+                        if page["page_no"] in recognized:
+                            db.execute("UPDATE pages SET extraction_status = 'ocr', text_chars = ? WHERE paper_id = ? AND page_no = ?", (page["text_chars"], paper_id, page["page_no"]))
+                    sequence = db.execute("SELECT COALESCE(MAX(sequence_no), 0) FROM segments WHERE paper_id = ?", (paper_id,)).fetchone()[0]
+                    for segment in extracted["segments"]:
+                        if segment["start_page"] in recognized:
+                            sequence += 1
+                            db.execute("INSERT INTO segments(paper_id, sequence_no, start_page, end_page, original_text) VALUES (?, ?, ?, ?, ?)", (paper_id, sequence, segment["start_page"], segment["end_page"], segment["original_text"]))
+                    for sequence, row in enumerate(db.execute("SELECT id FROM segments WHERE paper_id = ? ORDER BY start_page, sequence_no", (paper_id,)).fetchall(), 1):
+                        db.execute("UPDATE segments SET sequence_no = ? WHERE id = ?", (sequence, row["id"]))
+            except Exception:
+                destination.unlink(missing_ok=True)
+                raise
+            if cached_ocr and cached_ocr != destination:
+                cached_ocr.unlink(missing_ok=True)
+            return name, ""
         mono = Path(str(finished.get("mono_pdf_path", ""))).resolve()
         dual = Path(str(finished.get("dual_pdf_path", ""))).resolve()
         root = output.resolve()
@@ -589,18 +644,28 @@ async def translate_paper(paper_id: str) -> None:
     paper = get_paper_row(paper_id)
     if not paper or paper["status"] != "translating":
         return
-    if paper["source_language"] == "unknown":
-        language = await asyncio.to_thread(classify_stored_paper, paper_id)
-        paper = get_paper_row(paper_id)
-        if language == "zh":
-            return
-    if paper["source_language"] == "zh":
-        complete_chinese_paper(paper_id)
-        return
-    if not paper["title_confident"] or not paper["english_title"].strip():
-        store_status(paper_id, "needs_title", "请确认英文标题后继续处理。")
-        return
     try:
+        with connect() as db:
+            blocking = db.execute("SELECT COUNT(*) FROM pages WHERE paper_id = ? AND extraction_status IN ('needs_ocr', 'needs_attention')", (paper_id,)).fetchone()[0]
+        if blocking:
+            if not ocr_preferences()["enabled"]:
+                store_status(paper_id, "needs_attention", "请在设置中启用本地 OCR，再点击 OCR 后翻译。")
+                return
+            store_status(paper_id, "translating", "正在进行本地 OCR…")
+            if not await run_pdf_engine(paper_id, ocr_only=True):
+                return
+            paper = require_paper(paper_id)
+        if paper["source_language"] == "unknown":
+            language = await asyncio.to_thread(classify_stored_paper, paper_id)
+            paper = get_paper_row(paper_id)
+            if language == "zh":
+                return
+        if paper["source_language"] == "zh":
+            complete_chinese_paper(paper_id)
+            return
+        if not paper["title_confident"] or not paper["english_title"].strip():
+            store_status(paper_id, "needs_title", "请确认英文标题后继续处理。")
+            return
         if not paper["chinese_title"].strip():
             async with free_translation.FreeTranslationClient() as translator:
                 title = await translator.translate(paper["english_title"], cancelled=lambda: paper_status(paper_id) != "translating")
@@ -622,7 +687,7 @@ async def queue_loop() -> None:
         worker_wakeup.clear()
         while True:
             with connect() as db:
-                row = db.execute("SELECT id FROM papers WHERE status = 'queued' AND source_language <> 'zh' ORDER BY created_at LIMIT 1").fetchone()
+                row = db.execute("SELECT id FROM papers WHERE status = 'queued' ORDER BY created_at LIMIT 1").fetchone()
                 if row:
                     updated = db.execute(
                         "UPDATE papers SET status = 'translating', updated_at = ? WHERE id = ? AND status = 'queued'",
@@ -694,6 +759,49 @@ class SettingsInput(BaseModel):
 
 class WebSearchInput(BaseModel):
     enabled: bool
+
+
+class OcrSettingsInput(BaseModel):
+    enabled: bool
+    language: str = Field(default="auto", max_length=35)
+
+
+def ocr_preferences() -> dict:
+    with connect() as db:
+        row = db.execute("SELECT ocr_enabled, ocr_language FROM settings WHERE id = 1").fetchone()
+    return {"enabled": bool(row[0]) if row else True, "language": row[1] if row else "auto"}
+
+
+def local_ocr_status() -> dict:
+    helper = os.environ.get("WORKBENCH_PDF_ENGINE_BIN", "").strip()
+    entry = os.environ.get("WORKBENCH_PDF_ENGINE_ENTRY", "").strip()
+    if not helper:
+        return {"available": False, "languages": [], "error": "请使用包含本地 OCR 引擎的 Windows 安装包。"}
+    command = ([helper, entry] if entry else [helper]) + ["--ocr-status"]
+    try:
+        result = subprocess.run(command, capture_output=True, encoding="utf-8", timeout=40,
+                                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+        return json.loads(result.stdout)
+    except Exception as error:
+        return {"available": False, "languages": [], "error": f"无法检查本地 OCR：{str(error)[:200]}"}
+
+
+@app.get("/settings/ocr", dependencies=[Depends(authorize)])
+def get_ocr_settings():
+    return {**ocr_preferences(), **local_ocr_status()}
+
+
+@app.put("/settings/ocr", dependencies=[Depends(authorize)])
+def put_ocr_settings(value: OcrSettingsInput):
+    status = local_ocr_status()
+    if value.enabled and not status.get("available"):
+        raise HTTPException(status_code=422, detail=status.get("error") or "本地 OCR 不可用。")
+    if value.language != "auto" and value.language not in {language["tag"] for language in status.get("languages", [])}:
+        raise HTTPException(status_code=422, detail="所选 OCR 语言未安装。")
+    with connect() as db:
+        db.execute("INSERT INTO settings(id, base_url, model, ocr_enabled, ocr_language, updated_at) VALUES (1, '', '', ?, ?, ?) ON CONFLICT(id) DO UPDATE SET ocr_enabled = excluded.ocr_enabled, ocr_language = excluded.ocr_language, updated_at = excluded.updated_at",
+                   (int(value.enabled), value.language, now()))
+    return {**ocr_preferences(), **status}
 
 
 class ImportInput(BaseModel):
@@ -1955,16 +2063,13 @@ async def translation_action(paper_id: str, action: str):
     elif action in {"continue", "retry"}:
         if action == "continue" and paper["status"] != "stopped":
             raise HTTPException(status_code=409, detail="只有已停止的任务可以继续。")
-        if action == "retry" and paper["status"] not in {"error", "waiting_api", "needs_title"}:
+        if action == "retry" and paper["status"] not in {"error", "waiting_api", "needs_title", "needs_attention", "needs_ocr"}:
             raise HTTPException(status_code=409, detail="当前状态无需重试。")
         if paper["source_language"] == "unknown":
             language = await asyncio.to_thread(classify_stored_paper, paper_id)
             paper = require_paper(paper_id)
             if language == "zh":
                 return paper_view(paper)
-        if paper["source_language"] == "zh":
-            complete_chinese_paper(paper_id)
-            return paper_view(require_paper(paper_id))
         with connect() as db:
             db.execute("UPDATE segments SET status = 'pending' WHERE paper_id = ? AND status <> 'completed'", (paper_id,))
         schedule(paper_id)

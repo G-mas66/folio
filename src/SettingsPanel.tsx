@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, errorMessage, StorageLocationInfo, StorageMigrationProgress, UpdateState } from './api';
 import './plugin-settings.css';
+import { OcrSettings } from './OcrSettings';
 
 type Settings = {
   base_url: string;
@@ -423,6 +424,7 @@ export function SettingsPanel({ theme, onThemeChange }: { theme: ThemePreference
         <p className="field-help">浏览器插件在 Chrome 或 Edge 扩展管理页选择“加载已解压的扩展程序”，然后打开论文主页收藏。</p>
         {pluginFailure && <p className="notice error-notice" role="alert">{pluginFailure}</p>}
       </section>
+      <OcrSettings />
       <div className="privacy-card">
         <h2>数据与隐私</h2>
         <p>英文文献的免费翻译会发送标题和可提取的正文文字；中文文献跳过翻译。AI 问答与总结会把所需的原文发送到你配置的服务。PDF、阅读进度、聊天、笔记和批注保存在本机。</p>

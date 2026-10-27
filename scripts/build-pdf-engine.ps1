@@ -50,6 +50,8 @@ Copy-Item -Path (Join-Path $SitePackages 'babeldoc\*') -Destination $BabeldocSou
 Copy-Item -LiteralPath (Join-Path $SitePackages 'pdf2zh_next-2.9.0.dist-info\licenses\LICENSE') -Destination (Join-Path $SourceRoot 'pdf2zh-next-LICENSE.txt') -Force
 Copy-Item -LiteralPath (Join-Path $SitePackages 'babeldoc-0.6.2.dist-info\licenses\LICENSE') -Destination (Join-Path $SourceRoot 'babeldoc-LICENSE.txt') -Force
 Copy-Item -LiteralPath (Join-Path $ProjectRoot 'backend\pdf_engine\entrypoint.py') -Destination (Join-Path $SourceRoot 'workbench-pdf-engine-entrypoint.py') -Force
+Copy-Item -LiteralPath (Join-Path $ProjectRoot 'backend\pdf_engine\local_ocr.py') -Destination (Join-Path $SourceRoot 'local_ocr.py') -Force
+Copy-Item -LiteralPath (Join-Path $ProjectRoot 'backend\ocr_windows.ps1') -Destination (Join-Path $SourceRoot 'ocr_windows.ps1') -Force
 $SourceNotice = @'
 PDF translation helper source bundle
 
@@ -66,6 +68,7 @@ $Arguments = @(
 )
 $Arguments += $RuntimeBinaryArguments
 $Arguments += @(
+  '--add-data', "$(Join-Path $ProjectRoot 'backend\ocr_windows.ps1');.",
   '--collect-all', 'pdf2zh_next', '--collect-all', 'babeldoc', '--collect-all', 'tiktoken', '--collect-all', 'bitstring',
   '--hidden-import', 'tiktoken_ext.openai_public',
   '--hidden-import', 'scipy._external.array_api_compat.numpy.fft',

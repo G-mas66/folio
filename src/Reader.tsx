@@ -15,6 +15,13 @@ import { ResearchTasksPanel } from './ResearchTasksPanel';
 import { annotationMappingCandidates, normalizePdfText } from './annotationMapping';
 import { renderPdfAttachment } from './PdfAttachment';
 
+function canReadPdf(paper: Paper | null, kind: PdfKind) {
+  if (!paper) return false;
+  if (kind === 'mono') return Boolean(paper.mono_pdf_file_name);
+  if (kind === 'dual') return Boolean(paper.dual_pdf_file_name);
+  return Boolean(paper.can_read_original || paper.can_read);
+}
+
 type Page = { page_no: number; extraction_status: string; text_chars: number };
 type AnalysisRun = {
   id: string; kind: string; status: string; error: string; completed_chunks: number; total_chunks: number; question: string;
@@ -168,8 +175,13 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
   useEffect(() => {
     if (!active || !paper || !openRequest || lastOpenRequestRef.current === openRequest.sequence) return;
     lastOpenRequestRef.current = openRequest.sequence;
+    if (!canReadPdf(paper, openRequest.kind)) return;
     setMode(paper.source_language === 'zh' || openRequest.kind === 'original' ? 'original' : openRequest.kind === 'mono' ? 'mono' : 'bilingual');
-  }, [active, paper?.id, paper?.source_language, openRequest]);
+  }, [active, paper?.id, paper?.source_language, paper?.mono_pdf_file_name, paper?.dual_pdf_file_name, openRequest]);
+  const canLoadPdf = canReadPdf(paper, pdfKind);
+  useEffect(() => {
+    if (paper && (paper.source_language === 'zh' || !canReadPdf(paper, pdfKind))) setMode('original');
+  }, [paper?.source_language, paper?.mono_pdf_file_name, paper?.dual_pdf_file_name, pdfKind]);
   const [searchText, setSearchText] = useState('');
   const [searchNotice, setSearchNotice] = useState('');
   const [failure, setFailure] = useState('');
@@ -573,7 +585,7 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
       setSettings(nextSettings);
       if (restoredPaperRef.current !== paperId) {
         restoredPaperRef.current = paperId;
-        if (nextPaper.source_language === 'zh') setMode('original');
+        if (nextPaper.source_language === 'zh' || !nextPaper.can_read || !nextPaper.mono_pdf_file_name || !nextPaper.dual_pdf_file_name) setMode('original');
         const restoredPage = nextPaper.last_page || 1;
         visiblePageRef.current = restoredPage;
         initialPageScrollPendingRef.current = true;
@@ -586,6 +598,17 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
   }, [paperId]);
 
   useEffect(() => { if (active) void refresh(); }, [active, refresh]);
+
+  useEffect(() => {
+    if (!active || !paper?.can_read_original || paper.can_read || paper.status === 'completed') return;
+    let refreshing = false;
+    const timer = window.setInterval(() => {
+      if (refreshing) return;
+      refreshing = true;
+      void refresh().finally(() => { refreshing = false; });
+    }, 1800);
+    return () => window.clearInterval(timer);
+  }, [active, paper?.can_read_original, paper?.can_read, paper?.status, refresh]);
 
   useEffect(() => {
     const epoch = ++annotationMappingEpochRef.current;
@@ -915,7 +938,7 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
   }, [active, pdfScrollElement, readerLayoutElement]);
 
   useEffect(() => {
-    if (!paper?.can_read) return;
+    if (!canLoadPdf) return;
     let canceled = false;
     let loaded: SharedPdfDocument | null = null;
     setPdfDocument(null);
@@ -944,7 +967,7 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
       canceled = true;
       if (loaded) void loaded.destroy();
     };
-  }, [paper?.can_read, paper?.page_count, paperId, pdfKind]);
+  }, [canLoadPdf, paper?.page_count, paperId, pdfKind]);
 
   useLayoutEffect(() => {
     const target = pendingAnnotationJumpRef.current;
@@ -1177,6 +1200,7 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
   }
 
   function goToPdfLocation(targetKind: PdfKind, targetPage: number) {
+    if (!canReadPdf(paper, targetKind)) return;
     const nextMode = targetKind === 'dual' ? 'bilingual' : targetKind;
     if (targetKind !== pdfKind) {
       pendingAnnotationJumpRef.current = { pdfKind: targetKind, page: targetPage };
@@ -1552,6 +1576,7 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
       goToPage(currentContext.page_no);
       return;
     }
+    if (!canReadPdf(paper, annotation.pdf_kind)) return;
     const targetMode = annotation.pdf_kind === 'dual' ? 'bilingual' : annotation.pdf_kind;
     if (annotation.pdf_kind === pdfKind) {
       goToPage(annotation.page_no);
@@ -1606,8 +1631,8 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
   return (
     <div className="reader-shell">
       {failure && <div className="reader-error" role="alert">{failure}</div>}
-      {!paper?.can_read ? (
-        <div className="reader-blocked"><span className="eyebrow">尚未开放阅读</span><h1>{paper ? '中文 PDF 仍在生成' : '正在准备阅读窗口'}</h1><p>{paper?.error || '中文 PDF 与双语 PDF 均生成并通过检查后，才会开放阅读。'}</p></div>
+      {!paper || (!paper.can_read && !paper.can_read_original) ? (
+        <div className="reader-blocked"><span className="eyebrow">尚未开放阅读</span><h1>{paper ? '中文 PDF 仍在生成' : '正在准备阅读窗口'}</h1><p>{paper?.error || '正在检查 PDF 文件，请稍候。'}</p></div>
       ) : (
         <div className="reader-layout" ref={setReaderLayoutElement}>
           <aside
@@ -1636,9 +1661,9 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
             <div className="reading-toolbar">
               <button className="reader-toolbar-icon" type="button" data-testid="toggle-outline" aria-label={readerLayout.outlineVisible ? '隐藏导航' : '显示导航'} aria-pressed={!readerLayout.outlineVisible} onClick={() => toggleReaderPanel('outline')}>{readerLayout.outlineVisible ? '☰' : '›'}</button>
               {paper.source_language === 'zh' ? <span className="reader-binding">中文原文</span> : <div className="reader-mode-switch" role="group" aria-label="PDF 阅读模式">
-                <button type="button" className={mode === 'original' ? 'mode-button active' : 'mode-button'} aria-label="原文 PDF" aria-pressed={mode === 'original'} onClick={() => setMode('original')}>原文</button>
-                <button type="button" className={mode === 'mono' ? 'mode-button active' : 'mode-button'} aria-label="中文 PDF" aria-pressed={mode === 'mono'} onClick={() => setMode('mono')}>中文</button>
-                <button type="button" className={mode === 'bilingual' ? 'mode-button active' : 'mode-button'} aria-label="双语对照" aria-pressed={mode === 'bilingual'} onClick={() => setMode('bilingual')}>双语</button>
+                <button type="button" className={mode === 'original' ? 'mode-button active' : 'mode-button'} aria-label="原文 PDF" disabled={!canReadPdf(paper, 'original')} aria-pressed={mode === 'original'} onClick={() => setMode('original')}>原文</button>
+                <button type="button" className={mode === 'mono' ? 'mode-button active' : 'mode-button'} aria-label="中文 PDF" disabled={!canReadPdf(paper, 'mono')} aria-pressed={mode === 'mono'} onClick={() => setMode('mono')}>中文</button>
+                <button type="button" className={mode === 'bilingual' ? 'mode-button active' : 'mode-button'} aria-label="双语对照" disabled={!canReadPdf(paper, 'dual')} aria-pressed={mode === 'bilingual'} onClick={() => setMode('bilingual')}>双语</button>
               </div>}
               <span className="reading-toolbar-spacer" />
               <div className="page-stepper">

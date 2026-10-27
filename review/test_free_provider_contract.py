@@ -78,6 +78,17 @@ class FreeProviderContractReview(unittest.TestCase):
             with self.client(handle):
                 asyncio.run(run())
 
+    def test_upstream_html_500_is_reported_as_service_failure(self):
+        def handle(request):
+            return httpx.Response(500, text="<html>Internal Server Error</html>")
+        async def run():
+            with self.assertRaisesRegex(free_translation.FreeTranslationError, "HTTP 500") as caught:
+                async with free_translation.FreeTranslationClient():
+                    pass
+            self.assertEqual(caught.exception.category, "service_unavailable")
+        with self.client(handle):
+            asyncio.run(run())
+
     def test_rate_limit_retries_and_honors_retry_after(self):
         requests = []
 

@@ -13,6 +13,8 @@ export type Paper = {
   segment_total: number;
   segment_done: number;
   can_read: boolean;
+  can_read_original?: boolean;
+  ocr_pages?: number[];
   source_language: 'zh' | 'en' | 'unknown';
   mono_pdf_file_name: string;
   dual_pdf_file_name: string;

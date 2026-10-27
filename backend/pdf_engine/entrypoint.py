@@ -92,6 +92,7 @@ async def translate(source: Path, output: Path) -> None:
             use_alternating_pages_dual=False,
             watermark_output_mode="no_watermark",
             translate_table_text=False,
+            ocr_workaround=os.environ.get("WORKBENCH_PDF_OCR_INPUT") == "1",
         ),
         translate_engine_settings=SiliconFlowFreeSettings(),
     )
@@ -151,6 +152,13 @@ def main() -> int:
         return 0
     if sys.argv[1:] == ["--self-test"]:
         return self_test()
+    if sys.argv[1:] == ["--ocr-status"]:
+        from local_ocr import status
+        print(json.dumps(status(), ensure_ascii=False), flush=True)
+        return 0
+    ocr_only = len(sys.argv) > 1 and sys.argv[1] == "--ocr"
+    if ocr_only:
+        sys.argv.pop(1)
     if len(sys.argv) != 4:
         emit({"type": "error", "message": "helper 参数无效。"})
         return 2
@@ -166,7 +174,14 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=True)
     prepare_runtime(home, assets)
     try:
-        asyncio.run(translate(normalized_pdf_input(source, output), output))
+        source = normalized_pdf_input(source, output)
+        if ocr_only:
+            from local_ocr import recognize_pdf
+            destination = output / "ocr.pdf"
+            pages = recognize_pdf(source, destination, os.environ.get("WORKBENCH_OCR_LANGUAGE", "auto"), emit)
+            emit({"type": "finish", "ocr_pdf_path": str(destination), "ocr_pages": pages})
+        else:
+            asyncio.run(translate(source, output))
     except Exception as error:
         emit({"type": "error", "message": str(error)[:1000]})
         return 1

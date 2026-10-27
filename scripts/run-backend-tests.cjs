@@ -32,6 +32,7 @@ const modules = [
   'backend_tests.test_literature_plugin', 'backend_tests.test_research_agent',
   'backend_tests.test_paper_favorites',
   'backend_tests.test_pdf_output_validation',
+  'backend_tests.test_local_ocr_contract',
 ];
 const env = {
   ...process.env,

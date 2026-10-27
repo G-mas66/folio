@@ -176,7 +176,7 @@ function Workbench() {
     const saved = readReaderTabs();
     void api<Paper[]>('/papers?folder_id=all').then((allPapers) => {
       if (!mounted) return;
-      const readable = allPapers.filter((paper) => paper.can_read);
+      const readable = allPapers.filter((paper) => paper.can_read || paper.can_read_original);
       const byId = Object.fromEntries(readable.map((paper) => [paper.id, paper])) as Record<string, Paper>;
       const validTabs = [...new Set(saved.paperIds)].filter((id) => Boolean(byId[id]));
       setReaderPapers(byId);
@@ -317,7 +317,8 @@ function Workbench() {
   }
 
   function openReader(paper: Paper, kind?: PdfKind) {
-    if (!paper.can_read) return;
+    if (!paper.can_read && !paper.can_read_original) return;
+    if (kind === 'mono' && !paper.mono_pdf_file_name || kind === 'dual' && !paper.dual_pdf_file_name) return;
     if (kind) setReaderOpenRequest((current) => ({ paperId: paper.id, kind, sequence: (current?.sequence || 0) + 1 }));
     setRecentPaperIds((current) => [paper.id, ...current.filter((id) => id !== paper.id)]);
     setReaderPapers((current) => ({ ...current, [paper.id]: paper }));

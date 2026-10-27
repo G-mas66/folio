@@ -104,6 +104,8 @@ class FreeTranslationClient:
             return
         try:
             response = await self._client.post(CHECK_URL, timeout=10)
+            if response.status_code >= 400:
+                raise FreeTranslationError("service_unavailable", f"免费翻译服务返回 HTTP {response.status_code}，请稍后重试。")
             payload = response.json()
             if response.status_code != 200 or not isinstance(payload, dict) or payload.get("status") != "ok":
                 raise FreeTranslationError("service_unavailable", "免费翻译服务暂时不可用。")

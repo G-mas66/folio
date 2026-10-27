@@ -19,6 +19,11 @@ const statusText: Record<string, string> = {
   waiting_api: '待继续旧任务', needs_title: '待确认标题', queued: '排队中', translating: 'PDF 版式翻译中',
   checking: '完成检查', completed: '可阅读', needs_ocr: '需要 OCR', needs_attention: '提取不完整', error: '处理失败', stopped: '已暂停',
 };
+function canOpenPdf(paper: Paper, kind?: PdfKind) {
+  if (kind === 'mono') return Boolean(paper.mono_pdf_file_name);
+  if (kind === 'dual') return Boolean(paper.dual_pdf_file_name);
+  return Boolean(paper.can_read_original || paper.can_read);
+}
 const pdfNames: [PdfKind, string][] = [['original', '原文 PDF'], ['mono', '中文 PDF'], ['dual', '双语 PDF']];
 
 function DocumentIcon() {
@@ -118,11 +123,11 @@ export function PaperLibrary(props: Props) {
             <span className="paper-creator-cell" role="cell" title={authorsFor(metadata[paper.id], true)}>{authorsFor(metadata[paper.id])}</span>
             <span className="paper-year-cell" role="cell">{metadata[paper.id]?.year || ''}</span>
             <div className="paper-actions" role="cell">
-              <button className="paper-read-button" type="button" data-testid={`paper-read-${paper.id}`} aria-label="阅读" title={paper.can_read ? '阅读文献' : statusText[paper.status]} disabled={!paper.can_read} onClick={event => { event.stopPropagation(); onOpen(paper); }}><DocumentIcon /></button>
+              <button className="paper-read-button" type="button" data-testid={`paper-read-${paper.id}`} aria-label="阅读" title={canOpenPdf(paper) ? '阅读文献' : statusText[paper.status]} disabled={!canOpenPdf(paper)} onClick={event => { event.stopPropagation(); onOpen(paper); }}><DocumentIcon /></button>
               {favoriteButton(paper, true)}<PaperActions {...props} paper={paper} />
             </div>
           </article>
-          {expandedIds.includes(paper.id) && <div className="paper-attachment-rows" role="rowgroup">{filesFor(paper).map(([kind, name]) => <div role="row" key={kind}><button role="cell" type="button" disabled={!paper.can_read} onClick={() => onOpen(paper, kind)}><DocumentIcon />{name}<span>{paper.page_count} 页</span></button></div>)}</div>}
+          {expandedIds.includes(paper.id) && <div className="paper-attachment-rows" role="rowgroup">{filesFor(paper).map(([kind, name]) => <div role="row" key={kind}><button role="cell" type="button" disabled={!canOpenPdf(paper, kind)} onClick={() => onOpen(paper, kind)}><DocumentIcon />{name}<span>{paper.page_count} 页</span></button></div>)}</div>}
         </div>)}
       </section>}
       <div className="library-footer"><span>{papers.length} 篇文献{selected ? ' · 已选 1 篇' : ''}</span><span>单击查看详情，双击阅读</span></div>
@@ -135,17 +140,20 @@ export function PaperLibrary(props: Props) {
           <div className="paper-detail-kicker"><span>{selected.source_language === 'zh' ? '中文文献' : '研究论文'}</span><span className={`status-${selected.status}`}>{statusText[selected.status] || selected.status}</span></div>
           <h2>{selected.chinese_title || titleFor(selected)}</h2>
           {selected.chinese_title && selected.english_title && selected.chinese_title !== selected.english_title && !/^https?:\/\//i.test(selected.english_title) && <p className="paper-detail-english">{selected.english_title}</p>}
-          <div className="paper-detail-actions"><button type="button" className="primary-button" data-testid="detail-read" disabled={!selected.can_read} onClick={() => onOpen(selected)}><OpenIcon />阅读 PDF</button>{favoriteButton(selected)}<PaperActions {...props} paper={selected} /></div>
-          {selected.error && <p className="paper-detail-error" role="status">{selected.error}</p>}
+          <div className="paper-detail-actions"><button type="button" className="primary-button" data-testid="detail-read" disabled={!canOpenPdf(selected)} onClick={() => onOpen(selected)}><OpenIcon />阅读 PDF</button>{favoriteButton(selected)}<PaperActions {...props} paper={selected} /></div>
+          {selected.error && <p className={selected.status === 'translating' ? 'field-help' : 'paper-detail-error'} role="status">{selected.error}</p>}
           {['queued', 'translating', 'waiting_api'].includes(selected.status) && <button className="secondary-button" type="button" onClick={() => props.onAction(selected, 'stop')}>暂停翻译</button>}
           {selected.status === 'stopped' && <button className="secondary-button" type="button" onClick={() => props.onAction(selected, 'continue')}>继续翻译</button>}
           {['error', 'waiting_api'].includes(selected.status) && <button className="secondary-button" type="button" onClick={() => props.onAction(selected, 'retry')}>重试翻译</button>}
+          {['needs_ocr', 'needs_attention'].includes(selected.status) && <button className="secondary-button" type="button" onClick={() => props.onAction(selected, 'retry')}>{selected.source_language === 'zh' ? 'OCR 识别' : 'OCR 后翻译'}</button>}
+          {selected.status === 'needs_title' && <button className="secondary-button" type="button" onClick={() => props.onEdit(selected)}>编辑标题</button>}
+          {!!selected.ocr_pages?.length && <p className="field-help">已识别 OCR：第 {selected.ocr_pages.join('、')} 页</p>}
           <section className="paper-detail-section"><h3>文献信息</h3>
             {metadataError && <p className="paper-metadata-error">书目信息暂时无法读取。<button type="button" className="text-button" onClick={() => setMetadataRevision(value => value + 1)}>重试</button></p>}
             <dl><dt>作者</dt><dd>{authorsFor(metadata[selected.id], true)}</dd><dt>年份</dt><dd>{metadata[selected.id]?.year || '未记录'}</dd><dt>来源</dt><dd>{metadata[selected.id]?.container_title || '未记录'}</dd><dt>页数</dt><dd>{selected.page_count} 页</dd><dt>分类</dt><dd>{folders.find(folder => folder.id === selected.folder_id)?.name || '未分类'}</dd><dt>DOI</dt><dd>{metadata[selected.id]?.doi || '未记录'}</dd></dl>
             <button className="text-button paper-detail-edit" type="button" onClick={() => props.onBibliography(selected)}>查看或编辑书目信息</button>
           </section>
-          <section className="paper-detail-section"><h3>PDF 文件</h3>{filesFor(selected).map(([kind, name]) => <div className="paper-detail-file" key={kind}><button type="button" disabled={!selected.can_read} onClick={() => onOpen(selected, kind)}><DocumentIcon /><span>{name}</span><span className="paper-file-pages">{selected.page_count} 页</span></button><button className="icon-button" type="button" aria-label={`定位${name}`} title={`定位${name}`} onClick={() => props.onReveal(selected, kind)}><OpenIcon /></button></div>)}</section>
+          <section className="paper-detail-section"><h3>PDF 文件</h3>{filesFor(selected).map(([kind, name]) => <div className="paper-detail-file" key={kind}><button type="button" disabled={!canOpenPdf(selected, kind)} onClick={() => onOpen(selected, kind)}><DocumentIcon /><span>{name}</span><span className="paper-file-pages">{selected.page_count} 页</span></button><button className="icon-button" type="button" aria-label={`定位${name}`} title={`定位${name}`} onClick={() => props.onReveal(selected, kind)}><OpenIcon /></button></div>)}</section>
           {selected.diagnostics.length > 0 && <section className="paper-detail-section"><h3>页面检查</h3><ul className="paper-detail-diagnostics">{selected.diagnostics.map(item => <li key={item.page}>第 {item.page} 页：{item.status === 'needs_ocr' ? '需 OCR' : '提取不完整'}</li>)}</ul></section>}
         </div>
       </div>
@@ -159,6 +167,7 @@ function PaperActions({ paper, folders, onEdit, onDelete, onReveal, onMove, onAc
     <div className="paper-more-menu"><label>分类<select aria-label="移动文献到文件夹" data-testid={`paper-folder-${paper.id}`} value={paper.folder_id || ''} onChange={event => onMove(paper, event.target.value || null)}><option value="">未分类</option>{folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label>
       <button className="text-button" type="button" onClick={() => onEdit(paper)}>编辑标题</button><button className="text-button" type="button" onClick={() => onBibliography(paper)}>书目信息</button><button className="text-button" type="button" onClick={() => onReveal(paper)}>打开文件位置</button>
       {['queued', 'translating', 'waiting_api'].includes(paper.status) && <button className="text-button" type="button" onClick={() => onAction(paper, 'stop')}>暂停</button>}{paper.status === 'stopped' && <button className="text-button" type="button" onClick={() => onAction(paper, 'continue')}>继续翻译</button>}{['error', 'waiting_api'].includes(paper.status) && <button className="text-button" type="button" onClick={() => onAction(paper, 'retry')}>重试</button>}
+      {['needs_ocr', 'needs_attention'].includes(paper.status) && <button className="text-button" type="button" onClick={() => onAction(paper, 'retry')}>{paper.source_language === 'zh' ? 'OCR 识别' : 'OCR 后翻译'}</button>}
       <button className="text-button delete-paper-button" type="button" onClick={() => onDelete(paper)}>删除</button>
     </div>
   </details>;
