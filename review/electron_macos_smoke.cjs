@@ -372,7 +372,7 @@ async function main() {
     const paperRow = library.getByTestId(`paper-row-${paper.id}`);
     await paperRow.click();
     await library.getByTestId('paper-inspector').waitFor();
-    await library.waitForFunction(() => document.querySelector('[data-testid="paper-inspector"] canvas')?.width > 0);
+    await library.locator('[data-testid="paper-inspector"] .paper-thumbnail.loaded').waitFor();
     assert.equal(await library.getByTestId(`paper-tab-${paper.id}`).count(), 0, 'Selecting a paper must show details without opening a reader.');
     await library.getByTestId(`paper-favorite-${paper.id}`).click();
     await library.getByTestId(`paper-favorite-${paper.id}`).waitFor({ state: 'visible' });
