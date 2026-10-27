@@ -13,7 +13,10 @@ export PYINSTALLER_CONFIG_DIR="$RUNNER_TEMP/folio-pdf-engine-pyinstaller-cache"
 export WORKBENCH_PDF_ENGINE_BUILD_HOME="$RUNNER_TEMP/folio-pdf-engine-home"
 
 python3 -m venv --clear "$VENV"
-"$PYTHON" -m pip install --quiet --disable-pip-version-check --only-binary=cryptography 'pdf2zh-next==2.9.0' 'babeldoc==0.6.2' 'pyinstaller==6.16.0'
+"$PYTHON" -m pip install --quiet --disable-pip-version-check --only-binary=cryptography 'pdf2zh-next==2.9.0' 'babeldoc==0.6.2' 'pyinstaller==6.16.0' 'bitstring==4.4.0'
+WORKBENCH_PDF_ENGINE_ASSETS="$ROOT/backend/pdf_engine_assets/babeldoc" \
+WORKBENCH_PDF_ENGINE_HOME="$WORKBENCH_PDF_ENGINE_BUILD_HOME" \
+  "$PYTHON" "$ROOT/backend/pdf_engine/entrypoint.py" --self-test
 
 SITE_PACKAGES="$("$PYTHON" -c 'import site; print(site.getsitepackages()[0])')"
 CRYPTOGRAPHY_RUST="$SITE_PACKAGES/cryptography/hazmat/bindings/_rust.abi3.so"
@@ -63,3 +66,6 @@ cd "$ROOT"
 
 test -x "$ROOT/backend/dist/workbench-pdf-engine/workbench-pdf-engine"
 file "$ROOT/backend/dist/workbench-pdf-engine/workbench-pdf-engine"
+WORKBENCH_PDF_ENGINE_ASSETS="$ROOT/backend/pdf_engine_assets/babeldoc" \
+WORKBENCH_PDF_ENGINE_HOME="$WORKBENCH_PDF_ENGINE_BUILD_HOME" \
+  "$ROOT/backend/dist/workbench-pdf-engine/workbench-pdf-engine" --self-test

@@ -14,7 +14,7 @@ if (-not (Test-Path -LiteralPath $Python)) {
   py -3.12 -m venv (Join-Path $ProjectRoot '.venv-pdf-engine')
   if ($LASTEXITCODE -ne 0) { throw 'Could not create the Python 3.12 PDF engine environment.' }
 }
-& $Python -m pip install --quiet --disable-pip-version-check 'pdf2zh-next==2.9.0' 'babeldoc==0.6.2' 'pyinstaller==6.16.0'
+& $Python -m pip install --quiet --disable-pip-version-check 'pdf2zh-next==2.9.0' 'babeldoc==0.6.2' 'pyinstaller==6.16.0' 'bitstring==4.4.0'
 if ($LASTEXITCODE -ne 0) { throw "PDF engine dependency installation failed with exit code $LASTEXITCODE" }
 $BuildSiteCustomize = Join-Path $ProjectRoot '.venv-pdf-engine\Lib\site-packages\sitecustomize.py'
 $BuildSiteCustomizeContent = @'
