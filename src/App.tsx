@@ -79,6 +79,8 @@ function Workbench() {
   const [updateNotice, setUpdateNotice] = useState<UpdateState | null>(null);
   const dismissedUpdateRef = useRef<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [failedImport, setFailedImport] = useState<{ paths: string[]; folderId: string | null; error: string } | null>(null);
+  const [actionPending, setActionPending] = useState<string[]>([]);
   const [editing, setEditing] = useState<Paper | null>(null);
   const [folderDialog, setFolderDialog] = useState<'create' | 'rename' | null>(null);
   const [folderName, setFolderName] = useState('');
@@ -234,14 +236,15 @@ function Workbench() {
     return () => { window.clearInterval(timer); refreshSequenceRef.current += 1; };
   }, [refresh]);
 
-  async function importFiles(paths: string[]) {
-    if (!paths.length) return;
+  async function importFiles(paths: string[], folderId = !['all', 'unfiled', 'recent', 'favorites'].includes(folderFilter) ? folderFilter : null) {
+    if (!paths.length || busy) return;
     setBusy(true);
     setNotice('正在导入并检查 PDF…');
     setError('');
     try {
-      const folder_id = !['all', 'unfiled', 'recent', 'favorites'].includes(folderFilter) ? folderFilter : null;
+      const folder_id = folderId;
       const result = await api<{ results: { duplicate: boolean; paper: Paper }[] }>('/papers/import', 'POST', { paths, folder_id });
+      setFailedImport(null);
       const added = result.results.filter((item) => !item.duplicate).length;
       const duplicates = result.results.length - added;
       setTotalPaperCount((current) => current === null ? null : current + added);
@@ -249,7 +252,8 @@ function Workbench() {
       await refresh();
     } catch (e) {
       setNotice('');
-      setError(errorMessage(e));
+      setFailedImport({ paths, folderId, error: errorMessage(e) });
+      await refresh();
     } finally {
       setBusy(false);
     }
@@ -277,12 +281,17 @@ function Workbench() {
   }
 
   async function paperAction(paper: Paper, action: 'stop' | 'continue' | 'retry') {
+    if (actionPending.includes(paper.id)) return;
+    setActionPending(current => [...current, paper.id]);
     setError('');
     try {
-      await api(`/papers/${paper.id}/translation/${action}`, 'POST');
+      const updated = await api<Paper>(`/papers/${paper.id}/translation/${action}`, 'POST');
+      setPapers(current => current.map(item => item.id === updated.id ? updated : item));
       await refresh();
     } catch (e) {
       setError(errorMessage(e));
+    } finally {
+      setActionPending(current => current.filter(id => id !== paper.id));
     }
   }
 
@@ -541,6 +550,7 @@ function Workbench() {
           </aside>
           <PaperLibrary papers={papers} folders={folders} folderFilter={folderFilter} search={search} onSearch={setSearch}
             searchInputRef={librarySearchRef} active={activePanel === 'library'} busy={busy} notice={notice} error={error}
+            actionPending={actionPending} failedImport={failedImport} onRetryImport={() => { if (failedImport) void importFiles(failedImport.paths, failedImport.folderId); }}
             favoritePending={favoritePending} onChooseFiles={() => void chooseFiles()}
             onOpen={openReader} onFavorite={(paper) => void toggleFavorite(paper)} onEdit={setEditing}
             onDelete={(paper) => void deletePaper(paper)} onReveal={(paper, kind) => void revealFile(paper, kind)}

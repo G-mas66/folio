@@ -14,8 +14,7 @@ from urllib.parse import urlsplit
 import httpx
 
 API_URL = "https://api1.pdf2zh-next.com/chatproxy"
-CHECK_URL = f"{API_URL}/check"
-CONFIG_URL = f"{API_URL}/config"
+API_URLS = (API_URL, "https://api2.pdf2zh-next.com/chatproxy")
 DEFAULT_QPS = 10
 DEFAULT_WORKERS = 4
 MAX_WORKERS = 4
@@ -102,20 +101,9 @@ class FreeTranslationClient:
         if _provider_settings is not None:
             self.qps, self.max_workers = _provider_settings
             return
+        # A health endpoint failure must not prevent the actual translation request.
         try:
-            response = await self._client.post(CHECK_URL, timeout=10)
-            if response.status_code >= 400:
-                raise FreeTranslationError("service_unavailable", f"免费翻译服务返回 HTTP {response.status_code}，请稍后重试。")
-            payload = response.json()
-            if response.status_code != 200 or not isinstance(payload, dict) or payload.get("status") != "ok":
-                raise FreeTranslationError("service_unavailable", "免费翻译服务暂时不可用。")
-        except FreeTranslationError:
-            raise
-        except (httpx.HTTPError, ValueError):
-            raise FreeTranslationError("service_unavailable", "无法连接免费翻译服务，请检查网络后重试。") from None
-
-        try:
-            response = await self._client.get(CONFIG_URL, timeout=10)
+            response = await self._client.get(f"{self.url}/config", timeout=10)
             response.raise_for_status()
             payload = response.json()
             qps = payload.get("qps") if isinstance(payload, dict) else None
@@ -141,6 +129,12 @@ class FreeTranslationClient:
                     return True
             await asyncio.sleep(min(delay, RATE_LIMIT_WAIT_POLL_INTERVAL))
 
+    def _retry_transient(self, attempt: int, retry_after: str | None = None) -> None:
+        if not self.is_test_override:
+            self.url = API_URLS[(API_URLS.index(self.url) + 1) % len(API_URLS)]
+        delay = _retry_after_seconds(retry_after)
+        _defer_shared_requests(min(delay if delay is not None else 2 ** attempt, MAX_RATE_LIMIT_RETRY_DELAY))
+
     async def translate(self, text: str, *, cancelled: Callable[[], bool] | None = None) -> str | None:
         if not isinstance(text, str) or not text.strip():
             raise FreeTranslationError("empty_source", "没有可翻译的文本。")
@@ -161,9 +155,18 @@ class FreeTranslationClient:
                 try:
                     response = await self._client.post(self.url, json={"text": prompt})
                 except httpx.TimeoutException:
+                    if attempt < MAX_RATE_LIMIT_RETRIES:
+                        self._retry_transient(attempt)
+                        continue
                     raise FreeTranslationError("timeout", "免费翻译服务连接超时，本段尚未完成。") from None
                 except httpx.RequestError:
+                    if attempt < MAX_RATE_LIMIT_RETRIES:
+                        self._retry_transient(attempt)
+                        continue
                     raise FreeTranslationError("network", "无法连接免费翻译服务，本段尚未完成。") from None
+                if response.status_code in {500, 502, 503, 504} and attempt < MAX_RATE_LIMIT_RETRIES:
+                    self._retry_transient(attempt, response.headers.get("Retry-After"))
+                    continue
                 if response.status_code != 429:
                     break
                 if cancelled and await asyncio.to_thread(cancelled):

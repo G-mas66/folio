@@ -64,7 +64,7 @@ class FreeProviderContractReview(unittest.TestCase):
                 self.assertEqual(await translator.translate(source), "完整译文，附录数值811。")
         with self.client(handle):
             asyncio.run(run())
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 2)
 
     def test_loopback_test_url_preserves_its_path_trailing_slash_and_query(self):
         url = "http://127.0.0.1:8123/provider/free-endpoint/?route=paper%2Bnotes"
@@ -78,16 +78,57 @@ class FreeProviderContractReview(unittest.TestCase):
             with self.client(handle):
                 asyncio.run(run())
 
-    def test_upstream_html_500_is_reported_as_service_failure(self):
+    def test_health_check_failure_does_not_block_translation(self):
+        paths = []
         def handle(request):
-            return httpx.Response(500, text="<html>Internal Server Error</html>")
+            paths.append(request.url.path)
+            if request.url.path != "/chatproxy":
+                return httpx.Response(500, text="<html>Internal Server Error</html>")
+            return httpx.Response(200, json={"content": "恢复后的译文"})
         async def run():
-            with self.assertRaisesRegex(free_translation.FreeTranslationError, "HTTP 500") as caught:
-                async with free_translation.FreeTranslationClient():
-                    pass
-            self.assertEqual(caught.exception.category, "service_unavailable")
+            async with free_translation.FreeTranslationClient() as translator:
+                return await translator.translate("source")
+        with self.client(handle):
+            self.assertEqual(asyncio.run(run()), "恢复后的译文")
+        self.assertNotIn("/chatproxy/check", paths)
+
+    def test_transient_failures_retry_and_switch_to_backup(self):
+        for failure in (500, 502, 503, 504, "timeout", "network"):
+            with self.subTest(failure=failure):
+                free_translation._provider_settings = None
+                hosts = []
+                def handle(request):
+                    if request.url.path.endswith("/config"):
+                        return httpx.Response(200, json={})
+                    hosts.append(request.url.host)
+                    if len(hosts) == 1:
+                        if failure == "timeout":
+                            raise httpx.ReadTimeout("temporary", request=request)
+                        if failure == "network":
+                            raise httpx.ConnectError("temporary", request=request)
+                        return httpx.Response(failure)
+                    return httpx.Response(200, json={"content": "恢复后的译文"})
+                async def run():
+                    async with free_translation.FreeTranslationClient() as translator:
+                        return await translator.translate("source")
+                with self.client(handle):
+                    self.assertEqual(asyncio.run(run()), "恢复后的译文")
+                self.assertEqual(hosts, ["api1.pdf2zh-next.com", "api2.pdf2zh-next.com"])
+
+    def test_persistent_server_failure_is_bounded(self):
+        requests = []
+        def handle(request):
+            if request.url.path.endswith("/config"):
+                return httpx.Response(200, json={})
+            requests.append(None)
+            return httpx.Response(500)
+        async def run():
+            async with free_translation.FreeTranslationClient() as translator:
+                with self.assertRaisesRegex(free_translation.FreeTranslationError, "HTTP 500"):
+                    await translator.translate("source")
         with self.client(handle):
             asyncio.run(run())
+        self.assertEqual(len(requests), 3)
 
     def test_rate_limit_retries_and_honors_retry_after(self):
         requests = []
@@ -180,7 +221,7 @@ class FreeProviderContractReview(unittest.TestCase):
 
     def test_other_failures_are_not_retried(self):
         for response, category in (
-            (httpx.Response(500), "service_error"),
+            (httpx.Response(401), "service_error"),
             (httpx.Response(200, json={}), "invalid_response"),
         ):
             with self.subTest(category=category):
@@ -226,6 +267,20 @@ class FreeProviderContractReview(unittest.TestCase):
         self.assertIsNone(translation)
         self.assertEqual(len(requests), 1)
         self.assertLess(elapsed, 0.4)
+
+    def test_cancellation_during_server_error_backoff_stops_retry(self):
+        cancelled = threading.Event()
+        requests = []
+        def handle(request):
+            requests.append(request.url.host)
+            cancelled.set()
+            return httpx.Response(503)
+        async def run():
+            async with free_translation.FreeTranslationClient() as translator:
+                return await translator.translate("source", cancelled=cancelled.is_set)
+        with patch.dict(os.environ, {"WORKBENCH_FREE_API_URL": "http://localhost:8123/free"}), self.client(handle):
+            self.assertIsNone(asyncio.run(run()))
+        self.assertEqual(requests, ["localhost"])
 
     def test_translation_rate_limit_is_shared_between_client_instances(self):
         requests = []
