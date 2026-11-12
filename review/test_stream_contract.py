@@ -71,6 +71,12 @@ class StreamReview(unittest.TestCase):
                         frame({'tool_calls': [{'index': 0, 'id': 'review_summary', 'type': 'function', 'function': {'name': 'summarize_paper', 'arguments': '{'}}]})
                         frame({'tool_calls': [{'index': 0, 'function': {'arguments': '}'}}]})
                         frame({}, 'tool_calls')
+                    elif owner.mode == 'tool_flood' and body.get('tools'):
+                        frame({'tool_calls': [{'index': 0, 'id': f'review_flood_{len(owner.requests)}', 'type': 'function', 'function': {'name': 'read_paper', 'arguments': json.dumps({'query': 'COVERAGE_PAGE_01'})}}]})
+                        frame({}, 'tool_calls')
+                    elif owner.mode == 'tool_flood':
+                        frame({'content': '基于已读证据的最终回答。'})
+                        frame({}, 'stop')
                     else:
                         frame({'content': '第一段正文。'})
                         frame({'content': '第二段正文。'})
@@ -142,6 +148,24 @@ class StreamReview(unittest.TestCase):
         events = asyncio.run(run())
         self.assertIn('event: done', events)
         self.assertEqual(self.request_user_agents, [ai.API_USER_AGENT])
+
+    def test_tool_budget_exhausts_into_a_final_answer_instead_of_an_error(self):
+        self.mode = 'tool_flood'
+
+        async def run():
+            async with self.client() as client:
+                return await self.stream(client, question='这三个模型分别是什么')
+
+        events = asyncio.run(run())
+        self.assertIn('event: done', events)
+        self.assertNotIn('event: error', events)
+        forced = [request for request in self.requests if not request.get('tools')]
+        self.assertEqual(len(forced), 1, 'Exhausted budget must end with one tool-free answer round')
+        self.assertNotIn('tool_choice', forced[0])
+        self.assertEqual(len(self.requests), app.CHAT_TOOL_ACTION_LIMIT + 2)
+        message = app.get_chat(self.paper)[-1]
+        self.assertEqual(message['status'], 'completed')
+        self.assertEqual(message['content'], '基于已读证据的最终回答。')
 
     def test_stream_authentication_errors_distinguish_401_from_403(self):
         for status, expected in ((401, '认证未通过'), (403, '请求被拒绝')):

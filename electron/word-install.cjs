@@ -40,6 +40,9 @@ const systemRegistry = {
     if (result.status !== 0) throw new Error(result.stderr || result.stdout || `Registry write failed: ${key}`);
   },
   deleteTree(key, view) {
+    const queryArgs = ['query', key];
+    if (view) queryArgs.push(`/reg:${view}`);
+    if (runReg(queryArgs).status === 1) return;
     const args = ['delete', key, '/f'];
     if (view) args.push(`/reg:${view}`);
     const result = runReg(args);
@@ -48,6 +51,7 @@ const systemRegistry = {
     }
   },
   deleteValue(key, name, view) {
+    if (this.get(key, name, view) === undefined) return;
     const args = ['delete', key, name === '' ? '/ve' : '/v', ...(name === '' ? [] : [name]), '/f'];
     if (view) args.push(`/reg:${view}`);
     const result = runReg(args);
@@ -201,8 +205,6 @@ function writeView(registry, view, filename, installRoot) {
   const keys = registrationKeys();
   const clsidInproc = `${keys.clsid}\\InprocServer32`;
   const codeBase = codeBaseFor(filename);
-  assertOwnedOrEmpty(registry, `${keys.addin}`, 'LoadBehavior', view, installRoot);
-  assertOwnedOrEmpty(registry, clsidInproc, 'CodeBase', view, installRoot);
   const values = [
     [keys.clsid, '', ADDIN_NAME, 'REG_SZ'],
     [clsidInproc, '', 'mscoree.dll', 'REG_SZ'],

@@ -741,15 +741,37 @@ ipcMain.handle('workbench:set-theme-preference', (event, preference) => {
   fs.writeFileSync(themePreferencePath, JSON.stringify({ theme: preference }), 'utf8');
   return preference;
 });
+function libraryPdfPath(paper, kind) {
+  const name = kind === 'original' || paper.source_language === 'zh' ? paper.file_name : kind === 'mono' ? paper.mono_pdf_file_name : paper.dual_pdf_file_name;
+  if (!name || path.basename(name) !== name) throw new Error('对应的 PDF 尚未生成。');
+  const folder = path.join(dataRoot, 'papers', paper.id);
+  const target = path.join(folder, name);
+  if (!fs.existsSync(target) || fs.realpathSync(folder) !== path.join(fs.realpathSync(path.join(dataRoot, 'papers')), paper.id) || path.dirname(fs.realpathSync(target)) !== fs.realpathSync(folder)) throw new Error('文献库中的 PDF 不存在。');
+  return target;
+}
 ipcMain.handle('workbench:reveal-paper-file', async (event, input) => {
   if (BrowserWindow.fromWebContents(event.sender) !== mainWindow || !/^[a-f0-9]{32}$/.test(input?.paperId || '') || !['original', 'mono', 'dual'].includes(input?.kind)) throw new Error('文献文件位置无效。');
   const paper = await requestApi({ path: `/papers/${input.paperId}` });
-  const name = input.kind === 'original' || paper.source_language === 'zh' ? paper.file_name : input.kind === 'mono' ? paper.mono_pdf_file_name : paper.dual_pdf_file_name;
-  if (!name || path.basename(name) !== name) throw new Error('对应的 PDF 尚未生成。');
-  const folder = path.join(dataRoot, 'papers', input.paperId);
-  const target = path.join(folder, name);
-  if (!fs.existsSync(target) || fs.realpathSync(folder) !== path.join(fs.realpathSync(path.join(dataRoot, 'papers')), input.paperId) || path.dirname(fs.realpathSync(target)) !== fs.realpathSync(folder)) throw new Error('文献库中的 PDF 不存在。');
-  shell.showItemInFolder(target);
+  shell.showItemInFolder(libraryPdfPath(paper, input.kind));
+  return true;
+});
+ipcMain.handle('workbench:export-folio-bundle', async (event, paperId) => {
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  if (!owner || owner !== mainWindow || !/^[a-f0-9]{32}$/.test(paperId || '')) throw new Error('文献无效。');
+  if (storageMigrationInProgress) throw new Error('文献存储位置正在迁移，暂时不能导出。');
+  const paper = await requestApi({ path: `/papers/${paperId}` });
+  if (!paper.mono_pdf_file_name || !paper.dual_pdf_file_name) throw new Error('请先生成中文版和双语版。');
+  const files = Object.fromEntries(['original', 'mono', 'dual'].map(kind => [kind, libraryPdfPath(paper, kind)]));
+  const title = (paper.chinese_title || paper.english_title || paper.source_name).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 100).replace(/[. ]+$/, '');
+  const result = await dialog.showSaveDialog(owner, {
+    title: '导出到平板',
+    defaultPath: `Folio - ${title || '文献'}.folio`,
+    filters: [{ name: 'Folio 文献包', extensions: ['folio'] }],
+  });
+  if (result.canceled || !result.filePath) return false;
+  const destination = result.filePath.toLowerCase().endsWith('.folio') ? result.filePath : result.filePath + '.folio';
+  const { writeFolioBundle } = require('./folio-bundle.cjs');
+  await writeFolioBundle(destination, paper, files);
   return true;
 });
 ipcMain.handle('workbench:open-library-folder', async (event) => {
@@ -926,6 +948,15 @@ if (!gotSingleInstanceLock) {
     if (locationStartupError) throw locationStartupError;
     await startBackend();
     await startPluginBridge();
+    if (process.env.WORKBENCH_TABLET_HOST && process.env.WORKBENCH_TABLET_TOKEN) {
+      const { startTabletBridge } = require('./tablet-bridge.cjs');
+      await startTabletBridge({
+        host: process.env.WORKBENCH_TABLET_HOST,
+        token: process.env.WORKBENCH_TABLET_TOKEN,
+        backendBase,
+        backendToken,
+      });
+    }
     // The local Word add-in uses the authenticated native bridge.
     createMainWindow();
     if (app.isPackaged && ['win32', 'darwin'].includes(process.platform)) setTimeout(() => void checkForUpdatesInternal().catch(() => {}), 2000).unref();

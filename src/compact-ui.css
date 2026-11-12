@@ -195,7 +195,7 @@
 }
 @media (max-width: 900px) {
   .paper-library-shell.with-details { grid-template-columns: minmax(0, 1fr); }
-  .paper-inspector { position: absolute; z-index: 3; inset: 0 0 0 auto; width: 302px; box-shadow: -8px 0 24px #173b2920; }
+  .paper-inspector { position: absolute; z-index: 3; inset: 0 0 0 auto; width: 302px; box-shadow: -8px 0 24px #2c292620; }
 }
 
 .paper-retry-button { flex: 0 0 auto; padding: 2px 4px; font-size: 11px; }

@@ -29,6 +29,8 @@ class LocalOcrContract(unittest.TestCase):
         pdf.drawString(50, 700, "Native text must keep its existing segment identity.")
         pdf.showPage()
         pdf.rect(50, 50, 100, 100, fill=1)
+        pdf.showPage()
+        pdf.drawString(50, 700, "Native text after the page that needs OCR.")
         pdf.save()
         self.paper = app.import_pdf(str(source))["paper"]
         self.paper_id = self.paper["id"]
@@ -94,7 +96,7 @@ class LocalOcrContract(unittest.TestCase):
 
     def test_ocr_copy_and_new_segments_publish_without_changing_existing_anchors(self):
         with connect() as db:
-            before = [tuple(row) for row in db.execute("SELECT id, original_text FROM segments WHERE paper_id = ?", (self.paper_id,))]
+            before = [tuple(row) for row in db.execute("SELECT id, original_text FROM segments WHERE paper_id = ? ORDER BY sequence_no", (self.paper_id,))]
         app.store_status(self.paper_id, "translating")
         with self.make_helper():
             result = asyncio.run(app.run_pdf_engine(self.paper_id, ocr_only=True))
@@ -105,7 +107,8 @@ class LocalOcrContract(unittest.TestCase):
         self.assertEqual(app.paper_view(paper)["diagnostics"], [])
         self.assertEqual(hashlib.sha256(self.original.read_bytes()).hexdigest(), self.source_hash)
         with connect() as db:
-            self.assertEqual(before, [tuple(row) for row in db.execute("SELECT id, original_text FROM segments WHERE paper_id = ? AND start_page = 1", (self.paper_id,))])
+            self.assertEqual(before, [tuple(row) for row in db.execute("SELECT id, original_text FROM segments WHERE paper_id = ? AND start_page IN (1, 3) ORDER BY sequence_no", (self.paper_id,))])
+            self.assertEqual([(1, 1), (2, 2), (3, 3)], [tuple(row) for row in db.execute("SELECT sequence_no, start_page FROM segments WHERE paper_id = ? ORDER BY sequence_no", (self.paper_id,))])
             self.assertIn("Recovered OCR", db.execute("SELECT original_text FROM segments WHERE paper_id = ? AND start_page = 2", (self.paper_id,)).fetchone()[0])
         self.assertEqual(list(self.original.parent.glob(".engine-*")), [])
 

@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld('workbench', Object.freeze({
   setThemePreference: (preference) => ipcRenderer.invoke('workbench:set-theme-preference', preference),
   choosePdfs: () => ipcRenderer.invoke('workbench:choose-pdfs'),
   revealPaperFile: (paperId, kind) => ipcRenderer.invoke('workbench:reveal-paper-file', { paperId, kind }),
+  exportFolioBundle: (paperId) => ipcRenderer.invoke('workbench:export-folio-bundle', paperId),
   openLibraryFolder: () => ipcRenderer.invoke('workbench:open-library-folder'),
   getDroppedPaths: (files) => Array.from(files, (file) => webUtils.getPathForFile(file)).filter(Boolean),
   cancelPaperStreams: (paperId) => ipcRenderer.invoke('workbench:cancel-paper-streams', paperId),

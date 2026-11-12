@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
+import { flushSync } from 'react-dom';
 import { api, errorMessage, Folder, Paper, UpdateState } from './api';
 import type { PdfKind } from './PdfPage';
 import { PaperLibrary } from './PaperLibrary';
 import { Reader } from './Reader';
 import { SettingsPanel } from './SettingsPanel';
+import { TabletSettings } from './TabletSettings';
 import { BibliographyPanel } from './BibliographyPanel';
 import { removeThumbnailCover } from './thumbnailCoverCache';
 
@@ -103,6 +105,16 @@ function Workbench() {
     return () => { active = false; unsubscribe(); };
   }, []);
 
+  const switchTheme = useCallback((next: 'light' | 'dark' | (() => void)) => {
+    const apply = () => flushSync(() => { if (typeof next === 'function') next(); else setThemePreference(next); });
+    const root = document.documentElement;
+    root.classList.add('theme-switching');
+    const done = () => requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove('theme-switching')));
+    const start = (document as Document & { startViewTransition?: (cb: () => void) => { finished: Promise<void> } }).startViewTransition;
+    if (start && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) start.call(document, apply).finished.finally(done);
+    else { apply(); done(); }
+  }, []);
+
   useLayoutEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const apply = () => {
@@ -110,9 +122,10 @@ function Workbench() {
       document.documentElement.dataset.theme = next;
       document.documentElement.style.colorScheme = next;
       setTheme(next);
+      if (import.meta.env.MODE === 'tablet') void window.workbench.setThemePreference(next).catch((error) => setError(errorMessage(error)));
     };
     apply();
-    void window.workbench.setThemePreference(themePreference).catch((error) => setError(errorMessage(error)));
+    if (import.meta.env.MODE !== 'tablet') void window.workbench.setThemePreference(themePreference).catch((error) => setError(errorMessage(error)));
     if (themePreference !== 'system') return;
     media.addEventListener('change', apply);
     return () => media.removeEventListener('change', apply);
@@ -239,7 +252,7 @@ function Workbench() {
   async function importFiles(paths: string[], folderId = !['all', 'unfiled', 'recent', 'favorites'].includes(folderFilter) ? folderFilter : null) {
     if (!paths.length || busy) return;
     setBusy(true);
-    setNotice('正在导入并检查 PDF…');
+    setNotice(import.meta.env.MODE === 'tablet' ? '正在导入文献…' : '正在导入并检查 PDF…');
     setError('');
     try {
       const folder_id = folderId;
@@ -260,13 +273,26 @@ function Workbench() {
   }
 
   async function chooseFiles() {
-    const paths = await window.workbench.choosePdfs();
-    await importFiles(paths);
+    try {
+      const paths = await window.workbench.choosePdfs();
+      await importFiles(paths);
+    } catch (reason) { setError(errorMessage(reason)); }
   }
 
   async function revealFile(paper: Paper, kind: PdfKind = 'original') {
     try { await window.workbench.revealPaperFile(paper.id, kind); }
     catch (error) { setError(errorMessage(error)); }
+  }
+
+  async function exportToTablet(paper: Paper) {
+    if (busy || !window.workbench.exportFolioBundle) return;
+    setBusy(true);
+    setNotice('');
+    setError('');
+    try {
+      if (await window.workbench.exportFolioBundle(paper.id)) setNotice('已导出 Folio 文献包。传到平板后，打开 Folio 导入即可。');
+    } catch (reason) { setError(errorMessage(reason)); }
+    finally { setBusy(false); }
   }
 
   async function openLibraryFolder() {
@@ -509,10 +535,10 @@ function Workbench() {
             </div>;
           })}
         </nav>
-        <button className="topbar-icon-button theme-toggle" type="button" data-testid="theme-toggle" aria-label={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'} title={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'} onClick={() => setThemePreference(theme === 'dark' ? 'light' : 'dark')}>
+        <button className="topbar-icon-button theme-toggle" type="button" data-testid="theme-toggle" aria-label={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'} title={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'} onClick={() => switchTheme(theme === 'dark' ? 'light' : 'dark')}>
           <svg aria-hidden="true" viewBox="0 0 24 24">{theme === 'dark' ? <path d="M20.4 15.7A8.6 8.6 0 0 1 8.3 3.6 8.7 8.7 0 1 0 20.4 15.7Z" /> : <><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42" /></>}</svg>
         </button>
-        <button className="topbar-icon-button eye-comfort-toggle" type="button" data-testid="eye-comfort-toggle" aria-pressed={eyeComfort} aria-label={eyeComfort ? '关闭护眼模式' : '开启护眼模式'} title={eyeComfort ? '关闭护眼模式' : '开启护眼模式'} onClick={() => setEyeComfort((value) => !value)}>
+        <button className="topbar-icon-button eye-comfort-toggle" type="button" data-testid="eye-comfort-toggle" aria-pressed={eyeComfort} aria-label={eyeComfort ? '关闭护眼模式' : '开启护眼模式'} title={eyeComfort ? '关闭护眼模式' : '开启护眼模式'} onClick={() => switchTheme(() => setEyeComfort((value) => !value))}>
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M2.5 12s3.2-6 9.5-6 9.5 6 9.5 6-3.2 6-9.5 6-9.5-6-9.5-6Z" /><circle cx="12" cy="12" r="3" /></svg>
         </button>
         <button className={`topbar-icon-button settings-tab ${activePanel === 'settings' ? 'selected' : ''}`} type="button" data-testid="settings-tab" aria-label="设置" title="设置" onClick={() => setActivePanel('settings')}>
@@ -526,7 +552,7 @@ function Workbench() {
       </div>}
       <div className="app-content">
         <section className="app-panel settings-app-panel" hidden={activePanel !== 'settings'}>
-          {activePanel === 'settings' && <SettingsPanel theme={themePreference} onThemeChange={setThemePreference} />}
+          {activePanel === 'settings' && (import.meta.env.MODE === 'tablet' ? <TabletSettings /> : <SettingsPanel theme={themePreference} onThemeChange={setThemePreference} />)}
         </section>
         <section className="app-panel settings-app-panel" id="bibliography-tab-panel" role="tabpanel" hidden={activePanel !== 'bibliography'}>
           {activePanel === 'bibliography' && <BibliographyPanel folders={folders} folderFilter={['recent', 'favorites'].includes(folderFilter) ? 'all' : folderFilter} onSelectFolder={setFolderFilter} onRecordsChanged={() => { void refresh(); }}
@@ -554,6 +580,7 @@ function Workbench() {
             favoritePending={favoritePending} onChooseFiles={() => void chooseFiles()}
             onOpen={openReader} onFavorite={(paper) => void toggleFavorite(paper)} onEdit={setEditing}
             onDelete={(paper) => void deletePaper(paper)} onReveal={(paper, kind) => void revealFile(paper, kind)}
+            onExportToTablet={(paper) => void exportToTablet(paper)}
             onMove={(paper, folderId) => void movePaper(paper, folderId)} onAction={(paper, action) => void paperAction(paper, action)}
             onBibliography={(paper) => {
               void api('/literature/capture', 'POST', { paper_id: paper.id, title: titleFor(paper), source: 'local_pdf' }).then(() => setActivePanel('bibliography')).catch((reason) => setError(errorMessage(reason)));

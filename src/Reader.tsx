@@ -1,11 +1,11 @@
-import { FormEvent, PointerEvent as ReactPointerEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { FormEvent, PointerEvent as ReactPointerEvent, ReactNode, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { AgentAction, AgentActionCandidate, api, ChatAttachment, ChatMessage, ChatStreamEvent, ChatStreamHandle, errorMessage, Paper, PaperNote, PaperNotes, PdfAnnotation, PdfSelection, ReasoningEffort, ReasoningThinking, Segment, SelectionContext, Source } from './api';
-import { loadPdfDocument, pageAspectRatios, PdfPage, PdfKind, SharedPdfDocument, type PdfTextMappingRequest, type PdfTextMappingResult } from './PdfPage';
+import { loadPdfDocument, pageAspectRatios, prepareTabletPdf, PDF_MAX_ZOOM, PdfPage, PdfKind, SharedPdfDocument, type PdfTextMappingRequest, type PdfTextMappingResult } from './PdfPage';
 import './reader-reference.css';
 import { ChatComposer, ChatAttachmentList, type ChatAttachmentView } from './ChatComposer';
 import { ChatTurnNavigation } from './ChatTurnNavigation';
@@ -14,6 +14,10 @@ import { ReaderNotesPanel } from './ReaderNotesPanel';
 import { ResearchTasksPanel } from './ResearchTasksPanel';
 import { annotationMappingCandidates, normalizePdfText } from './annotationMapping';
 import { renderPdfAttachment } from './PdfAttachment';
+
+type LoadedPdf = { document: SharedPdfDocument; aspects: number[]; imageUrls?: string[] };
+type PdfCacheEntry = { pending: Promise<LoadedPdf>; ready?: LoadedPdf; controller?: AbortController };
+const usePdfLoadEffect = import.meta.env.MODE === 'tablet' ? useLayoutEffect : useEffect;
 
 function canReadPdf(paper: Paper | null, kind: PdfKind) {
   if (!paper) return false;
@@ -49,7 +53,10 @@ type NoteSaveStatus = '未保存' | '保存中…' | '已保存' | '保存失败
 
 const readerLayoutKey = 'paper-workbench.reader-layout.v1';
 const reasoningPreferencesKey = 'paper-workbench.reasoning-preferences.v1';
-const defaultReaderLayout: ReaderLayoutState = { outlineWidth: 240, chatWidth: 470, outlineVisible: true, chatVisible: true };
+const defaultReaderLayout: ReaderLayoutState = {
+  outlineWidth: 240, chatWidth: 470,
+  outlineVisible: import.meta.env.MODE !== 'tablet', chatVisible: import.meta.env.MODE !== 'tablet',
+};
 const defaultReasoningPreferences: ReasoningPreferences = { thinking: 'default', effort: 'default' };
 
 function reasoningEffortOptions(model: string) {
@@ -91,8 +98,8 @@ function readReaderLayout(): ReaderLayoutState {
     return {
       outlineWidth: typeof saved?.outlineWidth === 'number' ? saved.outlineWidth : defaultReaderLayout.outlineWidth,
       chatWidth: typeof saved?.chatWidth === 'number' ? saved.chatWidth : defaultReaderLayout.chatWidth,
-      outlineVisible: typeof saved?.outlineVisible === 'boolean' ? saved.outlineVisible : true,
-      chatVisible: typeof saved?.chatVisible === 'boolean' ? saved.chatVisible : true,
+      outlineVisible: typeof saved?.outlineVisible === 'boolean' ? saved.outlineVisible : defaultReaderLayout.outlineVisible,
+      chatVisible: typeof saved?.chatVisible === 'boolean' ? saved.chatVisible : defaultReaderLayout.chatVisible,
     };
   } catch {
     return defaultReaderLayout;
@@ -127,7 +134,7 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
   const [paper, setPaper] = useState<Paper | null>(null);
   const [pages, setPages] = useState<Page[]>([]);
   const [segments, setSegments] = useState<Segment[]>([]);
-  const [rightPanel, setRightPanel] = useState<'chat' | 'notes'>('chat');
+  const [rightPanel, setRightPanel] = useState<'chat' | 'notes'>(import.meta.env.MODE === 'tablet' ? 'notes' : 'chat');
   const [noteText, setNoteText] = useState('');
   const [paperNotes, setPaperNotes] = useState<PaperNote[]>([]);
   const [activeNoteId, setActiveNoteId] = useState('');
@@ -189,13 +196,19 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
   const [pdfScale, setPdfScale] = useState(1);
   const [pdfDocument, setPdfDocument] = useState<SharedPdfDocument | null>(null);
   const [pageAspects, setPageAspects] = useState<number[]>([]);
+  const [pdfImageUrls, setPdfImageUrls] = useState<string[]>();
   const [pdfScrollElement, setPdfScrollElement] = useState<HTMLDivElement | null>(null);
   const [pdfScrollWidth, setPdfScrollWidth] = useState(0);
+  const pinchAnchorRef = useRef<{ page: number; x: number; y: number; clientX: number; clientY: number } | null>(null);
+  const pinchPreviewRef = useRef<HTMLElement | null>(null);
   const [readerLayout, setReaderLayout] = useState<ReaderLayoutState>(readReaderLayout);
   const [readerLayoutElement, setReaderLayoutElement] = useState<HTMLDivElement | null>(null);
   const [readerLayoutWidth, setReaderLayoutWidth] = useState(0);
   const readerLayoutRef = useRef(readerLayout);
   const resizeStartLayoutRef = useRef<ReaderLayoutState | null>(null);
+  const resizeStartMetricsRef = useRef<{ clientWidth: number; outline: number; chat: number } | null>(null);
+  const chatReflowAtRef = useRef(0);
+  const chatInsetRef = useRef(0);
   const pendingReaderLayoutRef = useRef<ReaderLayoutState | null>(null);
   const activeRef = useRef(active);
   const paperIdRef = useRef(paperId);
@@ -204,7 +217,7 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
   const hasActivatedReaderRef = useRef(false);
   const scrollPositionRef = useRef(0);
   const resizingRef = useRef(false);
-  const resizeAnchorRef = useRef<{ page: number; offset: number | null } | null>(null);
+  const resizeAnchorRef = useRef<{ page: number; offset: number | null; height: number } | null>(null);
   const anchorSettleTimerRef = useRef<number | null>(null);
   const restoredPaperRef = useRef<string | null>(null);
   const initialPageScrollPendingRef = useRef(false);
@@ -235,7 +248,177 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
   const pendingAnnotationJumpRef = useRef<{ pdfKind: PdfKind; page: number } | null>(null);
   const previousPdfKindRef = useRef<PdfKind>(pdfKind);
   const loadedPdfKindRef = useRef<PdfKind | null>(null);
+  const tabletPdfCacheRef = useRef(new Map<PdfKind, PdfCacheEntry>());
+  const tabletReaderInactive = import.meta.env.MODE === 'tablet' && !active;
   const pdfPageCount = pdfDocument?.pdf.numPages || paper?.page_count || 1;
+  useLayoutEffect(() => {
+    const anchor = pinchAnchorRef.current;
+    if (!anchor || !pdfScrollElement) return;
+    pinchAnchorRef.current = null;
+    const preview = pinchPreviewRef.current;
+    pinchPreviewRef.current = null;
+    if (preview) {
+      preview.style.transform = '';
+      preview.style.transformOrigin = '';
+      preview.style.willChange = '';
+    }
+    const stage = pdfScrollElement.querySelector<HTMLElement>(`.pdf-page-frame[data-page-number="${anchor.page}"] .pdf-page-stage`);
+    if (!stage) return;
+    const rect = stage.getBoundingClientRect();
+    pdfScrollElement.scrollLeft += rect.left + rect.width * anchor.x - anchor.clientX;
+    pdfScrollElement.scrollTop += rect.top + rect.height * anchor.y - anchor.clientY;
+  }, [pdfScale, pdfScrollElement]);
+
+  useEffect(() => {
+    if (import.meta.env.MODE !== 'tablet' || !active || !pdfScrollElement || !pdfDocument) return;
+    const scroll = pdfScrollElement;
+    let gesture: { distance: number; scale: number; pages: HTMLElement; anchor: NonNullable<typeof pinchAnchorRef.current> } | null = null;
+    let frameRequest = 0;
+    let preview = 1;
+    const distance = (touches: TouchList) => Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
+    function start(event: TouchEvent) {
+      if (event.touches.length !== 2) return;
+      const pages = scroll.querySelector<HTMLElement>('.pdf-pages');
+      const clientX = (event.touches[0].clientX + event.touches[1].clientX) / 2;
+      const clientY = (event.touches[0].clientY + event.touches[1].clientY) / 2;
+      const target = document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>('.pdf-page-frame');
+      const stage = target?.querySelector<HTMLElement>('.pdf-page-stage');
+      if (!pages || !target || !stage || !scroll.contains(target)) return;
+      const rect = stage.getBoundingClientRect();
+      const pagesRect = pages.getBoundingClientRect();
+      const initialDistance = distance(event.touches);
+      if (!initialDistance || !rect.width || !rect.height) return;
+      gesture = {
+        distance: initialDistance, scale: pdfScale, pages,
+        anchor: { page: Number(target.dataset.pageNumber), x: (clientX - rect.left) / rect.width, y: (clientY - rect.top) / rect.height, clientX, clientY },
+      };
+      pages.style.transformOrigin = `${clientX - pagesRect.left}px ${clientY - pagesRect.top}px`;
+      pages.style.willChange = 'transform';
+      preview = 1;
+      event.preventDefault();
+    }
+    function move(event: TouchEvent) {
+      if (!gesture || event.touches.length !== 2) return;
+      event.preventDefault();
+      preview = Math.max(0.5, Math.min(PDF_MAX_ZOOM, gesture.scale * distance(event.touches) / gesture.distance)) / gesture.scale;
+      if (!frameRequest) frameRequest = requestAnimationFrame(() => {
+        frameRequest = 0;
+        if (gesture) gesture.pages.style.transform = `scale(${preview})`;
+      });
+    }
+    function finish(commit = true) {
+      if (!gesture) return;
+      cancelAnimationFrame(frameRequest);
+      frameRequest = 0;
+      const next = Math.max(0.5, Math.min(PDF_MAX_ZOOM, gesture.scale * preview));
+      if (commit && Math.abs(next - gesture.scale) > 0.001) {
+        pinchAnchorRef.current = gesture.anchor;
+        pinchPreviewRef.current = gesture.pages;
+        setPdfScale(next);
+      } else {
+        gesture.pages.style.transform = '';
+        gesture.pages.style.transformOrigin = '';
+        gesture.pages.style.willChange = '';
+      }
+      gesture = null;
+    }
+    function end(event: TouchEvent) { if (event.touches.length < 2) finish(); }
+    scroll.addEventListener('touchstart', start, { passive: false });
+    scroll.addEventListener('touchmove', move, { passive: false });
+    scroll.addEventListener('touchend', end);
+    scroll.addEventListener('touchcancel', end);
+    return () => {
+      finish(false);
+      scroll.removeEventListener('touchstart', start);
+      scroll.removeEventListener('touchmove', move);
+      scroll.removeEventListener('touchend', end);
+      scroll.removeEventListener('touchcancel', end);
+    };
+  }, [active, pdfScrollElement, pdfDocument, pdfScale]);
+  useEffect(() => {
+    const scroll = pdfScrollElement;
+    if (!scroll) return;
+    let drag: { pointerId: number; startX: number; startY: number; left: number; top: number; started: boolean } | null = null;
+    let suppressClick = false;
+    let frameRequest = 0;
+    let pendingLeft = 0;
+    let pendingTop = 0;
+    // 拖动时把每帧内所有 pointermove 合并成一次 scrollLeft/scrollTop 写入，
+    // 否则高频指针事件会让浏览器每移动 1px 就重排一次滚动容器。
+    const flushPan = () => {
+      frameRequest = 0;
+      if (!drag?.started) return;
+      if (scroll.scrollLeft !== pendingLeft) scroll.scrollLeft = pendingLeft;
+      if (scroll.scrollTop !== pendingTop) scroll.scrollTop = pendingTop;
+    };
+    const down = (event: PointerEvent) => {
+      if (event.pointerType === 'touch' || event.button !== 0) return;
+      if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('a, button, input, textarea, select, [role="button"], [contenteditable="true"]')) return;
+      drag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, left: scroll.scrollLeft, top: scroll.scrollTop, started: false };
+    };
+    const move = (event: PointerEvent) => {
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      const deltaX = event.clientX - drag.startX;
+      const deltaY = event.clientY - drag.startY;
+      if (!drag.started) {
+        if (Math.abs(deltaX) + Math.abs(deltaY) < 4) return;
+        drag.started = true;
+        scroll.setPointerCapture(event.pointerId);
+        // 只在滚动容器自己身上写内联光标：挂 data 属性会让 [data-panning] 后代选择器
+        // 对整个 32 页子树重算样式，那正是按下瞬间卡住的原因。
+        scroll.style.cursor = 'grabbing';
+        // removeAllRanges on a page with thousands of text spans costs a
+        // full selection invalidation; only pay it when text is really selected.
+        const current = window.getSelection();
+        if (current && current.rangeCount > 0 && !current.isCollapsed) current.removeAllRanges();
+      }
+      if (event.cancelable) event.preventDefault();
+      pendingLeft = drag.left - deltaX;
+      pendingTop = drag.top - deltaY;
+      if (!frameRequest) frameRequest = window.requestAnimationFrame(flushPan);
+    };
+    const finish = (event: PointerEvent) => {
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      if (frameRequest) {
+        window.cancelAnimationFrame(frameRequest);
+        frameRequest = 0;
+        pendingLeft = drag.left - (event.clientX - drag.startX);
+        pendingTop = drag.top - (event.clientY - drag.startY);
+        if (scroll.scrollLeft !== pendingLeft) scroll.scrollLeft = pendingLeft;
+        if (scroll.scrollTop !== pendingTop) scroll.scrollTop = pendingTop;
+      }
+      const started = drag.started;
+      drag = null;
+      scroll.style.cursor = '';
+      if (scroll.hasPointerCapture(event.pointerId)) scroll.releasePointerCapture(event.pointerId);
+      if (started) {
+        suppressClick = true;
+        window.setTimeout(() => { suppressClick = false; }, 0);
+      }
+    };
+    const click = (event: MouseEvent) => {
+      if (!suppressClick) return;
+      suppressClick = false;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    scroll.addEventListener('pointerdown', down);
+    scroll.addEventListener('pointermove', move);
+    scroll.addEventListener('pointerup', finish);
+    scroll.addEventListener('pointercancel', finish);
+    scroll.addEventListener('click', click, true);
+    return () => {
+      if (frameRequest) window.cancelAnimationFrame(frameRequest);
+      scroll.style.cursor = '';
+      scroll.removeEventListener('pointerdown', down);
+      scroll.removeEventListener('pointermove', move);
+      scroll.removeEventListener('pointerup', finish);
+      scroll.removeEventListener('pointercancel', finish);
+      scroll.removeEventListener('click', click, true);
+    };
+  }, [pdfScrollElement]);
   useEffect(() => {
     setManualAnnotationLinkId(null);
     setManualAnnotationLinkSelection(null);
@@ -460,7 +643,51 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
     if (chat) {
       chat.style.width = `${next.chatVisible ? next.chatWidth : 0}px`;
       chat.style.flexBasis = `${next.chatVisible ? next.chatWidth : 0}px`;
+      if (resizingRef.current) previewChatContent(chat, next.chatWidth);
     }
+    if (resizingRef.current) previewPdfResize(next);
+  }
+
+  // Re-flowing a long conversation (markdown, KaTeX) costs ~10ms per width
+  // change. During a drag the message column keeps a frozen width and only
+  // re-flows every ~120ms, so the divider itself tracks the pointer at full rate.
+  function previewChatContent(chat: HTMLElement, width: number) {
+    const content = chat.querySelector<HTMLElement>('.reader-side-content');
+    if (!content) return;
+    const now = performance.now();
+    if (content.style.width && now - chatReflowAtRef.current < 120) return;
+    if (!content.style.width) chatInsetRef.current = chat.getBoundingClientRect().width - content.getBoundingClientRect().width;
+    chatReflowAtRef.current = now;
+    content.style.flex = 'none';
+    content.style.width = `${Math.max(0, width - chatInsetRef.current)}px`;
+  }
+
+  function clearChatContentPreview() {
+    const content = readerLayoutElement?.querySelector<HTMLElement>('.chat-column .reader-side-content');
+    if (!content) return;
+    content.style.flex = '';
+    content.style.width = '';
+  }
+
+  function previewPdfResize(next?: ReaderLayoutState) {
+    if (!pdfScrollElement) return;
+    // Compositor only: scale the whole page column with one transform instead of
+    // resizing 30+ page frames (a full relayout) on every frame of the drag.
+    const pages = pdfScrollElement.querySelector<HTMLElement>('.pdf-pages');
+    const frame = pages?.querySelector<HTMLElement>('.pdf-page-frame');
+    if (!pages || !frame) return;
+    const committed = Number.parseFloat(frame.style.width) - 28;
+    if (!(committed > 0)) return;
+    // Derive the new column width arithmetically: reading clientWidth here would
+    // force a synchronous layout of the whole reader on every pointer move.
+    const start = resizeStartMetricsRef.current;
+    const clientWidth = next && start
+      ? start.clientWidth + (start.outline - (next.outlineVisible ? next.outlineWidth : 0)) + (start.chat - (next.chatVisible ? next.chatWidth : 0))
+      : pdfScrollElement.clientWidth;
+    const width = Math.max(100, clientWidth - 40 - 28) * pdfScale;
+    if (!pages.style.transformOrigin) pages.style.transformOrigin = `50% ${pdfScrollElement.scrollTop}px`;
+    pages.style.willChange = 'transform';
+    pages.style.transform = `scale(${width / committed})`;
   }
 
   function commitReaderLayout() {
@@ -473,7 +700,7 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
     const page = visiblePageRef.current;
     const frame = pdfScrollElement?.querySelector<HTMLElement>(`.pdf-page-frame[data-page-number="${page}"]`);
     const offset = frame && pdfScrollElement ? frame.getBoundingClientRect().top - pdfScrollElement.getBoundingClientRect().top : null;
-    resizeAnchorRef.current = { page, offset };
+    resizeAnchorRef.current = { page, offset, height: frame?.getBoundingClientRect().height || 0 };
   }
 
   function startReaderResize() {
@@ -483,6 +710,12 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
     resizeAnchorRef.current = null;
     captureReaderAnchor();
     resizeStartLayoutRef.current = readerLayoutRef.current;
+    const layout = readerLayoutRef.current;
+    resizeStartMetricsRef.current = pdfScrollElement ? {
+      clientWidth: pdfScrollElement.clientWidth,
+      outline: layout.outlineVisible ? layout.outlineWidth : 0,
+      chat: layout.chatVisible ? layout.chatWidth : 0,
+    } : null;
   }
 
   function adjustReaderAnchor() {
@@ -490,12 +723,26 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
     if (!anchor || anchor.offset === null || !pdfScrollElement) return;
     const frame = pdfScrollElement.querySelector<HTMLElement>(`.pdf-page-frame[data-page-number="${anchor.page}"]`);
     if (!frame) return;
-    const delta = frame.getBoundingClientRect().top - pdfScrollElement.getBoundingClientRect().top - anchor.offset;
+    const bounds = frame.getBoundingClientRect();
+    // Preserve the reading point within a partially scrolled page, not just its top.
+    const offset = anchor.offset < 0 && anchor.height > 0 ? anchor.offset * bounds.height / anchor.height : anchor.offset;
+    const delta = bounds.top - pdfScrollElement.getBoundingClientRect().top - offset;
     pdfScrollElement.scrollTop += delta;
+  }
+
+  function clearPdfResizePreview() {
+    const pages = pdfScrollElement?.querySelector<HTMLElement>('.pdf-pages');
+    if (!pages) return;
+    pages.style.transform = '';
+    pages.style.transformOrigin = '';
+    pages.style.willChange = '';
   }
 
   function restoreReaderAnchor(persist = true) {
     if (!active) return;
+    clearPdfResizePreview();
+    clearChatContentPreview();
+    resizeStartMetricsRef.current = null;
     const pending = pendingReaderLayoutRef.current;
     if (pending) {
       const fitted = fitReaderLayout(pending, readerLayoutElement?.clientWidth || readerLayoutWidth);
@@ -527,6 +774,9 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
       }
       adjustReaderAnchor();
       resizingRef.current = false;
+      clearPdfResizePreview();
+      clearChatContentPreview();
+      if (readerLayoutElement) setReaderLayoutWidth(readerLayoutElement.clientWidth);
       resizeAnchorRef.current = null;
       resizeStartLayoutRef.current = null;
       pendingReaderLayoutRef.current = null;
@@ -537,9 +787,11 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
 
   function isAtPdfScrollEnd() {
     if (!activeRef.current || !paper || !pdfDocument || pageAspects.length < pdfPageCount || !pdfScrollElement) return false;
+    // Cheap scroll metrics first; only touch the DOM when we are actually at the end.
+    const { scrollTop, clientHeight, scrollHeight } = pdfScrollElement;
+    if (scrollHeight <= clientHeight + 1 || scrollTop + clientHeight < scrollHeight - 2) return false;
     const lastFrame = pdfScrollElement.querySelector<HTMLElement>(`.pdf-page-frame[data-page-number="${pdfPageCount}"]`);
-    return Boolean(lastFrame?.offsetHeight && pdfScrollElement.scrollHeight > pdfScrollElement.clientHeight + 1
-      && pdfScrollElement.scrollTop + pdfScrollElement.clientHeight >= pdfScrollElement.scrollHeight - 2);
+    return Boolean(lastFrame?.offsetHeight);
   }
 
   function resizeReaderPanel(panel: 'outline' | 'chat', width: number) {
@@ -658,6 +910,17 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
       return JSON.stringify(next) === JSON.stringify(previous) ? previous : next;
     });
   }, [pdfKind]);
+
+  // PdfPage is memoised; give it identity-stable callbacks that always call
+  // the latest closures, so scrolling the reader does not re-render every page.
+  const windowResizeFnsRef = useRef({ capture: () => {}, preview: () => {}, restore: (_persist?: boolean) => {} });
+  const windowResizingRef = useRef(false);
+  const pdfPageCallbacksRef = useRef({ onSelection: (..._args: Parameters<typeof capturePdfSelection>) => {}, onLocate: (..._args: Parameters<typeof receivePdfMatches>) => {}, onAnnotationClick: (_id: string) => {} });
+  const stablePdfPageCallbacks = useMemo(() => ({
+    onSelection: (...args: Parameters<typeof capturePdfSelection>) => pdfPageCallbacksRef.current.onSelection(...args),
+    onLocate: (...args: Parameters<typeof receivePdfMatches>) => pdfPageCallbacksRef.current.onLocate(...args),
+    onAnnotationClick: (id: string) => pdfPageCallbacksRef.current.onAnnotationClick(id),
+  }), []);
 
   function annotationsForPage(page: number) {
     return annotations.flatMap((annotation) => {
@@ -806,7 +1069,7 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
     return () => window.removeEventListener('folio:prepare-update-install', prepare);
   }, [paperId]);
 
-  useEffect(() => {
+  usePdfLoadEffect(() => {
     if (previousPdfKindRef.current === pdfKind) return;
     previousPdfKindRef.current = pdfKind;
     if (!pendingAnnotationJumpRef.current) pendingAnnotationJumpRef.current = { pdfKind, page: visiblePageRef.current };
@@ -851,7 +1114,12 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
 
   useEffect(() => {
     if (!active || !readerLayoutElement) return;
-    const observer = new ResizeObserver(() => setReaderLayoutWidth(readerLayoutElement.clientWidth));
+    // While a resize gesture is live the layout is previewed imperatively;
+    // re-rendering the whole reader on every frame is what made it stutter.
+    const observer = new ResizeObserver(() => {
+      if (resizingRef.current) return;
+      setReaderLayoutWidth(readerLayoutElement.clientWidth);
+    });
     observer.observe(readerLayoutElement);
     setReaderLayoutWidth(readerLayoutElement.clientWidth);
     return () => observer.disconnect();
@@ -908,6 +1176,11 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
   }, [active, pdfScrollElement]);
 
   useLayoutEffect(() => {
+    pdfPageCallbacksRef.current = { onSelection: capturePdfSelection, onLocate: receivePdfMatches, onAnnotationClick: openAnnotationComment };
+    windowResizeFnsRef.current = { capture: captureReaderAnchor, preview: previewPdfResize, restore: restoreReaderAnchor };
+  });
+
+  useLayoutEffect(() => {
     if (active && resizingRef.current) adjustReaderAnchor();
   }, [active, pdfScrollWidth, readerLayout.outlineWidth, readerLayout.chatWidth, readerLayout.outlineVisible, readerLayout.chatVisible, pdfScrollElement]);
 
@@ -928,46 +1201,89 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
         const top = bounded(bounds.top, 8, window.innerHeight - bounds.height - 8);
         setSentenceTranslation((current) => current ? { ...current, left, top } : current);
       }
-      if (resizingRef.current) return;
-      captureReaderAnchor();
+      const fns = windowResizeFnsRef.current;
+      if (!windowResizingRef.current) {
+        // A divider drag owns the resize (no settle timer pending): leave it alone.
+        if (resizingRef.current && anchorSettleTimerRef.current === null) return;
+        if (!resizingRef.current) fns.capture();
+        windowResizingRef.current = true;
+      }
       if (anchorSettleTimerRef.current !== null) window.clearTimeout(anchorSettleTimerRef.current);
-      anchorSettleTimerRef.current = window.setTimeout(() => restoreReaderAnchor(), 100);
+      // Stretch the already painted pages every frame; re-render once the window settles.
+      fns.preview();
+      anchorSettleTimerRef.current = window.setTimeout(() => {
+        windowResizingRef.current = false;
+        anchorSettleTimerRef.current = null;
+        windowResizeFnsRef.current.restore();
+      }, 220);
     };
     window.addEventListener('resize', handleWindowResize);
     return () => window.removeEventListener('resize', handleWindowResize);
   }, [active, pdfScrollElement, readerLayoutElement]);
 
-  useEffect(() => {
-    if (!canLoadPdf) return;
+  usePdfLoadEffect(() => {
+    const cache = tabletPdfCacheRef.current;
+    return () => {
+      for (const entry of cache.values()) {
+        entry.controller?.abort();
+        void entry.pending.then(({ document, imageUrls }) => {
+          imageUrls?.forEach((url) => URL.revokeObjectURL(url));
+          return document.destroy();
+        }).catch(() => undefined);
+      }
+      cache.clear();
+    };
+  }, [paperId, tabletReaderInactive, paper?.file_name, paper?.mono_pdf_file_name, paper?.dual_pdf_file_name, paper?.page_count]);
+
+  usePdfLoadEffect(() => {
+    if (!canLoadPdf || tabletReaderInactive) return;
+    const tablet = import.meta.env.MODE === 'tablet';
+    const cache = tabletPdfCacheRef.current;
     let canceled = false;
-    let loaded: SharedPdfDocument | null = null;
+    async function load(signal?: AbortSignal) {
+      const document = await loadPdfDocument(paperId, pdfKind);
+      try {
+        if (signal) return { document, ...await prepareTabletPdf(document, signal) };
+        return { document, aspects: await pageAspectRatios(document, document.pdf.numPages) };
+      } catch (error) {
+        await document.destroy().catch(() => undefined);
+        throw error;
+      }
+    }
+    const cached = tablet ? cache.get(pdfKind) : undefined;
+    const controller = tablet && !cached ? new AbortController() : undefined;
+    const entry: PdfCacheEntry = cached ?? { pending: load(controller?.signal), controller };
+    if (tablet) cache.set(pdfKind, entry);
+    setPdfFailure('');
+    function display({ document, aspects, imageUrls }: LoadedPdf) {
+      loadedPdfKindRef.current = pdfKind;
+      setPageAspects(aspects);
+      setPdfImageUrls(imageUrls);
+      setPdfDocument(document);
+    }
+    if (entry.ready) {
+      display(entry.ready);
+      return;
+    }
     setPdfDocument(null);
     setPageAspects([]);
-    setPdfFailure('');
-    void (async () => {
-      try {
-        loaded = await loadPdfDocument(paperId, pdfKind);
-        const aspects = await pageAspectRatios(loaded, loaded.pdf.numPages);
-        if (canceled) {
-          await loaded.destroy();
-          return;
-        }
-        loadedPdfKindRef.current = pdfKind;
-        setPageAspects(aspects);
-        setPdfDocument(loaded);
-      } catch (error) {
-        if (!canceled) {
-          const detail = error instanceof Error ? `${error.name}: ${error.message.slice(0, 180)}` : 'Unknown PDF load error';
-          console.error('PDF document load failed', detail);
-          setPdfFailure('无法打开这份 PDF，请重试。');
-        }
+    setPdfImageUrls(undefined);
+    void entry.pending.then(result => {
+      entry.ready = result;
+      if (!canceled) display(result);
+    }).catch(error => {
+      if (cache.get(pdfKind) === entry) cache.delete(pdfKind);
+      if (!canceled) {
+        const detail = error instanceof Error ? `${error.name}: ${error.message.slice(0, 180)}` : 'Unknown PDF load error';
+        console.error('PDF document load failed', detail);
+        setPdfFailure('无法打开这份 PDF，请重试。');
       }
-    })();
+    });
     return () => {
       canceled = true;
-      if (loaded) void loaded.destroy();
+      if (!tablet) void entry.pending.then(({ document }) => document.destroy()).catch(() => undefined);
     };
-  }, [canLoadPdf, paper?.page_count, paperId, pdfKind]);
+  }, [canLoadPdf, paper?.page_count, paper?.file_name, paper?.mono_pdf_file_name, paper?.dual_pdf_file_name, paperId, pdfKind, tabletReaderInactive]);
 
   useLayoutEffect(() => {
     const target = pendingAnnotationJumpRef.current;
@@ -1161,9 +1477,10 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
       setActionLocationMessage(null);
     }
     setSelection({ ...value, pdf_kind: pdfKind });
-    setSelectionContextMenu(contextMenuPoint ? {
-      left: bounded(contextMenuPoint.left, 8, window.innerWidth - 8),
-      top: bounded(contextMenuPoint.top, 8, window.innerHeight - 8),
+    const menuPoint = contextMenuPoint ?? (import.meta.env.MODE === 'tablet' ? { left: value.anchor.left, top: value.anchor.bottom + 10 } : undefined);
+    setSelectionContextMenu(menuPoint ? {
+      left: bounded(menuPoint.left, 8, window.innerWidth - 8),
+      top: bounded(menuPoint.top, 8, window.innerHeight - 8),
     } : null);
     setHighlightPaletteOpen(false);
     setSelectionNotice('');
@@ -1424,13 +1741,26 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
     window.getSelection()?.removeAllRanges();
   }
 
-  function associateSelectionWithChat() {
+  async function associateSelectionWithChat() {
     if (!selection) return;
-    setSelectionToAssociate({ selection, sessionId: activeChatSessionRef.current });
+    const target = selection;
+    let sessionId = activeChatSessionRef.current;
+    if (import.meta.env.MODE === 'tablet' && !sessionId) {
+      try {
+        const path = `/papers/${paperId}/chat-sessions`;
+        const sessions = await api<ChatSession[]>(path);
+        sessionId = sessions[0]?.id || (await api<ChatSession>(path, 'POST', {})).id;
+      } catch (error) {
+        setSelectionNotice(errorMessage(error));
+        return;
+      }
+    }
+    setSelectionToAssociate({ selection: target, sessionId });
     setSelection(null);
     setSelectionContextMenu(null);
     setHighlightPaletteOpen(false);
     setRightPanel('chat');
+    if (import.meta.env.MODE === 'tablet' && !readerLayout.chatVisible) toggleReaderPanel('chat');
     window.getSelection()?.removeAllRanges();
   }
 
@@ -1672,9 +2002,9 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
                 <span>/ {pdfPageCount}</span>
                 <button className="icon-button" aria-label="下一页" onClick={() => goToPage(pageNumber + 1)} disabled={pageNumber >= pdfPageCount}>›</button>
               </div>
-              <div className="zoom-controls"><button className="secondary-button compact-button" aria-label="缩小 PDF" onClick={() => setPdfScale((scale) => Math.max(0.5, Math.round((scale - 0.1) * 100) / 100))}>−</button><span>{Math.round(pdfScale * 100)}%</span><button className="secondary-button compact-button" aria-label="放大 PDF" onClick={() => setPdfScale((scale) => Math.min(2.5, Math.round((scale + 0.1) * 100) / 100))}>＋</button></div>
+              <div className="zoom-controls"><button className="secondary-button compact-button" aria-label="缩小 PDF" onClick={() => setPdfScale((scale) => Math.max(0.5, Math.round((scale - 0.1) * 100) / 100))}>−</button><span>{Math.round(pdfScale * 100)}%</span><button className="secondary-button compact-button" aria-label="放大 PDF" onClick={() => setPdfScale((scale) => Math.min(PDF_MAX_ZOOM, Math.round((scale + 0.1) * 100) / 100))}>＋</button></div>
               <button className="reader-toolbar-icon" type="button" aria-label="打开当前 PDF 文件位置" title="文件位置" onClick={() => void window.workbench.revealPaperFile(paperId, pdfKind).catch((error) => setFailure(errorMessage(error)))}>↗</button>
-              <button className="reader-toolbar-icon" type="button" data-testid="toggle-chat" aria-label={readerLayout.chatVisible ? '隐藏 AI 助手' : '显示 AI 助手'} aria-pressed={!readerLayout.chatVisible} onClick={() => toggleReaderPanel('chat')}>{readerLayout.chatVisible ? '◫' : '◧'}</button>
+              <button className="reader-toolbar-icon" type="button" data-testid="toggle-chat" aria-label={import.meta.env.MODE === 'tablet' ? '切换 AI 助手与笔记侧栏' : readerLayout.chatVisible ? '隐藏 AI 助手' : '显示 AI 助手'} aria-pressed={!readerLayout.chatVisible} onClick={() => toggleReaderPanel('chat')}>{readerLayout.chatVisible ? '◫' : '◧'}</button>
               {searchNotice && <span className="search-result">{searchNotice}</span>}
               {selectionNotice && <span className="selection-notice" role="status">{selectionNotice}</span>}
               {manualAnnotationLinkId && <>
@@ -1690,16 +2020,19 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
                 setHighlightPaletteOpen(false);
               }
               scrollPositionRef.current = event.currentTarget.scrollTop;
+
               if (isAtPdfScrollEnd() && paper) updatePageFromScroll(pdfPageCount);
             }}>
-              {pdfFailure ? <div className="pdf-error">{pdfFailure}</div> : !pdfDocument ? <div className="pdf-loading">正在载入 PDF…</div> : (
+              {pdfFailure ? <div className="pdf-error">{pdfFailure}</div> : !pdfDocument || loadedPdfKindRef.current !== pdfKind ? <div className="pdf-loading">{import.meta.env.MODE === 'tablet' ? '正在准备整份 PDF…' : '正在载入 PDF…'}</div> : (
                 <div className="pdf-pages">
                   {Array.from({ length: pdfPageCount }, (_, index) => index + 1).map((page) => (
                     <PdfPage
                       key={`${pdfKind}-${page}`}
                       document={pdfDocument}
                       pageNumber={page}
+                      imageUrl={pdfImageUrls?.[page - 1]}
                       scale={pdfScale}
+
                       containerWidth={pdfScrollWidth}
                       scrollRoot={pdfScrollElement}
                       pageAspectRatio={pageAspects[page - 1] || 0.72}
@@ -1711,14 +2044,14 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
                         return annotation.pdf_kind !== pdfKind && mapped?.kind === 'paragraph' && mapped.context.page_no === page && mapped.context.rects[0]
                           ? [{ id: annotation.id, rect: mapped.context.rects[0], comment: annotation.comment || annotation.selected_text }] : [];
                       })}
-                      onAnnotationClick={openAnnotationComment}
+                      onAnnotationClick={stablePdfPageCallbacks.onAnnotationClick}
                       active={active}
-                      onSelection={capturePdfSelection}
+                      onSelection={stablePdfPageCallbacks.onSelection}
                       locateRequest={locationSearch?.candidates[locationSearch.index]?.page_no === page
                         && (locationSearch.candidates[locationSearch.index]?.pdf_kind || 'original') === pdfKind
                         ? { id: `${locationSearch.id}:${locationSearch.index}`, quote: locationSearch.candidates[locationSearch.index].quote }
                         : null}
-                      onLocate={receivePdfMatches}
+                      onLocate={stablePdfPageCallbacks.onLocate}
                       previewSelection={manualAnnotationLinkSelection?.pdf_kind === pdfKind ? manualAnnotationLinkSelection : actionLocationPreview?.selection.pdf_kind === pdfKind ? actionLocationPreview.selection : null}
                     />
                   ))}
@@ -1767,7 +2100,7 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
               <div className="reader-annotations-heading"><h3>高亮、下划线与批注</h3><span>{annotations.length}</span></div>
               {annotationFailure && <div className="reader-note-error" role="alert">{annotationFailure}</div>}
               <div className="reader-annotations-list" data-testid="reader-annotations-list">
-                {annotations.length === 0 && <p className="reader-annotations-empty">选中 PDF 文字后右键，可添加高亮、下划线或批注。</p>}
+                {annotations.length === 0 && <p className="reader-annotations-empty">{import.meta.env.MODE === 'tablet' ? '长按选中 PDF 文字，可添加高亮、下划线或批注。' : '选中 PDF 文字后右键，可添加高亮、下划线或批注。'}</p>}
                 {annotations.map((annotation) => <article
                   className={`reader-annotation-card${selectedAnnotation === annotation.id ? ' selected' : ''}`}
                   key={annotation.id} data-testid={`reader-annotation-${annotation.id}`} data-annotation-id={annotation.id}
@@ -1815,9 +2148,9 @@ export function Reader({ paperId, active, libraryNavigation, openRequest }: { pa
         <button type="button" aria-label="高亮" aria-expanded={highlightPaletteOpen} onMouseDown={(event) => event.preventDefault()} onClick={() => setHighlightPaletteOpen((open) => !open)}>高亮</button>
         <button type="button" aria-label="下划线" onMouseDown={(event) => event.preventDefault()} onClick={() => void addUnderline()}>下划线</button>
         <button type="button" aria-label="批注" onMouseDown={(event) => event.preventDefault()} onClick={beginAnnotationDraft}>批注</button>
-        <button type="button" aria-label="AI 批注" data-testid="reader-ai-annotation" onMouseDown={(event) => event.preventDefault()} onClick={beginAiAnnotationQuestion}>AI 批注</button>
-        <button type="button" aria-label="向 AI 提问" data-testid="reader-ask-ai-about-selection" onMouseDown={(event) => event.preventDefault()} onClick={associateSelectionWithChat}>向 AI 提问</button>
-        <button type="button" aria-label="翻译句子" onMouseDown={(event) => event.preventDefault()} onClick={() => void translateSelectedSentence()}>翻译句子</button>
+          <button type="button" aria-label="AI 批注" data-testid="reader-ai-annotation" onMouseDown={(event) => event.preventDefault()} onClick={beginAiAnnotationQuestion}>AI 批注</button>
+          <button type="button" aria-label="向 AI 提问" data-testid="reader-ask-ai-about-selection" onMouseDown={(event) => event.preventDefault()} onClick={() => void associateSelectionWithChat()}>向 AI 提问</button>
+          <button type="button" aria-label="翻译句子" onMouseDown={(event) => event.preventDefault()} onClick={() => void translateSelectedSentence()}>翻译句子</button>
         <button type="button" aria-label="取消文字选择" onMouseDown={(event) => event.preventDefault()} onClick={clearPdfSelection}>取消选择</button>
         {highlightPaletteOpen && <div className="pdf-highlight-palette" role="group" aria-label="高亮颜色">
           <button type="button" className="annotation-color-yellow" aria-label="黄色高亮" onMouseDown={(event) => event.preventDefault()} onClick={() => void addHighlight('yellow')} />
@@ -1934,6 +2267,9 @@ function LayoutSeparator({
 
   useEffect(() => () => {
     if (resizeFrame.current !== null) window.cancelAnimationFrame(resizeFrame.current);
+    resizeFrame.current = null;
+    pendingWidth.current = null;
+    drag.current = null;
   }, []);
 
   function finish(event?: ReactPointerEvent<HTMLDivElement>) {
@@ -2059,7 +2395,9 @@ function PaperChats(props: PaperChatsProps) {
     return request;
   }
 
+  const shouldLoadSessions = import.meta.env.MODE !== 'tablet' || (props.active && props.visible);
   useEffect(() => {
+    if (!shouldLoadSessions) return;
     let cancelled = false;
     void api<ChatSession[]>(`/papers/${props.paperId}/chat-sessions`).then((list) => {
       if (cancelled) return;
@@ -2069,7 +2407,7 @@ function PaperChats(props: PaperChatsProps) {
       selectSession(list.some((session) => session.id === saved) ? saved : list[0]?.id || '');
     }).catch((error) => { if (!cancelled) setFailure(errorMessage(error)); });
     return () => { cancelled = true; };
-  }, [props.paperId, selectionKey]);
+  }, [props.paperId, selectionKey, shouldLoadSessions]);
 
   useEffect(() => {
     if (currentSession) {
@@ -2156,16 +2494,16 @@ function PaperChats(props: PaperChatsProps) {
     <div className="chat-session-bar">
       <div className="reader-side-tabs" role="tablist" aria-label="阅读侧栏">
         <button id={`reader-side-tab-chat-${props.paperId}`} type="button" role="tab" data-testid="reader-side-tab-chat" aria-label="问答（AI 助手）" title="问答（AI 助手）" aria-controls={`reader-side-panel-chat-${props.paperId}`} aria-selected={props.rightPanel === 'chat'} className={props.rightPanel === 'chat' ? 'active' : ''} onClick={() => props.onRightPanelChange('chat')}>
-          <svg aria-hidden="true" viewBox="0 0 20 20" fill="none"><path d="M3.25 4.75A1.75 1.75 0 0 1 5 3h10a1.75 1.75 0 0 1 1.75 1.75v6A1.75 1.75 0 0 1 15 12.5H9l-3.75 3v-3H5a1.75 1.75 0 0 1-1.75-1.75v-6Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/><path d="M6.5 7h7M6.5 9.75h4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+          <span>助手</span>
         </button>
         <button id={`reader-side-tab-notes-${props.paperId}`} type="button" role="tab" data-testid="reader-side-tab-notes" aria-label="笔记" title="笔记" aria-controls={`reader-side-panel-notes-${props.paperId}`} aria-selected={props.rightPanel === 'notes'} className={props.rightPanel === 'notes' ? 'active' : ''} onClick={() => props.onRightPanelChange('notes')}>
-          <svg aria-hidden="true" viewBox="0 0 20 20" fill="none"><path d="M5.25 2.75h6.5l3 3v10A1.5 1.5 0 0 1 13.25 17h-8A1.5 1.5 0 0 1 3.75 15.5v-11A1.75 1.75 0 0 1 5.25 2.75Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/><path d="M11.5 3v3h3M6.5 9h6M6.5 12h6M6.5 15h3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          <span>笔记</span>
         </button>
       </div>
       <div className="chat-session-tabs" role="tablist" aria-label="文献 AI 会话">
         {sessions.map((session) => <div className={`chat-session-tab ${session.id === currentSession ? 'active' : ''}`} key={session.id}>
           <button type="button" role="tab" aria-selected={session.id === currentSession} data-testid={`chat-session-${session.id}`} title={session.title} onClick={() => { selectSession(session.id); setAssistantMode('chat'); props.onRightPanelChange('chat'); }}>{session.title}</button>
-          <button type="button" className="chat-session-close" aria-label={`删除会话 ${session.title}`} title={busySessions[session.id] ? '请先停止此会话的生成' : '删除此会话'} disabled={changing || busySessions[session.id]} onClick={() => void deleteSession(session)}>×</button>
+          <button type="button" className="chat-session-close" aria-label={`删除会话 ${session.title}`} title={busySessions[session.id] ? '请先停止此会话的生成' : '删除此会话'} disabled={changing || busySessions[session.id]} onClick={() => void deleteSession(session)}><svg aria-hidden="true" viewBox="0 0 20 20" fill="none"><path d="m6 6 8 8M14 6l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/></svg></button>
         </div>)}
       </div>
       <button type="button" className="chat-session-new" aria-label="新建 AI 会话" title="新建会话" disabled={changing || !sessions.length} onClick={() => void newSession()}><svg aria-hidden="true" viewBox="0 0 20 20" fill="none"><path d="M10 4v12M4 10h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/></svg></button>
@@ -2174,8 +2512,8 @@ function PaperChats(props: PaperChatsProps) {
       {failure && <div className="chat-error" role="alert">{failure}</div>}
       {associationFailure && <div className="chat-error" role="alert">{associationFailure}{props.selectionToAssociate && <button type="button" className="secondary-button compact-button" onClick={() => { attemptedAssociationRef.current = null; setAssociationRetry((value) => value + 1); }}>重试关联</button>}</div>}
       {!sessions.length && !failure && <div className="chat-empty">正在读取会话…</div>}
-      {!!sessions.length && <div className="assistant-mode-switch" role="tablist" aria-label="AI 工作模式">
-        <button type="button" role="tab" data-testid="reader-chat-mode-chat" aria-selected={assistantMode === 'chat'} aria-controls={`reader-chat-mode-panel-chat-${props.paperId}`} className={assistantMode === 'chat' ? 'active' : ''} onClick={() => setAssistantMode('chat')}>聊天</button>
+      {import.meta.env.MODE !== 'tablet' && !!sessions.length && <div className="assistant-mode-switch" role="tablist" aria-label="AI 工作模式">
+        <button type="button" role="tab" data-testid="reader-chat-mode-chat" aria-selected={assistantMode === 'chat'} aria-controls={`reader-chat-mode-panel-chat-${props.paperId}`} className={assistantMode === 'chat' ? 'active' : ''} onClick={() => setAssistantMode('chat')}>对话</button>
         <button type="button" role="tab" data-testid="reader-chat-mode-research" aria-selected={assistantMode === 'research'} aria-controls={`reader-chat-mode-panel-research-${props.paperId}`} className={assistantMode === 'research' ? 'active' : ''} onClick={() => setAssistantMode('research')}>深度研究</button>
       </div>}
       <div id={`reader-chat-mode-panel-chat-${props.paperId}`} className="assistant-mode-panel" role="tabpanel" aria-labelledby="reader-chat-mode-chat" hidden={assistantMode !== 'chat'}>
@@ -2183,7 +2521,7 @@ function PaperChats(props: PaperChatsProps) {
           <ChatPanel {...props} sessionId={session.id} selectionContext={session.selection_context || null} onClearAssociation={clearAssociation} visible={props.visible && assistantMode === 'chat' && session.id === currentSession} onBusyChange={markBusy} />
         </div>)}
       </div>
-      <div id={`reader-chat-mode-panel-research-${props.paperId}`} className="assistant-mode-panel research-mode-panel" role="tabpanel" aria-labelledby="reader-chat-mode-research" hidden={assistantMode !== 'research'}>
+      {import.meta.env.MODE !== 'tablet' && <div id={`reader-chat-mode-panel-research-${props.paperId}`} className="assistant-mode-panel research-mode-panel" role="tabpanel" aria-labelledby="reader-chat-mode-research" hidden={assistantMode !== 'research'}>
         {sessions.find((session) => session.id === currentSession) && <ResearchTasksPanel
           key={`${props.paperId}:${currentSession}`}
           paperId={props.paperId} sessionId={currentSession} active={props.active && props.visible && assistantMode === 'research'}
@@ -2191,7 +2529,7 @@ function PaperChats(props: PaperChatsProps) {
           selectionContext={sessions.find((session) => session.id === currentSession)?.selection_context || null}
           onOpenPdfLocation={(page) => props.onOpenPdfLocation('original', page)}
         />}
-      </div>
+      </div>}
     </div>
   </>;
 }
@@ -2200,7 +2538,12 @@ function ChatPanel(props: PaperChatsProps & {
   sessionId: string; selectionContext: SelectionContext | null; onClearAssociation: (sessionId: string) => Promise<void>;
   onBusyChange: (id: string, busy: boolean) => void;
 }) {
-  const { paperId, active, visible, onJump, settings, currentModel, modelFailure, onModelChange, onWebSearchChange, sessionId, selectionContext, onClearAssociation, onBusyChange } = props;
+  const { paperId, active, visible, onJump: onJumpProp, settings, currentModel, modelFailure, onModelChange, onWebSearchChange, sessionId, selectionContext, onClearAssociation, onBusyChange } = props;
+  // Reader 的页码、缩放、布局更新不应让历史消息重新解析 Markdown/KaTeX。
+  // 稳定回调身份，同时通过 layout effect 保持引用跳转使用最新的 Reader 状态。
+  const onJumpRef = useRef(onJumpProp);
+  useLayoutEffect(() => { onJumpRef.current = onJumpProp; }, [onJumpProp]);
+  const onJump = useCallback((source: Source) => onJumpRef.current(source), []);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [runs, setRuns] = useState<AnalysisRun[]>([]);
   const [agentActions, setAgentActions] = useState<AgentAction[]>([]);
@@ -2229,10 +2572,11 @@ function ChatPanel(props: PaperChatsProps & {
 
   useEffect(() => () => { attachmentEpochRef.current += 1; }, [paperId, sessionId]);
 
-  async function loadAttachmentPreview(attachment: ChatAttachmentView) {
+  // 稳定引用：否则每次按键都会让 memo 化的历史消息全部重渲染。
+  const loadAttachmentPreview = useCallback(async (attachment: ChatAttachmentView) => {
     const content = await api<{ mime_type: string; data_base64: string }>(`/papers/${paperId}/chat-sessions/${sessionId}/attachments/${attachment.id}/content`);
     return `data:${content.mime_type};base64,${content.data_base64}`;
-  }
+  }, [paperId, sessionId]);
 
   async function removeAttachment(id: string) {
     removedUploadsRef.current.add(id);
@@ -2532,8 +2876,43 @@ function ChatPanel(props: PaperChatsProps & {
     });
   }
 
-  const visibleMessages = messages.filter((message) =>
-    message.status !== 'streaming' && !(activeStream?.messageId && message.id === activeStream.messageId));
+  const visibleMessages = useMemo(() => messages.filter((message) =>
+    message.status !== 'streaming' && !(activeStream?.messageId && message.id === activeStream.messageId)),
+  [messages, activeStream?.messageId]);
+  const chatTurns = useMemo(() => visibleMessages
+    .filter((message) => message.role === 'user' && message.id != null)
+    .map((message) => ({ id: message.id!, excerpt: message.content.slice(0, 80) || '附件提问' })), [visibleMessages]);
+  const navigateToTurn = useCallback((id: string | number) => {
+    followLatestRef.current = false;
+    setFollowingLatest(false);
+    setActiveTurnId(id);
+  }, []);
+  const scrollStateRef = useRef({ following: true, turnId: null as string | null, frame: 0 });
+  useEffect(() => () => {
+    if (scrollStateRef.current.frame) window.cancelAnimationFrame(scrollStateRef.current.frame);
+    scrollStateRef.current.frame = 0;
+  }, []);
+  // 滚动事件原本每帧都要查询全部轮流节点并触发状态更新，长对话时会把主线程占满。
+  const trackMessagesScroll = useCallback((container: HTMLDivElement) => {
+    messagesTopRef.current = container.scrollTop;
+    const state = scrollStateRef.current;
+    if (state.frame) return;
+    state.frame = window.requestAnimationFrame(() => {
+      state.frame = 0;
+      const following = container.scrollHeight - container.scrollTop - container.clientHeight <= 4;
+      followLatestRef.current = following;
+      if (state.following !== following) { state.following = following; setFollowingLatest(following); }
+      const turnNodes = container.querySelectorAll<HTMLElement>('[data-chat-turn-id]');
+      const middle = container.getBoundingClientRect().top + container.clientHeight / 2;
+      let current: string | null = null;
+      for (const node of turnNodes) {
+        if (node.getBoundingClientRect().top > middle) break;
+        current = node.dataset.chatTurnId || null;
+      }
+      if (current === null && turnNodes.length) current = turnNodes[0].dataset.chatTurnId || null;
+      if (state.turnId !== current) { state.turnId = current; setActiveTurnId(current); }
+    });
+  }, []);
   const activeLabel = activeStream?.phase === 'tool'
     ? activeStream.tool === 'web_search' ? '正在搜索网页…'
       : activeStream.tool === 'read_paper' ? '正在读取相关原文…'
@@ -2548,21 +2927,13 @@ function ChatPanel(props: PaperChatsProps & {
         if (event.deltaY < 0) { followLatestRef.current = false; setFollowingLatest(false); }
       }} onScroll={(event) => {
         if (!active || !visible) return;
-        const container = event.currentTarget;
-        messagesTopRef.current = container.scrollTop;
-        const following = container.scrollHeight - container.scrollTop - container.clientHeight <= 4;
-        followLatestRef.current = following;
-        setFollowingLatest(following);
-        const turnNodes = Array.from(container.querySelectorAll<HTMLElement>('[data-chat-turn-id]'));
-        const middle = container.getBoundingClientRect().top + container.clientHeight / 2;
-        const turn = turnNodes.filter((node) => node.getBoundingClientRect().top <= middle).at(-1) || turnNodes[0];
-        if (turn) setActiveTurnId(turn.dataset.chatTurnId || null);
+        trackMessagesScroll(event.currentTarget);
       }}>
         {selectionContext && <div className="reader-selection-association" data-testid="reader-selection-association">
           <div><strong>已关联{selectionContext.pdf_kind === 'original' ? '原文' : selectionContext.pdf_kind === 'mono' ? '中文' : '对照'} · 第 {selectionContext.page_no} 页</strong><blockquote>{selectionContext.selected_text}</blockquote></div>
           <button type="button" className="secondary-button compact-button" data-testid="reader-clear-associated-selection" onClick={() => void onClearAssociation(sessionId)}>清除</button>
         </div>}
-        {visibleMessages.length === 0 && runs.length === 0 && !activeStream && <div className="chat-empty"><div className="chat-empty-mark" aria-hidden="true">问</div><p>可以直接问“详细总结一下这篇文献”，也可以询问实验设计、数据或结论。</p></div>}
+        {visibleMessages.length === 0 && runs.length === 0 && !activeStream && <div className="chat-empty"><div className="chat-empty-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3.5v3.2M12 17.3v3.2M3.5 12h3.2M17.3 12h3.2M6.2 6.2l2.2 2.2M15.6 15.6l2.2 2.2M17.8 6.2l-2.2 2.2M8.4 15.6l-2.2 2.2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/><circle cx="12" cy="12" r="2.6" stroke="currentColor" strokeWidth="1.4"/></svg></div><p>从任何一处开始：让它总结全文、推敲实验设计，或把某个结论追到底。</p></div>}
         {visibleMessages.map((message, index) => <Message key={message.id ?? `${message.created_at || index}-${index}`} message={message} onJump={onJump} onLoadAttachmentPreview={loadAttachmentPreview} />)}
         {runs.filter((run) => !(run.status === 'running' && activeStream?.runId === run.id)).map((run) => <div className="run-card" key={run.id}>
           <div className="run-title">{run.kind === 'full_prompt' ? '整篇原文总结' : '全文分块总结'} {run.status === 'running' ? '进行中' : run.status === 'completed' ? '已完成' : '未完成'}</div>
@@ -2624,12 +2995,12 @@ function ChatPanel(props: PaperChatsProps & {
         </div>}
       </div>
       <ChatTurnNavigation
-        turns={visibleMessages.filter((message) => message.role === 'user' && message.id != null).map((message) => ({ id: message.id!, excerpt: message.content.slice(0, 80) || '附件提问' }))}
+        turns={chatTurns}
         activeId={activeTurnId} containerRef={messagesRef}
-        onNavigate={(id) => { followLatestRef.current = false; setFollowingLatest(false); setActiveTurnId(id); }}
+        onNavigate={navigateToTurn}
       />
       </div>
-      {!followingLatest && <button className="chat-follow-latest" type="button" onClick={followLatest}>回到最新 ↓</button>}
+      {!followingLatest && <button className="chat-follow-latest" type="button" onClick={followLatest}>回到最新</button>}
       {failure && <div className="chat-error" role="alert">{failure}</div>}
       <ChatComposer
         value={question} onChange={setQuestion} onSubmit={() => send()}
@@ -2659,7 +3030,8 @@ function normalizeMathDelimiters(markdown: string): string {
     .replace(/\u0000CODE(\d+)\u0000/g, (_match, index: string) => code[Number(index)]);
 }
 
-function MarkdownContent({ markdown, sources, onJump }: { markdown: string; sources?: Source[]; onJump: (source: Source) => void }) {
+// 历史消息的 Markdown（含 KaTeX）解析很贵，输入框每次按键都重算会直接卡住打字。
+const MarkdownContent = memo(function MarkdownContent({ markdown, sources, onJump }: { markdown: string; sources?: Source[]; onJump: (source: Source) => void }) {
   const sourceMap = new Map((sources || []).map((source) => [source.id, source]));
   const linkedMarkdown = normalizeMathDelimiters(markdown).replace(/\[((?:S|W)\d{1,10})\]/g, (match, sourceId: string) => {
     const source = sourceMap.get(sourceId);
@@ -2685,9 +3057,9 @@ function MarkdownContent({ markdown, sources, onJump }: { markdown: string; sour
   >
     {linkedMarkdown}
   </ReactMarkdown>;
-}
+});
 
-function Message({ message, onJump, onLoadAttachmentPreview }: {
+const Message = memo(function Message({ message, onJump, onLoadAttachmentPreview }: {
   message: ChatMessage; onJump: (source: Source) => void;
   onLoadAttachmentPreview: (attachment: ChatAttachmentView) => Promise<string | null>;
 }) {
@@ -2704,4 +3076,4 @@ function Message({ message, onJump, onLoadAttachmentPreview }: {
       {webSources.map((source) => <button type="button" key={source.id} onClick={() => onJump(source)}>{source.title || source.url}</button>)}
     </div>}
   </div>;
-}
+});

@@ -20,7 +20,7 @@
 
 .reader-shell .assistant-mode-switch button:hover { background: var(--surface-muted); }
 .reader-shell .assistant-mode-switch button.active { color: var(--accent); border-color: var(--line); background: var(--surface-selected); font-weight: 650; }
-.reader-shell .assistant-mode-switch button:focus-visible { outline: 2px solid #739582; outline-offset: 1px; }
+.reader-shell .assistant-mode-switch button:focus-visible { outline: 2px solid #948874; outline-offset: 1px; }
 
 .reader-shell .assistant-mode-panel {
   min-width: 0;
@@ -43,10 +43,10 @@
 .research-field textarea { display: block; width: 100%; min-height: 64px; max-height: 120px; resize: vertical; margin-top: 5px; padding: 8px 9px; border: 1px solid var(--border-soft); border-radius: 6px; color: var(--ink); background: var(--field); font: inherit; font-size: 14px; line-height: 1.45; }
 .research-scope-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin-top: 8px; }
 .research-scope-options button { min-width: 0; padding: 5px 3px; border: 1px solid var(--line); border-radius: 5px; color: var(--ink-secondary); background: var(--paper); font-size: 12px; white-space: nowrap; }
-.research-scope-options button.selected { border-color: #9db5a4; color: var(--accent); background: var(--surface-selected); font-weight: 650; }
+.research-scope-options button.selected { border-color: #b4ac9e; color: var(--accent); background: var(--surface-selected); font-weight: 650; }
 .research-range-fields { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 7px; color: var(--ink-secondary); font-size: 12px; }
 .research-range-fields input { width: 66px; padding: 4px 5px; border: 1px solid var(--border-soft); border-radius: 4px; color: var(--ink); background: var(--field); }
-.research-selection-preview { max-height: 58px; overflow: auto; margin: 7px 0 0; padding: 6px 8px; border-left: 2px solid #9db5a4; color: var(--ink-secondary); background: var(--surface-muted); font-size: 12px; line-height: 1.4; white-space: pre-wrap; }
+.research-selection-preview { max-height: 58px; overflow: auto; margin: 7px 0 0; padding: 6px 8px; border-left: 2px solid #b4ac9e; color: var(--ink-secondary); background: var(--surface-muted); font-size: 12px; line-height: 1.4; white-space: pre-wrap; }
 .research-start-options { display: flex; justify-content: flex-end; margin-top: 8px; }
 .research-form-note { margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
 .research-error { flex: 0 0 auto; margin: 8px 10px 0; padding: 7px 9px; border: 1px solid #dcb9b2; border-radius: 5px; color: var(--danger); background: var(--paper); font-size: 13px; line-height: 1.4; }

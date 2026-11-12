@@ -35,3 +35,9 @@ config/
 *.key
 *.pfx
 *.tmp
+
+# Local diagnostics and private mobile snapshots (not desktop releases)
+scripts/tmp-*
+*.lnk
+android/
+design/

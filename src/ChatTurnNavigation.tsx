@@ -1,8 +1,8 @@
-import { useEffect, useRef, type RefObject } from 'react';
+import { memo, useEffect, useRef, type RefObject } from 'react';
 
 export type ChatTurnNavigationItem = { id: string | number; excerpt: string };
 
-export function ChatTurnNavigation({ turns, activeId, containerRef, onNavigate }: {
+export const ChatTurnNavigation = memo(function ChatTurnNavigation({ turns, activeId, containerRef, onNavigate }: {
   turns: readonly ChatTurnNavigationItem[];
   activeId?: string | number | null;
   containerRef: RefObject<HTMLElement | null>;
@@ -40,4 +40,4 @@ export function ChatTurnNavigation({ turns, activeId, containerRef, onNavigate }
         title={turn.excerpt} data-excerpt={turn.excerpt} onClick={() => navigate(turn)} />)}
     </div>
   </nav>;
-}
+});

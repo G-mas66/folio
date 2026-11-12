@@ -161,6 +161,7 @@ declare global {
       setThemePreference(preference: 'system' | 'light' | 'dark'): Promise<string>;
       choosePdfs(): Promise<string[]>;
       revealPaperFile(paperId: string, kind: 'original' | 'mono' | 'dual'): Promise<boolean>;
+      exportFolioBundle?(paperId: string): Promise<boolean>;
       openLibraryFolder(): Promise<boolean>;
       getDroppedPaths(files: FileList | File[]): string[];
       cancelPaperStreams(paperId: string): Promise<number>;

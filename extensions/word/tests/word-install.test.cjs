@@ -77,6 +77,16 @@ test('install registers owned per-user x86/x64 COM and Word add-in entries', (t)
   assert.equal([...context.registry.values.keys()].some((key) => /TrustCenter|Trusted Locations|Security/i.test(key)), false);
 });
 
+test('install supports shared Word add-in keys across registry views', (t) => {
+  const context = fixture(t);
+  const originalKey = context.registry.key.bind(context.registry);
+  context.registry.key = (key, name, view) => originalKey(key, name,
+    /\\Office\\Word\\Addins\\/i.test(key) ? 'shared' : view);
+  const status = installer.installWordPlugin({ ...context, platform: 'win32', isWordRunning: () => false });
+  assert.equal(status.installed, true);
+  assert.deepEqual(status.views.sort(), ['32', '64']);
+});
+
 test('uninstall removes only Folio registration and owned DLLs after Word exits', (t) => {
   const context = fixture(t);
   let running = true;

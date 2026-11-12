@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.mjs?url';
 import { PdfAnnotation, PdfAnnotationRect, PdfSelection, SelectionContext } from './api';
@@ -10,6 +10,89 @@ export type PdfKind = 'original' | 'mono' | 'dual';
 export type SharedPdfDocument = { pdf: pdfjs.PDFDocumentProxy; destroy: () => Promise<void> };
 
 type RenderTaskRef = { cancel: () => void };
+export const PDF_MAX_ZOOM = 2.5;
+
+// ---- Rendering budget -------------------------------------------------------
+// Pages share one small render pool; the page closest to the viewport centre
+// always goes next, so the page you are looking at is never stuck behind
+// pre-rendering further down the document.
+const MAX_CONCURRENT_PAGE_RENDERS = 2;
+const MAX_CANVAS_PIXELS = 16_000_000;
+// Scale/width changes are previewed by CSS-scaling the finished bitmap; the
+// sharp re-render only starts once the value has been still for this long.
+const RERENDER_SETTLE_MS = 160;
+const EYE_COMFORT_TINT = 'rgba(228, 191, 119, 0.28)';
+
+type RenderWaiter = { priority: () => number; grant: () => void };
+const renderPool = { active: 0, waiters: [] as RenderWaiter[] };
+
+function pumpRenderPool() {
+  while (renderPool.active < MAX_CONCURRENT_PAGE_RENDERS && renderPool.waiters.length) {
+    let best = 0;
+    let bestPriority = Infinity;
+    renderPool.waiters.forEach((waiter, index) => {
+      const priority = waiter.priority();
+      if (priority < bestPriority) { bestPriority = priority; best = index; }
+    });
+    const [waiter] = renderPool.waiters.splice(best, 1);
+    waiter.grant();
+  }
+}
+
+function acquireRenderSlot(priority: () => number) {
+  return new Promise<() => void>((resolve) => {
+    renderPool.waiters.push({
+      priority,
+      grant: () => {
+        renderPool.active += 1;
+        let released = false;
+        resolve(() => {
+          if (released) return;
+          released = true;
+          renderPool.active -= 1;
+          pumpRenderPool();
+        });
+      },
+    });
+    pumpRenderPool();
+  });
+}
+
+function distanceFromViewport(frame: HTMLElement | null, root: HTMLElement | null) {
+  if (!frame || !root) return Number.MAX_SAFE_INTEGER;
+  const page = frame.getBoundingClientRect();
+  const view = root.getBoundingClientRect();
+  return Math.abs((page.top + page.bottom) / 2 - (view.top + view.bottom) / 2);
+}
+
+function pageOutputScale(width: number, height: number) {
+  const device = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+  return Math.max(0.75, Math.min(device, Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, width * height))));
+}
+
+// Eye comfort used to be a mix-blend-mode overlay on every page, which forces
+// expensive compositing on every scrolled frame. The tint is now baked into
+// the bitmap once, at render time.
+const eyeComfortListeners = new Set<() => void>();
+let eyeComfortObserver: MutationObserver | null = null;
+function subscribeEyeComfort(listener: () => void) {
+  eyeComfortListeners.add(listener);
+  if (!eyeComfortObserver) {
+    eyeComfortObserver = new MutationObserver(() => eyeComfortListeners.forEach((callback) => callback()));
+    eyeComfortObserver.observe(window.document.documentElement, { attributes: true, attributeFilter: ['data-eye-comfort'] });
+  }
+  return () => { eyeComfortListeners.delete(listener); };
+}
+// Text layers (thousands of measured spans) are built only when the main
+// thread is idle, after the page image is already on screen.
+function whenIdle(timeout = 400) {
+  return new Promise<void>((resolve) => {
+    const idle = (window as Window & { requestIdleCallback?: (cb: () => void, options?: { timeout: number }) => number }).requestIdleCallback;
+    if (idle) idle(() => resolve(), { timeout });
+    else window.setTimeout(resolve, 16);
+  });
+}
+const readEyeComfort = () => window.document.documentElement.dataset.eyeComfort === 'on';
 
 const MAX_SELECTION_LINES = 32;
 const MAX_SELECTION_RECTS = 512;
@@ -332,7 +415,7 @@ export async function loadPdfDocument(paperId: string, kind: PdfKind): Promise<S
   const bytes = await window.workbench.request<Uint8Array>({ path: `/papers/${paperId}/pdf?kind=${kind}`, binary: true });
   const resources = new URL('./pdfjs/', window.location.href);
   const loadingTask = pdfjs.getDocument({
-    data: new Uint8Array(bytes),
+    data: import.meta.env.MODE === 'tablet' ? bytes : new Uint8Array(bytes),
     cMapUrl: new URL('cmaps/', resources).href,
     cMapPacked: true,
     iccUrl: new URL('iccs/', resources).href,
@@ -344,20 +427,72 @@ export async function loadPdfDocument(paperId: string, kind: PdfKind): Promise<S
 
 export async function pageAspectRatios(document: SharedPdfDocument, pageCount: number): Promise<number[]> {
   const ratios: number[] = [];
-  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
-    const page = await document.pdf.getPage(pageNumber);
-    const viewport = page.getViewport({ scale: 1 });
-    ratios.push(viewport.width / viewport.height);
+  const batchSize = import.meta.env.MODE === 'tablet' ? 8 : 1;
+  for (let start = 1; start <= pageCount; start += batchSize) {
+    const batch = await Promise.all(Array.from({ length: Math.min(batchSize, pageCount - start + 1) }, async (_, index) => {
+      const page = await document.pdf.getPage(start + index);
+      const viewport = page.getViewport({ scale: 1 });
+      return viewport.width / viewport.height;
+    }));
+    ratios.push(...batch);
   }
   return ratios;
 }
 
-export function PdfPage({
-  document, pageNumber, scale, fitWidth = true, containerWidth, scrollRoot, pageAspectRatio,
+export async function prepareTabletPdf(document: SharedPdfDocument, signal: AbortSignal) {
+  const aspects: number[] = [];
+  const imageUrls: string[] = [];
+  const canvas = window.document.createElement('canvas');
+  const context = canvas.getContext('2d', { alpha: false });
+  if (!context) throw new Error('Canvas unavailable');
+  // Prepare at maximum zoom so pinch only scales the existing image.
+  const pageWidth = Math.max(100, Math.max(window.innerWidth, window.innerHeight) - 28) * PDF_MAX_ZOOM;
+  const deviceScale = Math.max(2, window.devicePixelRatio || 1);
+  try {
+    for (let number = 1; number <= document.pdf.numPages; number += 1) {
+      if (signal.aborted) throw signal.reason;
+      const page = await document.pdf.getPage(number);
+      if (signal.aborted) throw signal.reason;
+      const natural = page.getViewport({ scale: 1 });
+      const viewport = page.getViewport({ scale: pageWidth / natural.width });
+      const outputScale = Math.min(deviceScale, Math.sqrt(16000000 / (viewport.width * viewport.height)));
+      canvas.width = Math.ceil(viewport.width * outputScale);
+      canvas.height = Math.ceil(viewport.height * outputScale);
+      const task = page.render({
+        canvas, canvasContext: context, viewport, transform: [outputScale, 0, 0, outputScale, 0, 0],
+      });
+      const cancel = () => task.cancel();
+      signal.addEventListener('abort', cancel, { once: true });
+      try {
+        await task.promise;
+      } finally {
+        signal.removeEventListener('abort', cancel);
+      }
+      const blob = await new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob((image) => image ? resolve(image) : reject(new Error('PDF page encoding failed')), 'image/png');
+      });
+      if (signal.aborted) throw signal.reason;
+      imageUrls.push(URL.createObjectURL(blob));
+      aspects.push(natural.width / natural.height);
+      page.cleanup();
+    }
+    return { aspects, imageUrls };
+  } catch (error) {
+    imageUrls.forEach((url) => URL.revokeObjectURL(url));
+    throw error;
+  } finally {
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+}
+
+function PdfPageView({
+  document, pageNumber, imageUrl, scale, fitWidth = true, containerWidth, scrollRoot, pageAspectRatio,
   annotations, active, onSelection, locateRequest, onLocate, previewSelection,
   mappingRequests = [], onMapped, paragraphMarkers = [], onAnnotationClick,
 }: {
   document: SharedPdfDocument; pageNumber: number; scale: number; fitWidth?: boolean;
+  imageUrl?: string;
   containerWidth: number; scrollRoot: HTMLElement | null; pageAspectRatio: number;
   annotations: PdfAnnotation[]; active: boolean;
   onSelection: (selection: PdfSelection | null, notice?: string, contextMenuPoint?: { left: number; top: number }) => void;
@@ -370,19 +505,47 @@ export function PdfPage({
   onAnnotationClick?: (id: string) => void;
 }) {
   const frameRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasHostRef = useRef<HTMLDivElement>(null);
+  const textLayerInstanceRef = useRef<InstanceType<typeof pdfjs.TextLayer> | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLDivElement>(null);
   const renderTaskRef = useRef<RenderTaskRef | null>(null);
   const renderQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const textDocumentRef = useRef<SharedPdfDocument | null>(null);
   const lastLocateIdRef = useRef<string | null>(null);
   const lastMappingSignatureRef = useRef<string | null>(null);
   const [nearby, setNearby] = useState(false);
   const [failure, setFailure] = useState('');
   const [rendered, setRendered] = useState(false);
   const [renderVersion, setRenderVersion] = useState(0);
+  const tablet = import.meta.env.MODE === 'tablet';
+  const eyeComfort = useSyncExternalStore(subscribeEyeComfort, readEyeComfort);
+  const [settled, setSettled] = useState({ scale, containerWidth });
+  useEffect(() => {
+    if (settled.scale === scale && settled.containerWidth === containerWidth) return;
+    if (!rendered) { setSettled({ scale, containerWidth }); return; }
+    const timer = window.setTimeout(() => setSettled({ scale, containerWidth }), RERENDER_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [scale, containerWidth, settled.scale, settled.containerWidth, rendered]);
+  const renderScale = settled.scale;
+  const renderWidth = settled.containerWidth;
   const placeholderWidth = Math.max(100, containerWidth - 28) * (fitWidth ? scale : 1);
   const placeholderHeight = pageAspectRatio > 0 ? placeholderWidth / pageAspectRatio + 28 : 540;
+  // The stage is one coordinate system for pixels, selection and annotations.
+  // Its layout size stays at the completed render; only its visual scale changes.
+  function fitCompletedStage() {
+    if (tablet) return;
+    const stage = stageRef.current;
+    const frame = frameRef.current;
+    const baseWidth = stage ? Number.parseFloat(stage.style.width) : 0;
+    if (!stage || !frame || !(baseWidth > 0)) return;
+    const targetWidth = Number.parseFloat(frame.style.width) - 28;
+    if (!(targetWidth > 0)) return;
+    stage.style.transformOrigin = '0 0';
+    stage.style.transform = `scale(${targetWidth / baseWidth})`;
+  }
+
+  useLayoutEffect(fitCompletedStage, [placeholderWidth, placeholderHeight]);
 
   function captureSelection(contextMenuPoint?: { left: number; top: number }) {
     const textLayer = textRef.current;
@@ -476,81 +639,144 @@ export function PdfPage({
   }
 
   useEffect(() => {
+    if (import.meta.env.MODE !== 'tablet' || !active || !nearby || !rendered) return;
+    let timer: number | undefined;
+    function captureTouchSelection() {
+      window.clearTimeout(timer);
+      const selection = window.getSelection();
+      const layer = textRef.current;
+      if (!selection || selection.isCollapsed || !layer?.contains(selection.anchorNode) || !layer.contains(selection.focusNode)) return;
+      timer = window.setTimeout(() => captureSelection(), 180);
+    }
+    window.document.addEventListener('selectionchange', captureTouchSelection);
+    return () => {
+      window.clearTimeout(timer);
+      window.document.removeEventListener('selectionchange', captureTouchSelection);
+    };
+  }, [active, nearby, rendered, onSelection]);
+
+  useEffect(() => {
     const frame = frameRef.current;
     if (!frame || !scrollRoot) return;
     const observer = new IntersectionObserver(
       (entries) => setNearby(Boolean(entries[0]?.isIntersecting)),
-      { root: scrollRoot, rootMargin: '180% 0px', threshold: 0 },
+      { root: scrollRoot, rootMargin: '200% 0px', threshold: 0 },
     );
     observer.observe(frame);
     return () => observer.disconnect();
   }, [scrollRoot]);
 
   useEffect(() => {
-    if (!nearby || containerWidth <= 0) {
+    if (!nearby || renderWidth <= 0) {
       renderTaskRef.current?.cancel();
-      const canvas = canvasRef.current;
       const textLayer = textRef.current;
       setRendered(false);
-      if (canvas) {
-        canvas.width = 0;
-        canvas.height = 0;
-        canvas.style.width = '0px';
-        canvas.style.height = '0px';
-      }
+      canvasHostRef.current?.replaceChildren();
       textLayer?.replaceChildren();
+      textLayerInstanceRef.current = null;
+      textDocumentRef.current = null;
       return;
     }
     let canceled = false;
     renderTaskRef.current?.cancel();
     const job = renderQueueRef.current.catch(() => undefined).then(async () => {
       if (canceled) return;
-      const canvas = canvasRef.current;
-      const textLayer = textRef.current;
-      if (!canvas || !textLayer) return;
+      const release = await acquireRenderSlot(() => distanceFromViewport(frameRef.current, scrollRoot));
       try {
+        if (canceled) return;
+        const canvasHost = canvasHostRef.current;
+        const textLayer = textRef.current;
+        if (!textLayer) return;
+        const reuseText = tablet && textDocumentRef.current === document;
+        const existingLayer = !tablet && textDocumentRef.current === document ? textLayerInstanceRef.current : null;
         const page = await document.pdf.getPage(pageNumber);
         if (canceled) return;
         const naturalViewport = page.getViewport({ scale: 1 });
-        const availableWidth = Math.max(100, containerWidth - 28);
-        const fitScale = fitWidth && containerWidth ? availableWidth / naturalViewport.width : 1;
-        const viewport = page.getViewport({ scale: fitScale * scale });
-        const outputScale = Math.max(2, window.devicePixelRatio || 1);
-        canvas.width = Math.ceil(viewport.width * outputScale);
-        canvas.height = Math.ceil(viewport.height * outputScale);
-        canvas.style.width = `${viewport.width}px`;
-        canvas.style.height = `${viewport.height}px`;
-        textLayer.style.width = `${viewport.width}px`;
-        textLayer.style.height = `${viewport.height}px`;
-        textLayer.style.setProperty('--total-scale-factor', String(viewport.scale));
-        textLayer.replaceChildren();
-        const context = canvas.getContext('2d');
-        if (!context) throw new Error('Canvas unavailable');
-        const task = page.render({
-          canvas, canvasContext: context, viewport,
-          transform: [outputScale, 0, 0, outputScale, 0, 0],
-        });
-        renderTaskRef.current = task;
-        await task.promise;
-        if (renderTaskRef.current === task) renderTaskRef.current = null;
-        if (canceled) return;
-        const content = await page.getTextContent();
-        if (canceled) return;
-        const layer = new pdfjs.TextLayer({ textContentSource: content, container: textLayer, viewport });
-        await layer.render();
-        if (canceled) textLayer.replaceChildren();
-        else {
-          orderTextLayerByColumns(textLayer);
-          setRendered(true);
-          setRenderVersion((version) => version + 1);
+        const availableWidth = Math.max(100, renderWidth - 28);
+        const fitScale = fitWidth && renderWidth ? availableWidth / naturalViewport.width : 1;
+        const viewport = page.getViewport({ scale: fitScale * renderScale });
+        // Render into a detached canvas and swap it in whole: the old bitmap
+        // stays on screen until the new one is complete, with no copy.
+        let nextCanvas: HTMLCanvasElement | null = null;
+        if (!tablet && canvasHost) {
+          nextCanvas = window.document.createElement('canvas');
+          const outputScale = pageOutputScale(viewport.width, viewport.height);
+          nextCanvas.width = Math.ceil(viewport.width * outputScale);
+          nextCanvas.height = Math.ceil(viewport.height * outputScale);
+          const context = nextCanvas.getContext('2d');
+          if (!context) throw new Error('Canvas unavailable');
+          const task = page.render({ canvas: nextCanvas, canvasContext: context, viewport, transform: [outputScale, 0, 0, outputScale, 0, 0] });
+          renderTaskRef.current = task;
+          await task.promise;
+          if (renderTaskRef.current === task) renderTaskRef.current = null;
+          if (canceled) return;
+          if (eyeComfort) {
+            context.setTransform(1, 0, 0, 1, 0, 0);
+            context.globalCompositeOperation = 'multiply';
+            context.fillStyle = EYE_COMFORT_TINT;
+            context.fillRect(0, 0, nextCanvas.width, nextCanvas.height);
+            context.globalCompositeOperation = 'source-over';
+          }
         }
+        if (canvasHost && nextCanvas) {
+          nextCanvas.dataset.pageNumber = String(pageNumber);
+          nextCanvas.setAttribute('data-testid', `pdf-canvas-${pageNumber}`);
+          nextCanvas.style.width = String(viewport.width) + 'px';
+          nextCanvas.style.height = String(viewport.height) + 'px';
+          canvasHost.replaceChildren(nextCanvas);
+          const stage = stageRef.current;
+          if (stage) {
+            stage.style.width = String(viewport.width) + 'px';
+            stage.style.height = String(viewport.height) + 'px';
+            fitCompletedStage();
+          }
+        }
+        // Free the render slot for neighbouring pages before text work.
+        release();
+        await whenIdle();
+        if (canceled) return;
+        const nextTextLayer = textLayer.cloneNode(false) as HTMLDivElement;
+        let newLayer: InstanceType<typeof pdfjs.TextLayer> | null = null;
+        if (!reuseText && !existingLayer) {
+          nextTextLayer.style.setProperty('--total-scale-factor', String(viewport.scale));
+          const content = await page.getTextContent();
+          if (canceled) return;
+          newLayer = new pdfjs.TextLayer({ textContentSource: content, container: nextTextLayer, viewport });
+          renderTaskRef.current = newLayer;
+          await newLayer.render();
+          if (renderTaskRef.current === newLayer) renderTaskRef.current = null;
+        }
+        if (canceled) return;
+        textLayer.style.width = String(viewport.width) + 'px';
+        textLayer.style.height = String(viewport.height) + 'px';
+        textLayer.style.setProperty('--total-scale-factor', String(viewport.scale));
+        if (existingLayer) {
+          // Same text, new size: re-measure the spans in place instead of
+          // rebuilding and re-sorting thousands of nodes.
+          existingLayer.update({ viewport });
+        } else if (!reuseText && newLayer) {
+          textLayer.style.setProperty('--min-font-size', nextTextLayer.style.getPropertyValue('--min-font-size'));
+          textLayer.replaceChildren(...Array.from(nextTextLayer.childNodes));
+          // Rotation belongs to the PDF.js container, not its spans.
+          if (nextTextLayer.dataset.mainRotation) textLayer.dataset.mainRotation = nextTextLayer.dataset.mainRotation;
+          else delete textLayer.dataset.mainRotation;
+          textLayerInstanceRef.current = newLayer;
+          await whenIdle();
+          if (canceled) return;
+          orderTextLayerByColumns(textLayer);
+        }
+        textDocumentRef.current = document;
+        setFailure('');
+        setRendered(true);
+        if (!existingLayer) setRenderVersion((version) => version + 1);
       } catch (error) {
         const name = (error as { name?: string }).name;
-        if (!canceled && name !== 'RenderingCancelledException') {
-          const detail = error instanceof Error ? `${error.name}: ${error.message.slice(0, 180)}` : 'Unknown PDF render error';
-          console.error(`PDF render failed on page ${pageNumber}`, detail);
+        if (!canceled && name !== 'RenderingCancelledException' && name !== 'AbortException') {
+          console.error('PDF render failed on page', pageNumber, error);
           setFailure('无法显示这页 PDF。');
         }
+      } finally {
+        release();
       }
     });
     renderQueueRef.current = job.catch(() => undefined);
@@ -558,7 +784,7 @@ export function PdfPage({
       canceled = true;
       renderTaskRef.current?.cancel();
     };
-  }, [document, pageNumber, scale, fitWidth, containerWidth, nearby]);
+  }, [document, pageNumber, renderScale, fitWidth, renderWidth, nearby, eyeComfort]);
 
   useEffect(() => {
     if (!rendered || !locateRequest || !onLocate || lastLocateIdRef.current === locateRequest.id) return;
@@ -597,10 +823,11 @@ export function PdfPage({
     ref={frameRef}
     style={{ width: placeholderWidth + 28, height: placeholderHeight }}
   >
-    <div className="pdf-page-shell">
+    <div className="pdf-page-shell" style={tablet ? undefined : { overflow: 'hidden' }}>
       {failure && <div className="pdf-error">{failure}</div>}
-      <div className="pdf-page-stage" ref={stageRef}>
-        <canvas ref={canvasRef} data-page-number={pageNumber} data-testid={`pdf-canvas-${pageNumber}`} />
+      <div className="pdf-page-stage" ref={stageRef} style={tablet ? { width: placeholderWidth, height: placeholderHeight - 28 } : { flexShrink: 0 }}>
+        {tablet ? <img className="pdf-page-bitmap" src={imageUrl} alt="" draggable={false} /> :
+          <div className="pdf-canvas-host" ref={canvasHostRef} />}
         <div className="pdf-annotation-layer" aria-label="PDF 高亮和批注">
           {annotations.flatMap((annotation) => annotation.rects.map((rect, index) => <span
             key={`${annotation.id}-${index}`}
@@ -637,3 +864,35 @@ export function PdfPage({
     </div>
   </div>;
 }
+
+type PdfPageProps = Parameters<typeof PdfPageView>[0];
+
+function shallowSame(left: unknown, right: unknown) {
+  if (left === right) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  const leftKeys = Object.keys(left);
+  if (leftKeys.length !== Object.keys(right).length) return false;
+  return leftKeys.every((key) => (left as Record<string, unknown>)[key] === (right as Record<string, unknown>)[key]);
+}
+
+// The reader re-renders on every page-number change while scrolling; pages
+// only need to update when something they draw actually changed. Callbacks
+// must therefore be identity-stable wrappers in the parent.
+function samePdfPageProps(previous: PdfPageProps, next: PdfPageProps) {
+  const keys = new Set([...Object.keys(previous), ...Object.keys(next)]) as Set<keyof PdfPageProps>;
+  for (const key of keys) {
+    const left = previous[key];
+    const right = next[key];
+    if (left === right) continue;
+    if (typeof left === 'function' && typeof right === 'function') continue;
+    if (Array.isArray(left) && Array.isArray(right)) {
+      if (left.length === right.length && left.every((item, index) => shallowSame(item, right[index]))) continue;
+      return false;
+    }
+    if (shallowSame(left, right)) continue;
+    return false;
+  }
+  return true;
+}
+
+export const PdfPage = memo(PdfPageView, samePdfPageProps);

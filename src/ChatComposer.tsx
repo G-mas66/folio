@@ -68,15 +68,15 @@ function fileType(attachment: ChatAttachmentView) {
 }
 
 function GlobeIcon() {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><ellipse cx="12" cy="12" rx="4" ry="9" /><path d="M3 12h18M5 7h14M5 17h14" /></svg>;
-}
-
-function PlusIcon() {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16M4 12h16" /></svg>;
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="M3.5 12h17M12 3.5c2.3 2.4 3.4 5.2 3.4 8.5s-1.1 6.1-3.4 8.5c-2.3-2.4-3.4-5.2-3.4-8.5s1.1-6.1 3.4-8.5Z" /></svg>;
 }
 
 function SendIcon() {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6" /></svg>;
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19.5v-15m-5.5 5.5L12 4.5l5.5 5.5" /></svg>;
+}
+
+function PaperclipIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>;
 }
 
 function CloseIcon() {
@@ -397,29 +397,30 @@ export function ChatComposer(props: ChatComposerProps) {
     void onSubmit(value.trim());
   }
 
+  const attachmentsEnabled = import.meta.env.MODE !== 'tablet';
   return <form className="chat-composer chat-composer-upgraded" onSubmit={submit}
-    onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; }}
-    onDrop={(event) => { event.preventDefault(); takeFiles(Array.from(event.dataTransfer.files)); }}>
+    onDragOver={attachmentsEnabled ? (event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } : undefined}
+    onDrop={attachmentsEnabled ? (event) => { event.preventDefault(); takeFiles(Array.from(event.dataTransfer.files)); } : undefined}>
     <textarea aria-label="向当前文献提问" value={value} onChange={(event) => onChange(event.target.value)}
-      onPaste={handlePaste} onKeyDown={(event) => {
+      onPaste={attachmentsEnabled ? handlePaste : undefined} onKeyDown={(event) => {
         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
           event.preventDefault();
           event.currentTarget.form?.requestSubmit();
         }
-      }} placeholder="询问这篇文献…" rows={3} disabled={disabled || busy} />
+      }} placeholder="就这篇文献提问…" rows={3} disabled={disabled || busy} />
     {attachments.length > 0 && <div className="chat-composer-attachments">
       <AttachmentCards attachments={attachments} onRemove={onRemoveAttachment} onLoadPreview={onLoadPreview} />
       <span className="chat-attachment-count">{attachments.length} 个附件{attachments.some((item) => item.status === 'uploading') ? '上传中' : '待发送'}</span>
     </div>}
     {fileError && <div className="chat-composer-file-error" role="status">{fileError}</div>}
-    <input ref={fileInputRef} className="chat-composer-file-input" type="file" multiple accept={ACCEPTED_FILES}
-      aria-label="选择图片或文件" onChange={handleFileInput} />
+    {attachmentsEnabled && <input ref={fileInputRef} className="chat-composer-file-input" type="file" multiple accept={ACCEPTED_FILES}
+      aria-label="选择图片或文件" onChange={handleFileInput} />}
     <div className="chat-composer-footer">
-      <button type="button" className="chat-composer-add" aria-label="添加图片或文件" title="添加图片或文件"
-        disabled={disabled || busy} onClick={() => fileInputRef.current?.click()}><PlusIcon /></button>
-      <button type="button" className={`chat-search-toggle${searchEnabled ? ' is-enabled' : ''}`} role="switch"
+      {attachmentsEnabled && <button type="button" className="chat-composer-add" aria-label="添加图片或文件" title="添加图片或文件"
+        disabled={disabled || busy} onClick={() => fileInputRef.current?.click()}><PaperclipIcon /></button>}
+      {import.meta.env.MODE !== 'tablet' && <button type="button" className={`chat-search-toggle${searchEnabled ? ' is-enabled' : ''}`} role="switch"
         aria-label="联网搜索" aria-checked={searchEnabled} title="联网搜索" disabled={disabled || busy}
-        onClick={() => onSearchChange(!searchEnabled)}><GlobeIcon /></button>
+        onClick={() => onSearchChange(!searchEnabled)}><GlobeIcon /><span>联网</span></button>}
       <div className="chat-model-menu-anchor" ref={modelMenuRef}>
         <button type="button" className="chat-model-menu-trigger" ref={modelButtonRef} aria-haspopup="dialog"
           aria-expanded={modelMenuOpen} aria-label={`模型与推理强度：${currentModel}，${EFFORT_LABELS[effort]}`}

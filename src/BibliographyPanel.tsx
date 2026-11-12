@@ -183,7 +183,7 @@ export function BibliographyPanel({ onOpenPaper, folders, folderFilter, onSelect
   return <div className="bibliography-workspace"><aside className="library-sidebar bibliography-sidebar" aria-label="书目分类">
     <h2>书目分类</h2>
     {[{ id: 'all', name: '全部书目' }, { id: 'unfiled', name: '未分类' }, ...folders].map(folder => <button className={`bibliography-folder ${folderFilter === folder.id ? 'selected' : ''}`} type="button" key={folder.id} aria-pressed={folderFilter === folder.id} onClick={() => onSelectFolder(folder.id)}>
-      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 6h6l2 2h9v12h-17Z" /></svg><span>{folder.name}</span>
+      <span className="folder-color-mark" style={'color' in folder ? { backgroundColor: folder.color } : undefined} aria-hidden="true" /><span>{folder.name}</span>
     </button>)}
     <div className="folder-actions">{folderActions}</div>
   </aside><section className="settings-panel bibliography-panel">

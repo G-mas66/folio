@@ -109,6 +109,16 @@ function nativePdfImport(secret, bytes) {
     const word = await page.evaluate(() => window.workbench.wordPlugin('status'));
     assert.equal(word.state, 'not_installed');
     await page.getByRole('tab', { name: '书目', exact: true }).click();
+    await page.getByRole('button', { name: folder.name, exact: true }).waitFor();
+    const layout = await page.locator('.bibliography-panel').evaluate(panel => {
+      const bounds = panel.getBoundingClientRect();
+      const heading = panel.querySelector('h1').getBoundingClientRect();
+      return { padding: parseFloat(getComputedStyle(panel).paddingLeft), inset: heading.left - bounds.left };
+    });
+    assert.ok(layout.padding >= 20 && layout.inset >= 20, JSON.stringify(layout));
+    const color = await page.getByRole('button', { name: folder.name, exact: true }).locator('.folder-color-mark').evaluate(mark => mark.style.backgroundColor);
+    assert.ok(color, 'Bibliography folders preserve their library color');
+    await page.screenshot({ path: path.join(output, 'bibliography-spacing.png') });
     await page.getByRole('heading', { name: 'UNet++ acceptance fixture', exact: true }).waitFor();
     await page.locator('article').filter({ has: page.getByRole('heading', { name: 'UNet++ acceptance fixture', exact: true }) }).getByRole('button', { name: '引用', exact: true }).click();
     await page.getByText('正文引用', { exact: true }).waitFor();

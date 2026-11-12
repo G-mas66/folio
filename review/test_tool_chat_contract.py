@@ -73,6 +73,29 @@ class ToolChatReview(unittest.TestCase):
         self.assertTrue(answer['sources'])
         self.assertEqual(len(app.get_chat(paper)), 2)
 
+    def test_read_paper_merges_multiple_queries_in_one_call(self):
+        paper_id = self.ready_paper()
+        page_count = app.require_paper(paper_id)['page_count']
+        result, sources = app.read_paper_evidence(
+            paper_id, {'queries': ['QUARTZ_METHOD_N', 'QUARTZ_APPENDIX_SEED']}, page_count,
+        )
+        payload = json.loads(result)
+        self.assertEqual(payload['status'], 'ok')
+        joined = '\n'.join(excerpt['text'] for excerpt in payload['excerpts'])
+        self.assertIn('QUARTZ_METHOD_N=137', joined)
+        self.assertIn('QUARTZ_APPENDIX_SEED=811', joined)
+        self.assertGreaterEqual(len(payload['excerpts']), 2)
+        source_ids = [excerpt['source_id'] for excerpt in payload['excerpts']]
+        self.assertEqual(len(source_ids), len(set(source_ids)))
+        self.assertEqual(set(sources), set(source_ids))
+
+    def test_read_paper_rejects_invalid_multi_query_payloads(self):
+        paper_id = self.ready_paper()
+        page_count = app.require_paper(paper_id)['page_count']
+        for arguments in ({'queries': 'QUARTZ_METHOD_N'}, {'queries': ['q%d' % index for index in range(9)]}, {'queries': [17]}, {'queries': []}):
+            with self.assertRaises(app.AIError):
+                app.read_paper_evidence(paper_id, arguments, page_count)
+
     def test_full_summary_is_a_model_tool_choice_and_covers_every_page(self):
         paper = self.ready_paper('long_paper.pdf')
         question = '请解释这项研究，特别关注实验设计'
@@ -133,8 +156,27 @@ class ToolChatReview(unittest.TestCase):
         with patch.object(ai, 'chat_completion', return_value=tool_result('read_paper', {'query': 'QUARTZ_METHOD_N'})) as requests:
             with self.assertRaises(HTTPException):
                 asyncio.run(app.chat(paper, app.ChatInput(question='读取', model='chosen-A')))
-        self.assertLessEqual(requests.call_count, 10)
+        self.assertLessEqual(requests.call_count, app.CHAT_TOOL_ACTION_LIMIT + 2)
         self.assertFalse(any(item['role'] == 'assistant' for item in app.get_chat(paper)))
+
+    def test_exhausted_tool_budget_falls_back_to_a_tool_free_answer(self):
+        paper = self.ready_paper()
+        requests = []
+        def completion(messages, **kwargs):
+            requests.append(kwargs)
+            if kwargs.get('tools'):
+                return tool_result('read_paper', {'query': 'QUARTZ_METHOD_N'})
+            return {'content': '基于已读证据的最终回答。', 'usage': None}
+        with patch.object(ai, 'chat_completion', side_effect=completion):
+            answer = asyncio.run(app.chat(paper, app.ChatInput(question='这三个模型分别是什么', model='chosen-A')))
+        self.assertEqual(answer['status'], 'completed')
+        self.assertEqual(answer['answer'], '基于已读证据的最终回答。')
+        forced = [kwargs for kwargs in requests if not kwargs.get('tools')]
+        self.assertEqual(len(forced), 1, 'Exhausted budget must end with one tool-free answer round')
+        self.assertIsNone(forced[0]['tools'])
+        self.assertEqual(forced[0]['tool_choice'], 'none')
+        self.assertEqual(len(requests), app.CHAT_TOOL_ACTION_LIMIT + 2)
+        self.assertTrue(any(item['role'] == 'assistant' and '基于已读证据' in item['content'] for item in app.get_chat(paper)))
 
     def test_summary_error_retries_whole_prompt_with_original_model(self):
         paper = self.ready_paper('long_paper.pdf')

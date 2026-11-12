@@ -61,7 +61,7 @@
 }
 
 .chat-turn-mark.is-active {
-  background: #4d79ff;
+  background: #da8c72;
 }
 
 .chat-turn-mark::after {
@@ -181,7 +181,7 @@
 }
 
 .chat-search-toggle.is-enabled {
-  border-color: #d5e3d8;
+  border-color: #e1ddd7;
   color: var(--accent);
   background: var(--surface-selected);
 }

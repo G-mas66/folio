@@ -7,7 +7,7 @@
 .bibliography-folder.selected { background: var(--paper); box-shadow: inset 0 0 0 1px var(--line); }
 .bibliography-folder svg { width: 18px; height: 18px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.5; }
 .bibliography-folder span { overflow-wrap: anywhere; }
-.bibliography-panel { flex: 1; min-width: 0; }
+.settings-panel.bibliography-panel { flex: 1; min-width: 0; padding: 32px; }
 .bibliography-folder-picker { display: grid; gap: 4px; font-size: 12px; }
 .bibliography-folder-picker select { max-width: 180px; background: var(--paper); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 7px; }
 .citation-preview-text { line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; }
@@ -34,3 +34,4 @@
 :root[data-theme="dark"] .bibliography-confirm-delete { background: #963b35; }
 :root[data-theme="dark"] .bibliography-confirm-delete:hover:not(:disabled) { background: #a94a43; }
 @media (max-width: 800px) { .bibliography-item { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 800px) { .settings-panel.bibliography-panel { padding: 24px 20px; } }
