@@ -4,3 +4,4 @@ pypdf==6.1.1
 keyring==25.6.0
 pyinstaller==6.16.0
 httpx==0.28.1
+certifi>=2024.8.30

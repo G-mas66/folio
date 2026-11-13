@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
 from .db import connect, data_root
+from .tls import verified_context, network_failure
 
 PROTOCOLS = {"openai_chat_completions", "openai_responses", "custom_chat_completions"}
 API_USER_AGENT = "Folio/1.0"
@@ -506,7 +507,7 @@ def chat_completion(
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with urllib.request.urlopen(request, timeout=timeout, context=verified_context()) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read()
@@ -515,8 +516,9 @@ def chat_completion(
             raise _responses_http_error(
                 status, body, tools=tools, reasoning_controls=bool(reasoning_parameters),
             ) from None
-        except (urllib.error.URLError, TimeoutError, OSError):
-            raise AIError("network", "无法连接 AI 服务，请检查地址和网络。") from None
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            category, message = network_failure(exc)
+            raise AIError(category, message) from None
         except (json.JSONDecodeError, UnicodeDecodeError):
             raise AIError("invalid_response", "AI 服务返回的内容不是有效 JSON。") from None
         return _parse_responses_payload(payload, tools=tools, paper_id=paper_id, operation=operation)
@@ -533,7 +535,7 @@ def chat_completion(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout, context=verified_context()) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         status = exc.code
@@ -576,8 +578,9 @@ def chat_completion(
             "service_error": f"AI 服务返回 HTTP {status}。",
         }[category]
         raise AIError(category, message) from None
-    except (urllib.error.URLError, TimeoutError, OSError):
-        raise AIError("network", "无法连接 AI 服务，请检查地址和网络。") from None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        category, message = network_failure(exc)
+        raise AIError(category, message) from None
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise AIError("invalid_response", "AI 服务返回的内容不是有效 JSON。") from None
 

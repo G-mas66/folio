@@ -88,7 +88,8 @@ class ProtocolContract(unittest.TestCase):
         def response(payload):
             return io.BytesIO(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
-        def post(request, timeout):
+        def post(request, timeout, context):
+            self.assertTrue(context.check_hostname)
             sent.append(request)
             return response(tool_reply if len(sent) == 1 else final_reply)
 

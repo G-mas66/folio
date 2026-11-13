@@ -36,7 +36,8 @@ class ReasoningProtocol(unittest.TestCase):
             }}],
         }
 
-        def post(request, timeout):
+        def post(request, timeout, context):
+            self.assertTrue(context.check_hostname)
             sent.append(json.loads(request.data))
             return io.BytesIO(json.dumps(reply, ensure_ascii=False).encode("utf-8"))
 
@@ -80,7 +81,8 @@ class ReasoningProtocol(unittest.TestCase):
         ]
         sent = []
 
-        def post(request, timeout):
+        def post(request, timeout, context):
+            self.assertTrue(context.check_hostname)
             sent.append(json.loads(request.data))
             return io.BytesIO(json.dumps(replies[len(sent) - 1], ensure_ascii=False).encode("utf-8"))
 
@@ -114,7 +116,8 @@ class ReasoningProtocol(unittest.TestCase):
             ],
         }
 
-        def post(request, timeout):
+        def post(request, timeout, context):
+            self.assertTrue(context.check_hostname)
             sent.append(json.loads(request.data))
             return io.BytesIO(json.dumps(reply, ensure_ascii=False).encode("utf-8"))
 
@@ -147,7 +150,8 @@ class ReasoningProtocol(unittest.TestCase):
             "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "答案"}]}],
         }
 
-        def post(request, timeout):
+        def post(request, timeout, context):
+            self.assertTrue(context.check_hostname)
             request_bodies.append(json.loads(request.data))
             return io.BytesIO(json.dumps(response, ensure_ascii=False).encode("utf-8"))
 

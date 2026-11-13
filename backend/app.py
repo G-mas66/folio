@@ -33,9 +33,11 @@ from pydantic import BaseModel, Field, ValidationError
 
 from . import ai, free_translation, literature, research_agent
 from .ai import AIError
+from .tls import verified_context, network_failure
 from .free_translation import FreeTranslationError
 from .db import FOLDER_COLORS, connect, data_root, initialize, library_root
 from .pdf_extract import PDFProblem, detect_source_language, extract_pdf, safe_pdf_name
+from .process_environment import pdf_engine_environment
 from .research_skills import FULL_RESEARCH_GUIDANCE, RESEARCH_SKILL_ROUTING, RESEARCH_SKILL_TOOL, load_research_skill
 
 app = FastAPI(title="Personal Paper Workbench", docs_url=None, redoc_url=None, openapi_url=None)
@@ -497,7 +499,7 @@ async def run_pdf_engine(paper_id: str, *, ocr_only: bool = False) -> tuple[str,
     source = cached_ocr if not ocr_only and cached_ocr and cached_ocr.is_file() else original
     command = [helper, entry] if entry else [helper]
     command += (["--ocr"] if ocr_only else []) + [str(source), str(output), str(home)]
-    environment = os.environ.copy()
+    environment = pdf_engine_environment(entry=entry)
     environment["WORKBENCH_PDF_ENGINE_ASSETS"] = assets
     environment["WORKBENCH_OCR_LANGUAGE"] = ocr_preferences()["language"]
     environment["WORKBENCH_PDF_OCR_INPUT"] = "1" if source != original else "0"
@@ -1394,8 +1396,8 @@ def discover_models(value: ModelDiscoveryInput):
     if not api_key:
         try:
             api_key = ai.saved_api_key()
-        except AIError:
-            api_key = ""
+        except AIError as exc:
+            raise HTTPException(status_code=502, detail={"category": exc.category, "message": "无法读取已保存的 API 密钥，请解锁系统钥匙串或重新填写密钥。"}) from None
     headers = {"Accept": "application/json", "User-Agent": ai.API_USER_AGENT}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -1410,7 +1412,7 @@ def discover_models(value: ModelDiscoveryInput):
             return None
 
     try:
-        opener = urllib.request.build_opener(NoRedirect)
+        opener = urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=verified_context()))
         with opener.open(request, timeout=20) as response:
             payload = json.loads(response.read(2 * 1024 * 1024 + 1).decode("utf-8"))
     except urllib.error.HTTPError as exc:
@@ -1425,8 +1427,9 @@ def discover_models(value: ModelDiscoveryInput):
         else:
             message = f"模型列表请求失败（HTTP {status}）；也可手动添加模型名称。"
         raise HTTPException(status_code=502, detail={"category": "models_service", "message": message}) from None
-    except (urllib.error.URLError, TimeoutError, OSError):
-        raise HTTPException(status_code=502, detail={"category": "network", "message": "无法连接模型列表地址；也可手动添加模型名称。"}) from None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        category, message = network_failure(exc)
+        raise HTTPException(status_code=502, detail={"category": category, "message": message + "也可手动添加模型名称。"}) from None
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise HTTPException(status_code=502, detail={"category": "models_response", "message": "模型列表服务返回的内容不是有效 JSON；也可手动添加模型名称。"}) from None
     if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):

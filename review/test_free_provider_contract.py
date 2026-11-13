@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import ssl
 from pathlib import Path
 import tempfile
 import threading
@@ -37,6 +38,28 @@ class FreeProviderContractReview(unittest.TestCase):
     def client(self, handler):
         return patch.object(free_translation.httpx, "AsyncClient", side_effect=lambda **kwargs:
             self.client_type(transport=httpx.MockTransport(handler), **kwargs))
+
+    def test_tls_failure_is_actionable_and_not_retried(self):
+        calls = []
+
+        def handle(request):
+            if request.method == "GET":
+                return httpx.Response(200, json={"qps": 10, "max_pool_size": 10})
+            calls.append(request)
+            raise httpx.ConnectError("sensitive-proxy-detail", request=request) from ssl.SSLCertVerificationError(1, "private-certificate-detail")
+
+        async def run():
+            async with free_translation.FreeTranslationClient() as translator:
+                with self.assertRaises(free_translation.FreeTranslationError) as caught:
+                    await translator.translate("Synthetic title")
+                self.assertEqual(caught.exception.category, "tls")
+                self.assertIn("SSL_CERT_FILE", caught.exception.message)
+                self.assertNotIn("private-certificate-detail", caught.exception.message)
+                self.assertNotIn("sensitive-proxy-detail", caught.exception.message)
+
+        with self.client(handle):
+            asyncio.run(run())
+        self.assertEqual(len(calls), 1)
 
     def test_default_handshake_and_complete_text_use_the_project_service_contract(self):
         calls = []

@@ -13,6 +13,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .tls import network_failure
+
 API_URL = "https://api1.pdf2zh-next.com/chatproxy"
 API_URLS = (API_URL, "https://api2.pdf2zh-next.com/chatproxy")
 DEFAULT_QPS = 10
@@ -159,7 +161,10 @@ class FreeTranslationClient:
                         self._retry_transient(attempt)
                         continue
                     raise FreeTranslationError("timeout", "免费翻译服务连接超时，本段尚未完成。") from None
-                except httpx.RequestError:
+                except httpx.RequestError as exc:
+                    category, message = network_failure(exc)
+                    if category == "tls":
+                        raise FreeTranslationError(category, message) from None
                     if attempt < MAX_RATE_LIMIT_RETRIES:
                         self._retry_transient(attempt)
                         continue

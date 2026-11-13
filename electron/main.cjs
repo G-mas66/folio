@@ -386,8 +386,8 @@ async function startBackend() {
       ? path.join(process.resourcesPath, 'pdf-engine', process.platform === 'win32' ? 'workbench-pdf-engine.exe' : 'workbench-pdf-engine')
       : process.platform === 'win32'
         ? path.join(projectRoot, '.venv-pdf-engine', 'Scripts', 'python.exe')
-        : path.join(projectRoot, '.venv-pdf-engine-macos', 'bin', 'python'),
-    WORKBENCH_PDF_ENGINE_ENTRY: app.isPackaged ? '' : path.join(projectRoot, 'backend', 'pdf_engine', 'entrypoint.py'),
+        : (process.env.WORKBENCH_PDF_ENGINE_BIN || path.join(projectRoot, 'backend', 'dist', 'workbench-pdf-engine', 'workbench-pdf-engine')),
+    WORKBENCH_PDF_ENGINE_ENTRY: app.isPackaged || process.platform === 'darwin' ? '' : path.join(projectRoot, 'backend', 'pdf_engine', 'entrypoint.py'),
     WORKBENCH_PDF_ENGINE_ASSETS: app.isPackaged
       ? path.join(process.resourcesPath, 'pdf-engine-assets', 'babeldoc')
       : path.join(projectRoot, 'backend', 'pdf_engine_assets', 'babeldoc'),

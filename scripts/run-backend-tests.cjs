@@ -34,6 +34,7 @@ const modules = [
   'backend_tests.test_pdf_output_validation',
   'backend_tests.test_local_ocr_contract',
   'backend_tests.test_web_source_binding',
+  'backend_tests.test_tls', 'backend_tests.test_process_environment',
 ];
 const env = {
   ...process.env,

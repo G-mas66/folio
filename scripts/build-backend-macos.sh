@@ -21,6 +21,7 @@ cd "$ROOT"
   --workpath "$ROOT/backend/build-macos" \
   --specpath "$ROOT/backend/build-macos" \
   --paths "$ROOT" \
+  --collect-data certifi \
   --collect-submodules keyring.backends \
   --hidden-import keyring.backends.macOS \
   backend/entrypoint.py

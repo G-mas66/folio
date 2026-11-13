@@ -9,6 +9,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const semver = require('semver');
 const { _electron } = require('playwright');
 const { selectMacUpdate } = require('../electron/update-service.cjs');
+const { resolveLocationConfig } = require('../electron/storage-location.cjs');
 
 const root = path.resolve(__dirname, '..');
 const runRoot = path.resolve(process.env.RUNNER_TEMP || process.cwd(), 'folio-macos-smoke');
@@ -98,6 +99,116 @@ async function waitForPaper(page, predicate, timeout = 60000) {
     await new Promise(resolve => setTimeout(resolve, 250));
   }
   throw new Error('The imported Chinese PDF did not become readable.');
+}
+
+function translationFailureStatus(detail) {
+  if (/(?:certificate|CERTIFICATE_VERIFY_FAILED|\bSSL\b|\bTLS\b|TLSv\d+|CERT_(?:AUTHORITY|COMMON_NAME|DATE)_INVALID)/i.test(detail)) return 'tls_failure';
+  if (/(?:\bdlopen\b|Symbol not found|Library not loaded|image not found|DLL load failed)/i.test(detail)) return 'failed';
+  if (/(?:timeout|timed out|timedout)/i.test(detail)) return 'translation_timeout';
+  if (/(?:ECONN(?:REFUSED|RESET)|ENOTFOUND|EAI_AGAIN|cannot connect|could not connect|connection (?:refused|reset|failed)|network is unreachable|name or service not known|could not resolve|HTTP\s*[45]\d{2}|\b(?:429|500|502|503|504)\b)/i.test(detail)) return 'external_service_unavailable';
+  return 'failed';
+}
+
+async function smokeApi(page, input, evidence) {
+  evidence.requests.push({ method: input.method || 'GET', path: input.path, at: new Date().toISOString() });
+  return page.evaluate(async input => {
+    const result = await window.workbench.request(input);
+    return input.binary ? Array.from(result) : result;
+  }, input);
+}
+
+async function waitForTranslation(page, id, evidence, timeout = 300000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const paper = await smokeApi(page, { path: '/papers/' + id }, evidence);
+    const snapshot = { status: paper.status, progress: paper.pdf_progress, error: paper.error || '', chinese_title: paper.chinese_title };
+    if (JSON.stringify(evidence.states.at(-1)) !== JSON.stringify(snapshot)) evidence.states.push(snapshot);
+    evidence.final_paper = paper;
+    if (paper.status === 'completed') {
+      assert.equal(paper.can_read, true, 'Backend completed state must expose readable translated PDFs.');
+      assert.equal(paper.pdf_progress, 100);
+      assert.ok(paper.mono_pdf_file_name && paper.dual_pdf_file_name, 'Backend must commit both translated PDF names.');
+      return paper;
+    }
+    if (['error', 'waiting_api', 'needs_title', 'needs_attention', 'needs_ocr', 'stopped'].includes(paper.status)) {
+      throw new Error('Backend translation stopped at ' + paper.status + ': ' + (paper.error || 'no error detail'));
+    }
+    assert.ok(['queued', 'translating', 'checking'].includes(paper.status), 'Unexpected backend translation status: ' + paper.status);
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  throw new Error('Packaged backend translation timed out before validated Chinese and bilingual PDFs were ready.');
+}
+
+async function checkBackendTranslation(page, source, python, env) {
+  const evidence = report.free_translation = {
+    status: 'running', route: 'packaged_electron_ipc_to_frozen_backend_to_packaged_engine',
+    backend, engine, source_sha256: crypto.createHash('sha256').update(fs.readFileSync(source)).digest('hex'), cases: [],
+  };
+  try {
+    // Import paused: no direct engine invocation and no live database edits.
+    const first = { name: 'empty_chinese_title', requests: [], states: [] };
+    evidence.cases.push(first);
+    const imported = await smokeApi(page, { method: 'POST', path: '/papers/import', body: { paths: [source], defer_translation: true } }, first);
+    assert.equal(imported.results.length, 1);
+    assert.equal(imported.results[0].duplicate, false, 'Translation must not reuse outputs from a previous smoke run.');
+    const initial = imported.results[0].paper;
+    first.imported_paper = initial;
+    assert.notEqual(initial.source_language, 'zh', 'English fixture must take the translation path.');
+    assert.equal(initial.chinese_title, '');
+    assert.equal(initial.mono_pdf_file_name, '');
+    assert.equal(initial.dual_pdf_file_name, '');
+    const id = initial.id;
+    const title = initial.english_title.trim() || 'A Short Synthetic Measurement Study';
+    const outputRoot = path.join(runRoot, 'backend-translation-evidence');
+    fs.mkdirSync(outputRoot, { recursive: true });
+    for (const [index, chineseTitle] of ['', '合成测量研究中文标题'].entries()) {
+      const item = index === 0 ? first : { name: 'supplied_chinese_title', requests: [], states: [] };
+      if (index) evidence.cases.push(item);
+      const previous = index ? evidence.cases[0].final_paper : initial;
+      // Title PATCH schedules both title-translation and prefilled-title branches.
+      item.title_request = { english_title: title, chinese_title: chineseTitle };
+      item.started_paper = await smokeApi(page, { method: 'PATCH', path: '/papers/' + id + '/title', body: item.title_request }, item);
+      const paper = await waitForTranslation(page, id, item);
+      assert.match(paper.chinese_title, /[\u4e00-\u9fff]/, 'Translated title must contain Chinese.');
+      if (chineseTitle) assert.equal(paper.chinese_title, chineseTitle);
+      assert.notEqual(paper.mono_pdf_file_name, previous.mono_pdf_file_name, 'A new engine run must commit fresh output names.');
+      assert.notEqual(paper.dual_pdf_file_name, previous.dual_pdf_file_name);
+      item.artifacts = [];
+      for (const kind of ['original', 'mono', 'dual']) {
+        const bytes = Buffer.from(await smokeApi(page, { path: '/papers/' + id + '/pdf?kind=' + kind, binary: true }, item));
+        assert.equal(bytes.subarray(0, 5).toString(), '%PDF-', 'Backend response must be a PDF.');
+        const file = path.join(outputRoot, item.name + '-' + kind + '.pdf');
+        fs.writeFileSync(file, bytes);
+        const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+        if (kind === 'original') assert.equal(sha256, evidence.source_sha256, 'Backend must preserve source bytes.');
+        item.artifacts.push({ kind, path: file, bytes: bytes.length, sha256 });
+      }
+      // completed + can_read is only committed after frozen backend validate_pdf_outputs.
+      // Independently inspect downloaded bytes, never engine scratch files.
+      const verify = await run(python, ['-c', [
+        'import json, sys',
+        'from pypdf import PdfReader',
+        'paths = json.loads(sys.argv[1])',
+        'readers = [PdfReader(p, strict=True) for p in paths]',
+        'assert all(len(r.pages) == int(sys.argv[2]) for r in readers), "PDF page count mismatch"',
+        'texts = ["\\n".join(p.extract_text() or "" for p in r.pages) for r in readers]',
+        'assert all(any("\\u4e00" <= c <= "\\u9fff" for c in t) for t in texts[1:]), "translated PDFs contain no Chinese text"',
+        'assert "137" in texts[2], "bilingual PDF lost original sample-count evidence"',
+        'print(json.dumps({"status":"passed","files":len(paths),"pages":[len(r.pages) for r in readers],"chinese_in_both_outputs":True,"bilingual_original_evidence":True}))',
+      ].join('; '), JSON.stringify(item.artifacts.map(file => file.path)), String(paper.page_count)], { env, timeout: 60000 });
+      assert.equal(verify.code, 0, 'Backend PDF validation failed: ' + verify.stderr.slice(-1200));
+      item.validation = JSON.parse(verify.stdout.trim().split(/\r?\n/).at(-1));
+      item.backend_validation = 'completed_can_read_after_validate_pdf_outputs';
+      item.status = 'success';
+    }
+    evidence.status = 'success';
+    evidence.outputs = 4;
+  } catch (error) {
+    evidence.status = translationFailureStatus(String(error.message || error));
+    evidence.detail = String(error.stack || error).slice(-2400);
+    // External outages are diagnostic categories, never release-gate exceptions.
+    throw new Error('Packaged backend translation release gate failed (' + evidence.status + '): ' + error.message);
+  }
 }
 
 function createProvider() {
@@ -212,6 +323,9 @@ async function main() {
   env.TEMP = runRoot;
   env.TMP = runRoot;
   env.WORKBENCH_CREDENTIAL_ROOT = path.join(runRoot, 'app-keychain-identity');
+  const isolatedAppRoot = fs.mkdtempSync(path.join(runRoot, 'app-run-'));
+  env.WORKBENCH_DATA_DIR = path.join(isolatedAppRoot, 'data');
+  env.WORKBENCH_LOCATION_CONFIG = path.join(isolatedAppRoot, 'location.json');
   env.PYTHONPATH = root;
   const generatedApiKey = `folio-macos-smoke-${crypto.randomUUID()}`;
 
@@ -288,10 +402,16 @@ async function main() {
     const appInfo = await library.evaluate(() => window.workbench.getAppInfo());
     const appDataRoot = await application.evaluate(({ app }) => app.getPath('appData'));
     const expectedDataRoot = path.join(appDataRoot, '阅川 Folio', 'data');
-    assert.equal(path.resolve(appInfo.dataRoot), path.resolve(expectedDataRoot), 'macOS must default to user Application Support data.');
-    assert.equal(path.resolve(appInfo.uiDataRoot), path.join(path.resolve(expectedDataRoot), 'electron-userData'));
-    assert.equal(path.resolve(appInfo.locationConfigPath), path.join(appDataRoot, '阅川 Folio', 'config', 'location.json'));
-    report.checks.default_paths = appInfo;
+    // Check default-path resolution without opening a real user's location file or library.
+    const defaultConfig = path.join(appDataRoot, '阅川 Folio', 'config', 'location.json');
+    const defaults = resolveLocationConfig(path.join(runRoot, `absent-default-${crypto.randomUUID()}.json`), {}, expectedDataRoot, defaultConfig);
+    assert.equal(defaults.dataRoot, path.resolve(expectedDataRoot));
+    assert.equal(defaults.uiDataRoot, path.join(path.resolve(expectedDataRoot), 'electron-userData'));
+    assert.equal(path.resolve(appInfo.dataRoot), env.WORKBENCH_DATA_DIR, 'Packaged smoke must use only the isolated library.');
+    assert.equal(path.resolve(appInfo.uiDataRoot), path.join(env.WORKBENCH_DATA_DIR, 'electron-userData'));
+    assert.equal(path.resolve(appInfo.locationConfigPath), env.WORKBENCH_LOCATION_CONFIG);
+    report.checks.default_paths = { dataRoot: defaults.dataRoot, uiDataRoot: defaults.uiDataRoot, locationConfigPath: defaultConfig, validation: 'resolver_only_no_user_data_access' };
+    report.checks.isolated_paths = appInfo;
 
     const feedbackMessage = 'macOS packaged feedback IPC smoke check';
     try {
@@ -424,6 +544,7 @@ async function main() {
     await library.getByTestId('folder-nav-recent').click();
     await library.getByTestId(`paper-row-${paper.id}`).waitFor();
     report.checks.recent_reading = 'passed';
+    await checkBackendTranslation(library, translationPdf, python, env);
     assert.deepEqual(browserErrors, []);
   } catch (error) {
     smokeFailure = error;
@@ -502,39 +623,8 @@ async function main() {
   if (smokeFailure) throw smokeFailure;
   if (cleanupErrors.length) throw new Error(`macOS smoke cleanup failed: ${cleanupErrors.join('\n')}`);
 
-  const translationOutput = path.join(runRoot, 'free-translation-output');
-  const translationHome = path.join(runRoot, 'free-translation-runtime');
-  const translation = await run(engine, [translationPdf, translationOutput, translationHome], {
-    env: engineEnv,
-    timeout: 300000,
-  });
-  const translationEvents = jsonEvents(translation.stdout);
-  const finish = translationEvents.find(event => event.type === 'finish');
-  if (translation.code === 0 && finish) {
-    const outputs = [finish.mono_pdf_path, finish.dual_pdf_path];
-    assert.ok(outputs.every(file => file && fs.existsSync(file) && fs.statSync(file).size > 0), 'Free translation must emit Chinese and bilingual PDFs.');
-    const verify = await run(python, ['-c', [
-      'import json, sys',
-      'from pypdf import PdfReader',
-      'paths = json.loads(sys.argv[1])',
-      'texts = ["\\n".join(page.extract_text() or "" for page in PdfReader(path).pages) for path in paths]',
-      'assert all(any("\\u4e00" <= char <= "\\u9fff" for char in text) for text in texts), "translated PDFs contain no Chinese text"',
-      'print(json.dumps({"status":"passed","files":len(paths)}))',
-    ].join('; '), JSON.stringify(outputs)], { env, timeout: 60000 });
-    assert.equal(verify.code, 0, `Translated PDF validation failed: ${verify.stderr.slice(-1200)}`);
-    report.free_translation = { status: 'success', outputs: 2, validation: JSON.parse(verify.stdout.trim().split(/\r?\n/).at(-1)) };
-  } else {
-    const failureEvent = translationEvents.find(event => event.type === 'error');
-    const detail = String(failureEvent?.message || translation.stderr || translation.stdout || translation.signal || `exit ${translation.code}`).slice(-1800);
-    const nativeLoadFailure = /(?:\bdlopen\b|\bSymbol not found\b|\bLibrary not loaded\b|\bimage not found\b|\bDLL load failed\b)/i.test(detail);
-    const external = !nativeLoadFailure && /(?:ECONN(?:REFUSED|RESET|TIMEDOUT)|connect(?:ion)?error|cannot connect|could not connect|connection (?:refused|reset|failed)|ENOTFOUND|EAI_AGAIN|network is unreachable|name or service not known|temporary failure in name resolution|could not resolve|(?:SSL|TLS)(?:v\d+(?:\.\d+)?)? handshake (?:failed|failure)|(?:SSL|TLS)(?:v\d+(?:\.\d+)?)? alert|TLSv\d+_ALERT_[A-Z0-9_]+|certificate verify failed|CERTIFICATE_VERIFY_FAILED|HTTP\s*(?:4|5)\d{2}|\b(?:429|500|502|503|504)\b|status code.*\b(?:4|5)\d{2})/i.test(detail);
-    const timedOut = translation.timedOut || /\b(?:timeout|timed out|timedout)\b/i.test(detail);
-    const status = nativeLoadFailure ? 'failed' : timedOut ? 'translation_timeout' : external ? 'external_service_unavailable' : 'failed';
-    report.free_translation = { status, ...(status === 'translation_timeout' ? { cause: 'undetermined' } : {}), detail };
-    if (status === 'failed') throw new Error(`Free translation smoke failed outside a recognizable external-service failure: ${detail}`);
-  }
-
-  report.result = report.free_translation.status === 'success' ? 'passed' : 'core_checks_passed_translation_unverified';
+  assert.equal(report.free_translation.status, 'success', 'Release requires successful packaged backend translation.');
+  report.result = 'passed';
   fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
   console.log(`MACOS_SMOKE_REPORT ${reportPath}`);
   console.log(JSON.stringify(report));

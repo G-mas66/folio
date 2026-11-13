@@ -1,11 +1,18 @@
 """Verify automatic model discovery with real HTTP and isolated credentials."""
 import json
+import os
+import ssl
+import sys
+from types import SimpleNamespace
+import urllib.error
+import urllib.request
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from backend import ai
+from backend import ai, app
+from backend_tests.test_tls import local_https_catalog
 from review import test_translation_flow as flow
 from review import test_model_discovery_contract as discovery
 
@@ -14,6 +21,11 @@ class AutomaticModelsReview(unittest.TestCase):
     request = discovery.ModelDiscoveryReview.request
 
     def setUp(self):
+        # Never import or access the user's real OS credential-store backend.
+        keyring = SimpleNamespace(get_password=Mock(return_value=None), set_password=Mock())
+        self.keyring_module = patch.dict(sys.modules, {'keyring': keyring})
+        self.keyring_module.start()
+        self.addCleanup(self.keyring_module.stop)
         flow.TranslationFlowReview.setUp(self)
         self.requests = []
         self.user_agents = []
@@ -132,6 +144,63 @@ class AutomaticModelsReview(unittest.TestCase):
         self.assertEqual(result.status_code, 502, result.text)
         self.assertEqual(self.requests, [('/v1/models', 'Bearer review-only-redirect-key')])
         self.assertNotIn('review-only-redirect-key', result.text)
+
+    def test_keyring_failure_is_credential_store_and_never_sends_request(self):
+        secret = 'review-only-locked-keyring-secret'
+        self.key_reader.side_effect = RuntimeError(secret)
+        with patch.object(app.urllib.request, 'build_opener') as build:
+            result = self.discover(self.origin + '/v1')
+        self.assertEqual(result.status_code, 502, result.text)
+        self.assertEqual(result.json()['detail']['category'], 'credential_store')
+        self.assertNotIn(secret, result.text)
+        build.assert_not_called()
+        self.assertEqual(self.requests, [])
+
+    def test_explicit_key_bypasses_unavailable_keyring(self):
+        self.key_reader.side_effect = RuntimeError('keyring must not be touched')
+        result = self.discover(self.origin + '/v1', api_key='review-only-explicit-key')
+        self.assertEqual(result.status_code, 200, result.text)
+        self.key_reader.assert_not_called()
+        self.assertEqual(self.requests, [('/v1/models', 'Bearer review-only-explicit-key')])
+        self.assertNotIn('review-only-explicit-key', result.text)
+
+    def test_network_failure_categories_never_return_key_or_raw_exception(self):
+        key = 'review-only-network-secret'
+        for error, category in [
+            (urllib.error.URLError(ssl.SSLCertVerificationError(1, key)), 'tls'),
+            (ssl.SSLError(1, key), 'tls'),
+            (urllib.error.URLError(TimeoutError(key)), 'timeout'),
+            (TimeoutError(key), 'timeout'),
+            (urllib.error.URLError(key), 'network'),
+        ]:
+            with self.subTest(category=category, error=type(error).__name__):
+                with patch.object(urllib.request.OpenerDirector, 'open', side_effect=error) as send:
+                    result = self.discover(self.origin + '/v1', api_key=key)
+                self.assertEqual(result.status_code, 502, result.text)
+                self.assertEqual(result.json()['detail']['category'], category)
+                self.assertNotIn(key, result.text)
+                self.assertIn('手动添加', result.text)
+                send.assert_called_once()
+        self.assertEqual(self.requests, [])
+
+    def test_https_discovery_uses_explicit_ca_and_rejects_wrong_trust_or_host(self):
+        key = 'review-only-https-secret'
+        with local_https_catalog() as (root, port, requests):
+            for ca, host, succeeds in [('ca.pem', 'localhost', True), ('other.pem', 'localhost', False), ('ca.pem', '127.0.0.1', False)]:
+                with self.subTest(ca=ca, host=host):
+                    environment = dict(os.environ)
+                    environment.pop('SSL_CERT_DIR', None)
+                    environment['SSL_CERT_FILE'] = str(root / ca)
+                    # Local regressions must not use a user's configured proxy.
+                    with patch.dict(os.environ, environment, clear=True), patch.object(urllib.request, 'getproxies', return_value={}):
+                        result = self.discover(f'https://{host}:{port}/v1', api_key=key)
+                    self.assertEqual(result.status_code, 200 if succeeds else 502, result.text)
+                    self.assertNotIn(key, result.text)
+                    if succeeds:
+                        self.assertEqual(result.json()['models'], ['temporary-https-model'])
+                    else:
+                        self.assertEqual(result.json()['detail']['category'], 'tls')
+            self.assertEqual(requests, [('/v1/models', 'Bearer ' + key)])
 
     def test_bad_urls_never_issue_external_requests(self):
         for supplied in ['', 'file:///tmp/models', self.origin + '/v1#private', 'http://user:review-password@127.0.0.1/v1']:
